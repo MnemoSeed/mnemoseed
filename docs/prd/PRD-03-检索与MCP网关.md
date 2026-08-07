@@ -16,7 +16,8 @@
 
 | ID | 需求 | 优先级 |
 |---|---|---|
-| FR-3.1 | MCP 工具集：`memory.recall` / `memory.remember`(显式 pin) / `memory.audit`(溯源查询) / `memory.timeline`(时间轴) | P0 |
+| FR-3.1 | MCP 工具集：`memory.recall` / `memory.remember`(显式 pin) / `memory.audit`(溯源查询) / `memory.timeline`(时间轴) / `memory.export`(全量导出可读格式) / `memory.forget_this`(用户显式删除权，GDPR 被遗忘权合规) | P0 |
+| FR-3.1b | SessionStart 暖场注入：新 session 开启时主动推送"近期记忆摘要"开场上下文，而非被动等 recall（借自 Claude-Mem 生命周期 hook） | P1 |
 | FR-3.2 | 线索提取：从当前对话前文解析实体/项目/工具/意图，生成检索 cues | P0 |
 | FR-3.3 | 并发双路：Chroma 语义近邻（含线索过滤）+ 图谱实体子图 2-hop 遍历 | P0 |
 | FR-3.4 | 融合重排公式 `α·语义 + β·线索重叠 + γ·decay_weight + δ·图谱中心性`，权重可配置 | P0 |

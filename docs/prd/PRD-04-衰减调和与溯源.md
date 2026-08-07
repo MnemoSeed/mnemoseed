@@ -20,7 +20,11 @@
 | FR-4.2 | 强化回弹：检索使用事件触发 `last_reinforced=now`、`w` 回弹（spacing effect） | P0 |
 | FR-4.3 | 软衰落阶梯：w<0.4 沉底（不进 top-k）→ w<0.1 冻结（不检索）→ w<0.05 且 90 天无访问归档（移出索引）；显式查询可复活（w→0.5） | P0 |
 | FR-4.4 | 永不衰减白名单：provenance、用户 pin、compliance/safety 约束 | P0 |
-| FR-4.5 | 写入侧冲突检测：同主同谓比对 → 相同强化 / 可裁决则 invalidate 接管 / 不可裁决 flag_conflict | P0 |
+| FR-4.5 | 写入侧冲突检测：同主同谓比对 → 相同强化 / **cues 可划界则情境作用域共存** / 可裁决则 invalidate 接管 / 不可裁决 flag_conflict（四分支，情境共存优先于裁决） | P0 |
+| FR-4.5b | 冲突确认渲染接口：引擎只输出结构化冲突对象（old/new + provenance），措辞由 Persona 层按其语气渲染为拟人对话，引擎不得自带话术 | P0 |
+| FR-4.1b | 动态 λ 自校准：按沉底记忆的复活率反馈调节各层 λ（预留接口，初值手工） | P2 |
+| FR-4.3b | 源失效降权：provenance.source 失效的记忆自动额外降权（MemPalace sync 模式） | P1 |
+| FR-4.2b | 捕获时赫布强化：近重复命中即回弹，不等做梦（与 PRD-01 写入前 dedup 检查联动） | P0 |
 | FR-4.6 | 提取侧再巩固：检索命中开 labile 窗口，新矛盾事实改写旧槽位，旧版本入历史链（valid_to），绝不物理删除 | P0 |
 | FR-4.7 | 裁决判据：时间戳明确性 + 来源权威度差（user 显式 > Tier1 推断 > Tier3 推断） | P0 |
 | FR-4.8 | 审计接口：任意记忆返回完整 provenance.history（创建/改写链） | P0 |

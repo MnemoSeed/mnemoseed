@@ -15,6 +15,7 @@
 | [02-梦境引擎](design/02-梦境引擎.md) | 触发状态机、快照隔离、中断保护、双轨分流写入、增量脱水 |
 | [03-存储与检索](design/03-存储与检索.md) | 混合双库总线、STORAGE_MODE 路由矩阵、混合检索、抗稀释策略 |
 | [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、Persona 解耦、BYOK/TEE 零知识架构 |
+| [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
 
 ### 开发任务 PRD（prd/）
 
@@ -36,4 +37,6 @@
 ## 外部理论来源
 
 1. **wast3《Memory Engineering》**（X, 2026-08-04, 182.8K views）—— 五阶段记忆管线框架（Capture/Consolidate/Retrieve/Reconcile/Decay）及评论区 Provenance 补充。本文档不是照抄，而是将其映射到互补学习系统（CLS）、再巩固（Reconsolidation）、突触稳态（SHY）等脑神经科学机制上重新推导。
-2. **MnemoSeed 白皮书 v3.1 / PRD v3.0 / 创世白皮书**（JH 与 Google AI Mode 前期讨论产物）—— 双库架构、梦境引擎、认知分级、脱水节流阀、定价与 PLG 战略。
+2. **N01ennn《How to be a Memory Engineer》**（X, 2026-08-03）—— Stanford/Microsoft/Anthropic/Nvidia 四透镜，15 步工程纪律。拆解与取舍见 design/05。
+3. **Claude-Mem / MemPalace** —— 两个实际运行中的记忆系统的概念拆解与取舍（design/05）。
+4. **MnemoSeed 白皮书 v3.1 / PRD v3.0 / 创世白皮书**（前期讨论产物）—— 双库架构、梦境引擎、认知分级、脱水节流阀、定价与 PLG 战略。
