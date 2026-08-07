@@ -25,6 +25,7 @@
 | FR-5.7 | 计费：Profile 数量 + 脑容量算力币混合计费；$5 = 1M 算力点；免费版每月 500k 增量做梦额度（标准版内） | P0 |
 | FR-5.8 | 云端多用户账号体系：邮箱注册 + Google sign-up（OAuth 绑定官方域名）；团队邀请与席位管理 | P0 |
 | FR-5.9 | Commercial License 渠道：自部署多用户激活（Ed25519 签名 license 离线验签，entitlements: multi_user/seats/有效期）；到期宽限 30 天，超期多用户登录停用但 owner 与数据完好（永不动数据）；自部署可自配 Google OAuth client | P0 |
+| FR-5.10 | Admin Plane 超管界面：服务健康/增长销售（注册/漏斗/MRR/license 激活）/用户运营（配额/封禁）/计费成本（模型路由分解/毛利率/TEE 利用率）；**红线：仅运营元数据，记忆明文物理不可见（BYOK 架构保证，非纪律）**；超管独立强认证（TOTP/硬件密钥），全部操作进不可变审计日志 | P0 |
 
 ## 4. 非功能需求
 
