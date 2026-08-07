@@ -23,6 +23,8 @@
 | FR-5.5 | Attestation 验证接口：客户端可密码学校验 Enclave 内跑的是官方未篡改镜像 | P0 |
 | FR-5.6 | 动态路由：长背景深反思 → Claude 5 Sonnet（Prompt Cache $0.30/M）；<5k 短增量 → GPT-5.6 Terra（$2.00/M input） | P0 |
 | FR-5.7 | 计费：Profile 数量 + 脑容量算力币混合计费；$5 = 1M 算力点；免费版每月 500k 增量做梦额度（标准版内） | P0 |
+| FR-5.8 | 云端多用户账号体系：邮箱注册 + Google sign-up（OAuth 绑定官方域名）；团队邀请与席位管理 | P0 |
+| FR-5.9 | Commercial License 渠道：自部署多用户激活（Ed25519 签名 license 离线验签，entitlements: multi_user/seats/有效期）；到期宽限 30 天，超期多用户登录停用但 owner 与数据完好（永不动数据）；自部署可自配 Google OAuth client | P0 |
 
 ## 4. 非功能需求
 

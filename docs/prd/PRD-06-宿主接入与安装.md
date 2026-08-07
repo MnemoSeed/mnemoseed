@@ -20,6 +20,8 @@
 | FR-6.1b | `mnemoseed login [--baseurl]`：本地免密确认 / 云端账号认证；profile 创建与 token 签发（identity 模型见 design/06 §2.5） | P0 |
 | FR-6.1c | `mnemoseed link/unlink`：逐 agent 选 profile，把 `profile_id + token` 以 env 形式写入各 agent 原生配置（MCP 条目 / OpenClaw/Hermes 各自 config / Claude Code user+project scope）；宿主界面永远只有一条 mnemoseed | P0 |
 | FR-6.1d | `mnemoseed whoami`：当前环境身份自证（profile/daemon/token 有效性）；`mnemoseed status` 回读全部宿主配置生成绑定总表 | P0 |
+| FR-6.1e | 首次注册流程：daemon 首启无 owner → setup 态（记忆 API 503 + 指引，仅 `/console/setup` 可用）；setup 创建 owner（argon2 密码哈希），仅允许一次，此后端点永久关闭；`mnemoseed auth reset` 本机重置密码 | P0 |
+| FR-6.1f | 开源版单用户硬限：用户管理仅 owner，"添加用户"锁定并注明激活路径（官方云端 / commercial license）；license 激活入口（Ed25519 离线验签，entitlements 含 multi_user/seats/有效期，到期宽限 30 天且永不动数据） | P0 |
 | FR-6.2 | daemon embedded 模式：单进程内嵌 Chroma + SQLite-Graph + embedding-gemma（量化模型下载含断点续传），零 Docker 依赖 | P0 |
 | FR-6.3 | Claude Code plugin（marketplace 分发）：SessionStart 暖场注入（additionalContext ≤800 tokens）/ UserPromptSubmit+PostToolUse 自动捕获 / PreCompact flush / SessionEnd 结算；slash commands：/memory /dream /forget /recall | P0 |
 | FR-6.4 | hook 直连 daemon localhost HTTP，不经 MCP，2s 超时 fail-open，零 token 消耗 | P0 |
