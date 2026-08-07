@@ -34,6 +34,10 @@
 |---|---|
 | [推广计划 v2](marketing/推广计划-v2.md) | PLG 三部曲、竞争象限、收费设计 |
 
+## 理论文献备案
+
+**[REFERENCES.md](REFERENCES.md)** —— 所有引用理论的完整出处与核实状态（✅ Crossref 已核实 / 📕 经典专著 / ⚠️ 待抽查）。铁律：未验证的信息必须标注，不允许靠推测或记忆充数。
+
 ## 外部理论来源
 
 1. **wast3《Memory Engineering》**（X, 2026-08-04, 182.8K views）—— 五阶段记忆管线框架（Capture/Consolidate/Retrieve/Reconcile/Decay）及评论区 Provenance 补充。本文档不是照抄，而是将其映射到互补学习系统（CLS）、再巩固（Reconsolidation）、突触稳态（SHY）等脑神经科学机制上重新推导。

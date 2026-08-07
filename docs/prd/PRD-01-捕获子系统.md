@@ -19,7 +19,7 @@
 | FR-1.1 | MCP 网关拦截每场对话的每个 Turn，提取 user/assistant 消息与 tool_call 序列 | P0 |
 | FR-1.2 | Local Stripper 规则引擎：剥离编译日志、包管理输出、死循环报错堆栈、ANSI 高亮符；规则集可热更新 | P0 |
 | FR-1.3 | 持久性分类（三个月测试）：规则（时间限定词/情绪词表）+ 边缘小模型二分类（durable/disposable） | P0 |
-| FR-1.4 | 三向量评分 `S = w₁·情绪 + w₂·新颖度 + w₃·因果链`，权重可配置 | P0 |
+| FR-1.4 | 评分 `S = w₁·min(arousal,θ_cap) + w₂·新颖度 + w₃·因果链`（arousal 截顶、valence 仅存 cues、emotion 永不进 confidence——依据见 design/01 §1.6），权重可配置 | P0 |
 | FR-1.5 | 积分池：累计 S；`pool ≥ 10.0 且 idle ≥ 5s` 发出梦境触发事件；硬上限 50.0 强制微巩固 | P0 |
 | FR-1.6 | 写入钢印：cognitive_tier / model_id / persona_id / cues / provenance / decay_weight=1.0（schema 见设计文档 §1） | P0 |
 | FR-1.7 | tool_call 序列结构化存入 `SKILL_SEQUENCE` 原料队列（肌肉记忆管线入口） | P1 |
