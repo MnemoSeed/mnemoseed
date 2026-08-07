@@ -16,6 +16,7 @@
 | [03-存储与检索](design/03-存储与检索.md) | 混合双库总线、STORAGE_MODE 路由矩阵、混合检索、抗稀释策略 |
 | [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、Persona 解耦、BYOK/TEE 零知识架构 |
 | [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
+| [06-接入与安装体验](design/06-接入与安装体验.md) | 三层适配架构（daemon/MCP/plugin）、宿主能力矩阵、3 分钟安装流程、session 生命周期 |
 
 ### 开发任务 PRD（prd/）
 
@@ -27,6 +28,7 @@
 | [PRD-03 检索与 MCP 网关](prd/PRD-03-检索与MCP网关.md) | 混合检索 API、MCP 工具定义、上下文装配 |
 | [PRD-04 衰减调和与溯源](prd/PRD-04-衰减调和与溯源.md) | Decay 权重、Reconcile 冲突协议、Provenance schema |
 | [PRD-05 云端同步与 TEE](prd/PRD-05-云端同步与TEE.md) | E2EE 同步、Nitro Enclaves、计费套利网关 |
+| [PRD-06 宿主接入与安装](prd/PRD-06-宿主接入与安装.md) | daemon embedded 模式、installer、Claude Code plugin（hooks）、MCP 降级模式、uninstall |
 
 ### 市场（marketing/）
 

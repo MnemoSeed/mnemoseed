@@ -24,6 +24,10 @@
 | FR-3.5 | 抗稀释硬闸：top-k ≤ 5、token 预算 ≤ 800（默认，可调），超预算丢尾部并返回 dropped_count | P0 |
 | FR-3.6 | conflict_flag 记忆成对返回 + 显式标注 | P0 |
 | FR-3.7 | 检索命中自动上报"使用事件"，供 Decay 强化回弹（PRD-04 消费） | P1 |
+| FR-3.8 | Freshness Guard（待巩固标注）：装配后检查海马体 `ingested_at > watermark` 且实体重叠的分片；命中则相关三元组标 `pending_consolidation`、重排 ×0.8、附 ≤2 条截断 recent_evidence；机制与参数见 design/02 §9 / design/03 §2 | P0 |
+| FR-3.9 | `memory.recall` 支持 `as_of` 时间点参数：按 provenance 版本链回放当时生效的事实（point-in-time 查询） | P1 |
+| FR-3.10 | `memory.diff`：两个版本/时间点间的记忆差异视图（版本链原生支持，演示素材） | P2 |
+| FR-3.11 | MCP initialize 响应携带 `instructions` 行为指引（MCP-only 降级模式：提示模型开场 recall、重要事实调 remember；配合 FR-1.8 幂等去重兜底，见 design/06 §2） | P1 |
 
 ## 4. 非功能需求
 
@@ -38,7 +42,9 @@
 - AC-1：Cursor 中沉淀的偏好，在 Cline 新 session 通过 recall 正确召回（跨客户端继承）；
 - AC-2：埋入 1 条关键约束 + 30 条弱相关噪音，recall 返回 ≤5 条且关键约束在内；
 - AC-3：两条矛盾偏好共存时，返回结果成对出现且带冲突标注；
-- AC-4：全量检索结果 audit 可查 provenance。
+- AC-4：全量检索结果 audit 可查 provenance；
+- AC-5：巩固间隙写入一条与既有偏好矛盾的新事实（未做梦），下一次 recall 返回中旧偏好带 `pending_consolidation` 标注且附新证据原文；
+- AC-6：`as_of` 传过去时间点，返回当时生效的旧版本事实而非现值。
 
 ## 6. 任务拆分
 

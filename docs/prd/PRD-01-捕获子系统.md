@@ -21,8 +21,10 @@
 | FR-1.3 | 持久性分类（三个月测试）：规则（时间限定词/情绪词表）+ 边缘小模型二分类（durable/disposable） | P0 |
 | FR-1.4 | 评分 `S = w₁·min(arousal,θ_cap) + w₂·新颖度 + w₃·因果链`（arousal 截顶、valence 仅存 cues、emotion 永不进 confidence——依据见 design/01 §1.6），权重可配置 | P0 |
 | FR-1.5 | 积分池：累计 S；`pool ≥ 10.0 且 idle ≥ 5s` 发出梦境触发事件；硬上限 50.0 强制微巩固 | P0 |
-| FR-1.6 | 写入钢印：cognitive_tier / model_id / persona_id / cues / provenance / decay_weight=1.0（schema 见设计文档 §1） | P0 |
+| FR-1.6 | 写入钢印：cognitive_tier / model_id / persona_id / cues（**含 entities 字段**，Freshness Guard 检索侧过滤依赖）/ provenance / decay_weight=1.0（schema 见设计文档 §1） | P0 |
 | FR-1.7 | tool_call 序列结构化存入 `SKILL_SEQUENCE` 原料队列（肌肉记忆管线入口） | P1 |
+| FR-1.8 | 近重复检查双分支：≥0.9 且一致 → Hebbian `last_reinforced` 回弹不产生新分片；≥0.85 但极性/取值/时间冲突（规则+轻量分类器，零额外 LLM 调用）→ 命中图谱节点置 `needs_reconcile=true` 且积分池 +2.0（预测误差加速巩固，design/02 §9.1） | P0 |
+| FR-1.9 | `memory.remember` 支持调用方显式传 `importance_hint`（0–1），与自动 S 评分取 max——用户说"记住这个"时显式意图盖过算法判断（意向性编码，R28 Craik & Lockhart 1972） | P1 |
 
 ## 4. 非功能需求
 
