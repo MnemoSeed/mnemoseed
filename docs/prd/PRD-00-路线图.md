@@ -16,6 +16,8 @@ gantt
     PRD-01 捕获子系统                        :m1a, after m0b, 10d
     PRD-02 梦境引擎(本地 Ollama)             :m1b, after m1a, 14d
     PRD-03 检索与 MCP 网关                   :m1c, after m1a, 10d
+    PRD-06 宿主接入与安装                    :m1d, after m1a, 8d
+    PRD-07 管理控制台(只读核心)              :m1e, after m1b, 6d
     section M2 记忆质量（差异化核心）
     PRD-04 衰减/调和/溯源                    :m2a, after m1b, 14d
     section M3 公开发布
@@ -26,8 +28,8 @@ gantt
 
 | 里程碑 | 出口标准（Exit Criteria） |
 |---|---|
-| M0 | `docker compose up` 一键起全栈，健康检查全绿 |
-| M1 | Cursor + Cline 双客户端接入；换模型后新 session 能召回上周偏好；本地做梦全免费 |
+| M0 | `docker compose up` 一键起全栈，健康检查全绿；**四个存储接口（VectorStore/GraphStore/MetaStore/Embedder）定义完成，各实现内嵌默认 + Postgres 系双驱动**（接口可移植性实证；能力声明 capability flags 校验生效）；embedded 单进程模式可跑 |
+| M1 | 单命令安装（TTFM < 3min）接入 Cursor + Claude Code；profile 凭证模型生效（login/link/whoami）；换模型后新 session 能召回上周偏好；本地做梦全免费；console 只读核心上线支撑 dream --once 审查 |
 | M2 | 事实变更后检索返回当前版本；30 天未用记忆自动沉底；任意记忆可回答"谁、何时、从哪来" |
 | M3 | GitHub ≥ 1000 star（首周目标） |
 | M4 | $9/月 Cloud 上线，3 Profile + E2EE 同步 + 500k 梦境额度 |

@@ -16,7 +16,8 @@
 | [03-存储与检索](design/03-存储与检索.md) | 混合双库总线、STORAGE_MODE 路由矩阵、混合检索、抗稀释策略 |
 | [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、Persona 解耦、BYOK/TEE 零知识架构 |
 | [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
-| [06-接入与安装体验](design/06-接入与安装体验.md) | 三层适配架构（daemon/MCP/plugin）、宿主能力矩阵、3 分钟安装流程、session 生命周期 |
+| [06-接入与安装体验](design/06-接入与安装体验.md) | 三层适配架构（daemon/MCP/plugin）、profile 凭证身份模型（login/link）、宿主能力矩阵、3 分钟安装流程、断开卸载语义 |
+| [07-管理控制台](design/07-管理控制台.md) | MnemoSeed Console：profiles 管理、记忆浏览、图谱可视化、单条记忆全档案、梦境面板与 token 用量、模型路由设置 |
 
 ### 开发任务 PRD（prd/）
 
@@ -28,7 +29,8 @@
 | [PRD-03 检索与 MCP 网关](prd/PRD-03-检索与MCP网关.md) | 混合检索 API、MCP 工具定义、上下文装配 |
 | [PRD-04 衰减调和与溯源](prd/PRD-04-衰减调和与溯源.md) | Decay 权重、Reconcile 冲突协议、Provenance schema |
 | [PRD-05 云端同步与 TEE](prd/PRD-05-云端同步与TEE.md) | E2EE 同步、Nitro Enclaves、计费套利网关 |
-| [PRD-06 宿主接入与安装](prd/PRD-06-宿主接入与安装.md) | daemon embedded 模式、installer、Claude Code plugin（hooks）、MCP 降级模式、uninstall |
+| [PRD-06 宿主接入与安装](prd/PRD-06-宿主接入与安装.md) | daemon embedded 模式、installer、login/link 身份绑定、Claude Code plugin（hooks）、MCP 降级模式、uninstall |
+| [PRD-07 管理控制台](prd/PRD-07-管理控制台.md) | Console SPA：Dashboard/Profiles/记忆浏览/梦境审查/冲突收件箱（M1 只读核心，M2 补全） |
 
 ### 市场（marketing/）
 
