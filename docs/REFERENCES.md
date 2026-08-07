@@ -57,6 +57,21 @@
 | I2d | Anthropic "Built-in Memory for Claude Managed Agents"（97% 首遍错误率降幅等） | ⚠️ 属产品文档/博客性质，非学术论文；数字未独立核实，营销引用时不得标注为研究结论 |
 | I3 | Claude-Mem (github.com/thedotmack/claude-mem) README | ✅ 2026-08-08 直接读取 |
 | I4 | MemPalace（本地部署的记忆系统） | ✅ 第一手日常使用观察 |
+| I5 | Mem0 官网定价页 mem0.ai/pricing（四档价格、Dream/Graph memory 付费墙） | ✅ 2026-08-08 浏览器直接读取 |
+| I6 | Zep 官网 getzep.com（双时态模型、LoCoMo/LongMemEval 基准、治理与部署选项） | ✅ 2026-08-08 浏览器直接读取 |
+| I7 | dev.to《Mem0 vs Zep vs LangMem vs MemoClaw: AI Agent Memory Comparison 2026》 | ⚠️ 第三方文章且作者为 MemoClaw 官方（文中已披露立场）；其优缺点描述用于交叉印证，定价以官网为准 |
+| I8 | Evermind 博客 evermind.ai（EverOS 四层架构、Memory Perception Modules、benchmark 宣称） | ✅ 2026-08-08 直接读取；其 benchmark 数字为厂商自述未独立复现 |
+| I9 | Letta 定价文档 docs.letta.com/pricing（Free/Pro $20/Teams/Developer） | ✅ 2026-08-08 浏览器直接读取 |
+| I10 | Cognee 官网 cognee.ai 首页+定价页（token 统一费率、$5/workspace、案例） | ✅ 2026-08-08 浏览器直接读取 |
+| I11 | Hindsight 官方文档 hindsight.vectorize.io（retain/recall/reflect、Observations、TEMPR、Memory Bank 配置） | ✅ 2026-08-08 浏览器直接读取 |
+| I12 | Memvid 官网 memvid.com（单文件 .mv2、WAL、混合检索 sub-5ms；无公开价格页） | ✅ 2026-08-08 浏览器直接读取 |
+| I13 | MemoryLake 官网 memorylake.ai（Memory Passport 六类记忆、Git 式版本化、三权利叙事、31 个 vs 对比页清单） | ✅ 2026-08-08 浏览器直接读取；其 LoCoMo "Global #1" 为厂商自述未独立复现 |
+
+## 情绪与记忆补充（竞品调研新增）
+
+| # | 引用 | 用于 | 状态 |
+|---|---|---|---|
+| R28 | Craik, F. I. M., & Lockhart, R. S. (1972). Levels of processing: A framework for memory research. *Journal of Verbal Learning and Verbal Behavior*, 11(6), 671–684. DOI: 10.1016/S0022-5371(72)80001-X | importance_hint 用户显式加权的依据（意向性编码优先于偶然编码） | ✅ Crossref 命中 |
 
 ---
 
