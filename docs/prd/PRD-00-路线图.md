@@ -14,7 +14,7 @@ gantt
     数据 schema + Provenance 基座            :m0b, after m0a, 9d
     section M1 本地闭环（免费轨可用）
     PRD-01 捕获子系统                        :m1a, after m0b, 10d
-    PRD-02 梦境引擎(本地 Ollama)             :m1b, after m1a, 14d
+    PRD-02 梦境引擎(本地 Ollama)             :m1b, after m1a, 15d
     PRD-03 检索与 MCP 网关                   :m1c, after m1a, 10d
     PRD-06 宿主接入与安装                    :m1d, after m1a, 8d
     PRD-07 管理控制台(只读核心)              :m1e, after m1b, 6d

@@ -1,7 +1,7 @@
 # PRD-02 · 梦境引擎（Consolidate：快照隔离 + 双轨分流 + De-biasing）
 
 > 对应设计文档：[02-梦境引擎](../design/02-梦境引擎.md)
-> 里程碑：M1（本地轨）· 预估 14 天
+> 里程碑：M1（本地轨）· 预估 15.5 天（v2 补 LLM 端口与模型配置）
 
 ## 1. 目标
 
@@ -9,7 +9,7 @@
 
 ## 2. 范围
 
-- **In**：触发状态机、快照管理、反思编排（含 De-biasing prompt）、Tier 分流写入、增量 Delta 打桩、失败降级
+- **In**：触发状态机、快照管理、反思编排（含 De-biasing prompt）、Tier 分流写入、增量 Delta 打桩、失败降级、**LLM 端口与模型路由配置**（FR-2.14）
 - **Out**：云端 TEE 部署（PRD-05）、动态模型路由网关（PRD-05）
 
 ## 3. 功能需求
@@ -29,6 +29,7 @@
 | FR-2.11 | anima 重染色（re-dye）批处理：换 anima 触发，新核心异步重消化 profile 既有记忆长出新染层/喜好；旧实例染层完整保留（无损切换，design/04 §2.2） | P1 |
 | FR-2.12 | 染层/偏好证据边界：更新只消费用户原始输入，永不采纳 agent 渲染输出（防慢漂移自锁，design/02 §5） | P0 |
 | FR-2.13 | De-biasing eval harness：染色样本剥除率指标进 CI，剥除率退化即构建失败（单点故障面防线，design/02 §5） | P1 |
+| FR-2.14 | **LLM 端口与模型路由配置**：定义 `DreamLLM` Protocol（chat 完成 + 用量统计 + 连通性自检），驱动注册表与存储层同构——驱动：`ollama`（本地免费轨，默认）/ `openai_compatible` / `anthropic`；config.toml 按**角色**分别配置：`deep_reflection`（长背景深睡眠反思）/ `short_increment`（<5k 短增量）/ `local_track` 开关；默认路由按 design/02（深睡眠 → Claude 5 Sonnet，短增量 → GPT-5.6 Terra，本地轨 → Ollama + Llama-3.3-70B）；每角色可独立切换驱动与模型名，改动写审计；连通性自检接口供 console 实测按钮（design/07 §8）调用 | P0 |
 
 ## 4. 非功能需求
 
@@ -53,7 +54,8 @@
 3. `core/dream/reflect` —— 反思编排 + De-biasing prompt 模板（4d）
 4. `core/dream/splitter` —— Tier 分流与打捞队列（2d）
 5. `core/dream/delta` —— 增量打桩 + Prompt Cache 适配层（2d）
-6. 集成测试（中断注入、污染审计）（2d）
+6. `core/llm` —— DreamLLM 端口 + 三驱动 + 角色路由配置（FR-2.14）（1.5d）
+7. 集成测试（中断注入、污染审计）（2d）
 
 ## 7. 依赖
 
