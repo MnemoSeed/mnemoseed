@@ -7,15 +7,10 @@ can be overridden individually. STORAGE_MODE remains as a preset shortcut.
 from __future__ import annotations
 
 import os
-import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-if sys.version_info >= (3, 12):
-    import tomllib
-else:
-    import tomli as tomllib
 
 CONFIG_DIR = Path(os.environ.get("MNEMOSEED_HOME", Path.home() / ".mnemoseed"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"

@@ -24,8 +24,7 @@ def _loads(payload: Any) -> str:
 
 
 _NODE_COLS = (
-    "node_id, profile_id, node_type, entities, payload, "
-    "valid_from, valid_to, decay_weight, updated_at"
+    "node_id, profile_id, node_type, entities, payload, valid_from, valid_to, decay_weight, updated_at"
 )
 
 
@@ -137,8 +136,7 @@ class PostgresGraph(GraphStore):
         limit: int = 50,
     ) -> list[GraphNode]:
         sql = (
-            "SELECT payload FROM mnemo_nodes WHERE profile_id=%s AND valid_to IS NULL "
-            "AND decay_weight >= %s"
+            "SELECT payload FROM mnemo_nodes WHERE profile_id=%s AND valid_to IS NULL AND decay_weight >= %s"
         )
         params: list = [profile_id, min_decay]
         if node_type is not None:
@@ -176,9 +174,7 @@ class PostgresGraph(GraphStore):
             if depth >= hops:
                 continue
             with self._conn.cursor() as cur:
-                cur.execute(
-                    "SELECT src, dst FROM mnemo_edges WHERE src=%s OR dst=%s", (current, current)
-                )
+                cur.execute("SELECT src, dst FROM mnemo_edges WHERE src=%s OR dst=%s", (current, current))
                 pairs = cur.fetchall()
             for src, dst in pairs:
                 nxt = dst if src == current else src
@@ -212,8 +208,7 @@ class PostgresGraph(GraphStore):
                 new_node.prev_version_id = old_id
                 new_node.version = old.version + 1
                 cur.execute(
-                    f"INSERT INTO mnemo_nodes ({_NODE_COLS}) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    f"INSERT INTO mnemo_nodes ({_NODE_COLS}) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
                         new_node.node_id,
                         new_node.profile_id,

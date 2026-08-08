@@ -230,7 +230,6 @@ REQUIRED_CAPS: dict[str, tuple[str, Capability, str]] = {
     "local_offline": (
         "embed",
         Capability.LOCAL_OFFLINE,
-        "embedded preset requires a network embedding API (breaks the offline "
-        "promise; startup error)",
+        "embedded preset requires a network embedding API (breaks the offline promise; startup error)",
     ),
 }

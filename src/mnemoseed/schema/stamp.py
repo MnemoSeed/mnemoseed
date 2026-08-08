@@ -103,9 +103,7 @@ class ChunkStamp(BaseModel):
         }
 
     @classmethod
-    def from_filter_view(
-        cls, chunk_id: str, text: str, meta: dict[str, Any]
-    ) -> ChunkStamp:
+    def from_filter_view(cls, chunk_id: str, text: str, meta: dict[str, Any]) -> ChunkStamp:
         """Rebuild a shard from the vector-DB metadata view (retrieval hot path).
 
         Cold fields (provenance, emotion) are not in metadata; the rebuilt

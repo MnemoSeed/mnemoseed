@@ -46,8 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 
 
 _NODE_COLS = (
-    "node_id, profile_id, node_type, entities, payload, "
-    "valid_from, valid_to, decay_weight, updated_at"
+    "node_id, profile_id, node_type, entities, payload, valid_from, valid_to, decay_weight, updated_at"
 )
 
 
@@ -78,8 +77,7 @@ class SqliteGraph(GraphStore):
 
     def _insert(self, node: GraphNode) -> None:
         self._conn.execute(
-            f"INSERT OR REPLACE INTO nodes ({_NODE_COLS}) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            f"INSERT OR REPLACE INTO nodes ({_NODE_COLS}) VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 node.node_id,
                 node.profile_id,
@@ -98,9 +96,7 @@ class SqliteGraph(GraphStore):
         self._conn.commit()
 
     async def get_node(self, node_id: str, as_of: float | None = None) -> GraphNode | None:
-        anchor = self._conn.execute(
-            "SELECT payload FROM nodes WHERE node_id=?", (node_id,)
-        ).fetchone()
+        anchor = self._conn.execute("SELECT payload FROM nodes WHERE node_id=?", (node_id,)).fetchone()
         if not anchor:
             return None
         node = GraphNode.model_validate_json(anchor["payload"])
@@ -128,10 +124,7 @@ class SqliteGraph(GraphStore):
         min_decay: float = 0.0,
         limit: int = 50,
     ) -> list[GraphNode]:
-        sql = (
-            "SELECT payload FROM nodes WHERE profile_id=? AND valid_to IS NULL "
-            "AND decay_weight>=?"
-        )
+        sql = "SELECT payload FROM nodes WHERE profile_id=? AND valid_to IS NULL AND decay_weight>=?"
         params: list = [profile_id, min_decay]
         if node_type is not None:
             sql += " AND node_type=?"
@@ -181,9 +174,7 @@ class SqliteGraph(GraphStore):
         """Reconsolidation rewrite: old version pinned, new version chained
         (single atomic transaction)."""
         with self._conn:
-            row = self._conn.execute(
-                "SELECT payload FROM nodes WHERE node_id=?", (old_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT payload FROM nodes WHERE node_id=?", (old_id,)).fetchone()
             if not row:
                 raise KeyError(f"supersede target not found: {old_id}")
             old = GraphNode.model_validate_json(row["payload"])
@@ -200,9 +191,7 @@ class SqliteGraph(GraphStore):
         out: list[GraphNode] = []
         current_id: str | None = node_id
         while current_id:
-            row = self._conn.execute(
-                "SELECT payload FROM nodes WHERE node_id=?", (current_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT payload FROM nodes WHERE node_id=?", (current_id,)).fetchone()
             if not row:
                 break
             node = GraphNode.model_validate_json(row["payload"])

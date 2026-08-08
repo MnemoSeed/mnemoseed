@@ -8,30 +8,32 @@ version = "0.0.1"
 description = "Cross-model neutral AI memory layer — five-stage memory pipeline derived from neuroscience"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "httpx>=0.27",
-    "tomli; python_version < '3.12'",
 ]
 
 [project.optional-dependencies]
-# embedded 默认栈（个人用户零 Docker）
+# embedded default stack (zero-Docker personal install)
 embedded = [
     "chromadb>=0.5",
-    "sentence-transformers>=3.0",  # gemma_local 嵌入
+    "sentence-transformers>=3.0",  # gemma_local embedding
 ]
-# Postgres 系备选驱动
+# Postgres-family alternative drivers
 postgres = [
     "psycopg[binary]>=3.2",
     "pgvector>=0.3",
 ]
+
+[dependency-groups]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    "mypy>=1.10",
 ]
 
 [project.scripts]
@@ -42,10 +44,37 @@ packages = ["src/mnemoseed"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+strict_equality = true
+warn_return_any = true
+warn_unused_configs = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "mnemoseed.cli"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "mnemoseed.config"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "mnemoseed.daemon.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "mnemoseed.storage.*"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

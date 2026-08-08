@@ -48,9 +48,7 @@ class SqliteMeta(MetaStore):
         self._conn.commit()
 
     async def kv_get(self, ns: str, key: str) -> Any | None:
-        row = self._conn.execute(
-            "SELECT value FROM kv WHERE ns=? AND key=?", (ns, key)
-        ).fetchone()
+        row = self._conn.execute("SELECT value FROM kv WHERE ns=? AND key=?", (ns, key)).fetchone()
         return json.loads(row["value"]) if row else None
 
     async def kv_put(self, ns: str, key: str, value: Any) -> None:

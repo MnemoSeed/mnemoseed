@@ -120,9 +120,7 @@ class PgVectorStore(VectorStore):
 
     async def count(self, profile_id: str) -> int:
         with self._conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM mnemo_vectors WHERE profile_id=%s", (profile_id,)
-            )
+            cur.execute("SELECT count(*) FROM mnemo_vectors WHERE profile_id=%s", (profile_id,))
             return int(cur.fetchone()[0])
 
     async def close(self) -> None:
