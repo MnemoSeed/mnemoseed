@@ -1,124 +1,109 @@
-"""Storage factory: builds drivers from Config and validates capabilities.
+"""Storage factory: resolves drivers from Config and runs the startup gate.
 
-Startup gate rule: drivers are not interchangeable. Every driver declares its
-capability set; the daemon validates it against REQUIRED_CAPS at boot and
-records explicit degradations. Missing capabilities degrade loudly, never
-silently.
+Boot sequence per layer: resolve named instances from config, instantiate the
+registered driver for each name, then run the appendix C capability gate over
+the resolved stack. HARD findings refuse startup (CapabilityStartupError lists
+the missing capabilities); DEGRADE findings log an explicit warning. No path is
+silent.
 """
 
 from __future__ import annotations
 
-import importlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import cast
 
-from mnemoseed.config import Config
+from mnemoseed.config import LAYER_TYPES, Config
 from mnemoseed.storage.ports import (
-    EMBED_DRIVERS,
-    GRAPH_DRIVERS,
-    META_DRIVERS,
-    REQUIRED_CAPS,
-    VECTOR_DRIVERS,
-    CapabilityReport,
-    Degradation,
+    CapabilityStartupError,
     Embedder,
     GraphStore,
     MetaStore,
     StorageError,
+    Store,
+    ValidationReport,
     VectorStore,
+    validate_capabilities,
 )
+from mnemoseed.storage.registry import DRIVER_REGISTRIES
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Stores:
-    """Fully wired storage stack plus its capability report."""
+    """The fully resolved, per-layer named storage stack plus its gate report."""
 
-    vector: VectorStore
-    graph: GraphStore
-    meta: MetaStore
-    embed: Embedder
-    report: CapabilityReport = field(default_factory=lambda: CapabilityReport(ok=True))
+    instances: dict[str, dict[str, Store]]
+    report: ValidationReport
+
+    def _primary(self, kind: str) -> Store:
+        named = self.instances[kind]
+        store = named.get("main")
+        if store is None:
+            raise StorageError(f"layer {kind!r} resolved to no instance named 'main'")
+        return store
+
+    @property
+    def vector(self) -> VectorStore:
+        return cast(VectorStore, self._primary("vector"))
+
+    @property
+    def graph(self) -> GraphStore:
+        return cast(GraphStore, self._primary("graph"))
+
+    @property
+    def meta(self) -> MetaStore:
+        return cast(MetaStore, self._primary("meta"))
+
+    @property
+    def embed(self) -> Embedder:
+        return cast(Embedder, self._primary("embed"))
+
+    def layer(self, kind: str) -> dict[str, Store]:
+        """All named instances of one layer (e.g. graph.main / graph.isolated)."""
+        return self.instances[kind]
+
+    def instance(self, kind: str, name: str) -> Store:
+        """One named instance of one layer."""
+        try:
+            return self.instances[kind][name]
+        except KeyError as exc:
+            available = sorted(self.instances[kind])
+            raise StorageError(
+                f"no {kind} instance named {name!r} (available: {', '.join(available) or 'none'})"
+            ) from exc
 
     async def close(self) -> None:
-        for store in (self.vector, self.graph, self.meta, self.embed):
-            await store.close()
-
-
-_DRIVER_MODULES = {
-    # driver name: module providing it (imported on demand so optional deps stay lazy)
-    "chroma_embedded": "mnemoseed.storage.vector.chroma_embedded",
-    "pgvector": "mnemoseed.storage.vector.pgvector_store",
-    "sqlite_graph": "mnemoseed.storage.graph.sqlite_graph",
-    "postgres_graph": "mnemoseed.storage.graph.postgres_graph",
-    "sqlite_meta": "mnemoseed.storage.meta.sqlite_meta",
-    "postgres_meta": "mnemoseed.storage.meta.postgres_meta",
-    "gemma_local": "mnemoseed.storage.embed.gemma_local",
-    "openai_compat": "mnemoseed.storage.embed.openai_compat",
-}
-
-
-def _build(table: dict[str, type], kind: str, driver: str, params: dict):
-    if driver not in table and driver in _DRIVER_MODULES:
-        try:
-            importlib.import_module(_DRIVER_MODULES[driver])
-        except ImportError as exc:
-            raise StorageError(_extra_hint(kind, driver, exc)) from exc
-    cls = table.get(driver)
-    if cls is None:
-        raise StorageError(
-            f"unknown {kind} driver: {driver!r} (available: {', '.join(sorted(table)) or 'none'})"
-        )
-    try:
-        return cls(**params)
-    except ImportError as exc:
-        # driver module imported fine, but its lazy optional dependency did not
-        raise StorageError(_extra_hint(kind, driver, exc)) from exc
-
-
-def _extra_hint(kind: str, driver: str, exc: ImportError) -> str:
-    return (
-        f"{kind} driver {driver!r} needs an optional dependency: {exc.name}. "
-        "Install the matching extra (e.g. mnemoseed[embedded] or mnemoseed[postgres])."
-    )
-
-
-def validate_capabilities(stores: Stores) -> CapabilityReport:
-    """Check each REQUIRED_CAPS entry against the wired driver's declared set."""
-    by_kind = {
-        "vector": stores.vector,
-        "graph": stores.graph,
-        "meta": stores.meta,
-        "embed": stores.embed,
-    }
-    missing: list[Degradation] = []
-    for feature, (kind, cap, behavior) in REQUIRED_CAPS.items():
-        if cap not in by_kind[kind].info.capabilities:
-            missing.append(
-                Degradation(
-                    capability=cap,
-                    feature=feature,
-                    behavior=f"[{kind}:{by_kind[kind].info.name}] {behavior}",
-                )
-            )
-    return CapabilityReport(ok=not missing, missing=missing)
+        for named in self.instances.values():
+            for store in named.values():
+                closer = getattr(store, "close", None)
+                if closer is not None:
+                    await closer()
 
 
 def build_stores(config: Config) -> Stores:
-    """Instantiate all four ports from config, then run the capability gate."""
-    vec_cfg = config.layer("vector")
-    graph_cfg = config.layer("graph")
-    meta_cfg = config.layer("meta")
-    embed_cfg = config.layer("embed")
+    """Resolve every layer's named driver instances and run the capability gate."""
+    resolved: dict[str, dict[str, Store]] = {}
+    for kind in LAYER_TYPES:
+        registry = DRIVER_REGISTRIES[kind]
+        built: dict[str, Store] = {}
+        for name, spec in config.layer_instances(kind).items():
+            built[name] = registry.build(spec.driver, spec.params)
+        resolved[kind] = built
 
-    stores = Stores(
-        vector=_build(VECTOR_DRIVERS, "vector", vec_cfg.driver, vec_cfg.params),
-        graph=_build(GRAPH_DRIVERS, "graph", graph_cfg.driver, graph_cfg.params),
-        meta=_build(META_DRIVERS, "meta", meta_cfg.driver, meta_cfg.params),
-        embed=_build(EMBED_DRIVERS, "embed", embed_cfg.driver, embed_cfg.params),
-    )
-    stores.report = validate_capabilities(stores)
-    for deg in stores.report.missing:
-        logger.warning("capability degradation — %s: %s", deg.feature, deg.behavior)
-    return stores
+    report = validate_capabilities(resolved)
+    for issue in report.degradations:
+        logger.warning(
+            "capability degradation - %s.%s driver %r lacks %s (%s): %s",
+            issue.layer,
+            issue.instance,
+            issue.driver,
+            issue.capability.value,
+            issue.feature,
+            issue.behavior,
+        )
+    if report.hard_missing:
+        raise CapabilityStartupError(report.hard_missing)
+
+    return Stores(instances=resolved, report=report)

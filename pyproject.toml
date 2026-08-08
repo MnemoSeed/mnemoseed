@@ -17,11 +17,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# embedded default stack (zero-Docker personal install)
-embedded = [
-    "chromadb>=0.5",
-    "sentence-transformers>=3.0",  # gemma_local embedding
-]
 # Postgres-family alternative drivers
 postgres = [
     "psycopg[binary]>=3.2",
@@ -65,15 +60,7 @@ module = "mnemoseed.cli"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = "mnemoseed.config"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
 module = "mnemoseed.daemon.*"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "mnemoseed.storage.*"
 ignore_errors = true
 
 [tool.pytest.ini_options]

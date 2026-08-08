@@ -1,7 +1,10 @@
 """Config loading: ~/.mnemoseed/config.toml is the single source of truth.
 
-A preset (embedded/docker/custom) maps each storage layer to a driver; layers
-can be overridden individually. STORAGE_MODE remains as a preset shortcut.
+A preset (embedded/docker/custom) maps each storage layer to a default driver;
+layers can be overridden individually and a layer may declare named instances
+(e.g. graph.main / graph.isolated, D6). STORAGE_MODE is kept as a preset
+shortcut environment variable. Parse and resolution errors always name the
+offending config key.
 """
 
 from __future__ import annotations
@@ -15,71 +18,186 @@ from typing import Any
 CONFIG_DIR = Path(os.environ.get("MNEMOSEED_HOME", Path.home() / ".mnemoseed"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 
+LAYER_TYPES: tuple[str, ...] = ("vector", "graph", "meta", "embed")
+
 PRESETS: dict[str, dict[str, str]] = {
+    # layer -> default driver (M0 names from prd-08 FR-8.3 / FR-8.4)
     "embedded": {
-        "vector": "chroma_embedded",
+        "vector": "lancedb_embedded",
         "graph": "sqlite_graph",
         "meta": "sqlite_meta",
-        "embed": "gemma_local",
+        "embed": "bge_m3_onnx",
     },
     "docker": {
-        "vector": "chroma_embedded",  # chroma container in compose; same driver, other params
-        "graph": "sqlite_graph",
-        "meta": "sqlite_meta",
-        "embed": "gemma_local",
+        "vector": "pgvector",
+        "graph": "pg_graph",
+        "meta": "pg_meta",
+        "embed": "openai_compatible",
     },
     "custom": {},  # everything explicit; a missing layer is an error
 }
 
-VALID_PRESETS = tuple(PRESETS)
+VALID_PRESETS: tuple[str, ...] = tuple(PRESETS)
+DEFAULT_PRESET = "embedded"
+DEFAULT_INSTANCE = "main"
+
+
+class ConfigError(ValueError):
+    """Config parse or resolution error with the offending key named."""
+
+    def __init__(self, key: str, message: str) -> None:
+        self.key = key
+        super().__init__(f"config[{key}]: {message}")
+
+
+@dataclass(frozen=True)
+class InstanceConfig:
+    """A resolved driver instance for a layer."""
+
+    name: str
+    driver: str
+    params: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _InstanceOverride:
+    """An explicit named instance from the config file (driver optional)."""
+
+    driver: str | None
+    params: dict[str, Any]
 
 
 @dataclass
-class StorageConfig:
-    driver: str
+class LayerSpec:
+    """Per-layer explicit configuration from the config file."""
+
+    layer: str
+    driver: str | None = None  # optional per-layer override; falls back to the preset
     params: dict[str, Any] = field(default_factory=dict)
+    instances: dict[str, _InstanceOverride] = field(default_factory=dict)
 
 
 @dataclass
 class Config:
-    preset: str = "embedded"
-    storage: dict[str, StorageConfig] = field(default_factory=dict)
+    """Resolved configuration. layer_instances() materializes per-layer drivers."""
+
+    preset: str = DEFAULT_PRESET
     baseurl: str = "http://localhost:7788"
+    storage: dict[str, LayerSpec] = field(default_factory=dict)
+    source: Path | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
-    def layer(self, kind: str) -> StorageConfig:
-        """kind in {vector, graph, meta, embed}."""
-        if kind in self.storage:
-            return self.storage[kind]
-        preset_map = PRESETS[self.preset]
-        if kind not in preset_map:
-            raise KeyError(f"custom preset requires an explicit storage.{kind}.driver")
-        return StorageConfig(driver=preset_map[kind])
+    def layer_instances(self, kind: str) -> dict[str, InstanceConfig]:
+        """Resolve the instance set for one layer (always non-empty).
+
+        order of precedence (weakest to strongest):
+        preset default driver < explicit layer driver < named-instance driver.
+        The default instance name is D6's "main".
+        """
+        if kind not in LAYER_TYPES:
+            raise ConfigError(
+                f"storage.{kind}", f"unknown storage layer (expected one of {', '.join(LAYER_TYPES)})"
+            )
+        if self.preset not in PRESETS:
+            raise ConfigError("preset", f"unknown preset {self.preset!r}")
+
+        spec = self.storage.get(kind)
+        if spec is not None and spec.driver is not None:
+            base_driver = spec.driver
+            base_params = spec.params
+        else:
+            preset_driver = PRESETS[self.preset].get(kind)
+            if preset_driver is None:
+                raise ConfigError(
+                    f"storage.{kind}.driver",
+                    f"preset {self.preset!r} defines no default for layer {kind!r}; "
+                    "an explicit driver is required under the custom preset",
+                )
+            base_driver = preset_driver
+            base_params = spec.params if spec is not None else {}
+
+        resolved: dict[str, InstanceConfig] = {}
+        if spec is not None:
+            for name, override in spec.instances.items():
+                driver = override.driver if override.driver is not None else base_driver
+                resolved[name] = InstanceConfig(name=name, driver=driver, params=override.params)
+        if DEFAULT_INSTANCE not in resolved:
+            resolved[DEFAULT_INSTANCE] = InstanceConfig(
+                name=DEFAULT_INSTANCE, driver=base_driver, params=base_params
+            )
+        return resolved
+
+
+def _require_table(value: Any, key: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigError(key, "must be a table")
+    return value
+
+
+def _optional_driver(value: Any, key: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ConfigError(key, "must be a non-empty string")
+    return value
 
 
 def load_config(path: Path | None = None) -> Config:
+    """Load and validate config from the TOML file (STORAGE_MODE overrides preset)."""
     path = path or CONFIG_PATH
     raw: dict[str, Any] = {}
     if path.exists():
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        raw = _require_table(tomllib.loads(path.read_text(encoding="utf-8")), "<config>")
 
-    preset = os.environ.get("STORAGE_MODE") or raw.get("preset", "embedded")
-    if preset not in PRESETS:
-        raise ValueError(f"unknown preset: {preset} (choose from: {', '.join(VALID_PRESETS)})")
+    env_preset = os.environ.get("STORAGE_MODE")
+    preset_raw: Any = env_preset if env_preset is not None else raw.get("preset", DEFAULT_PRESET)
+    if not isinstance(preset_raw, str) or preset_raw not in PRESETS:
+        key = "STORAGE_MODE" if env_preset is not None else "preset"
+        raise ConfigError(key, f"unknown preset {preset_raw!r} (choose from: {', '.join(VALID_PRESETS)})")
 
-    storage: dict[str, StorageConfig] = {}
-    for kind, table in (raw.get("storage") or {}).items():
-        storage[kind] = StorageConfig(
-            driver=table["driver"],
-            params={k: v for k, v in table.items() if k != "driver"},
-        )
+    baseurl_raw: Any = raw.get("baseurl", "http://localhost:7788")
+    if not isinstance(baseurl_raw, str):
+        raise ConfigError("baseurl", "must be a string")
 
-    return Config(
-        preset=preset,
-        storage=storage,
-        baseurl=raw.get("baseurl", "http://localhost:7788"),
-        raw=raw,
-    )
+    storage: dict[str, LayerSpec] = {}
+    storage_raw = raw.get("storage")
+    if storage_raw is not None:
+        storage_table = _require_table(storage_raw, "storage")
+        for layer_key, layer_value in storage_table.items():
+            layer_key = str(layer_key)
+            layer_path = f"storage.{layer_key}"
+            if layer_key not in LAYER_TYPES:
+                raise ConfigError(
+                    layer_path, f"unknown storage layer (expected one of {', '.join(LAYER_TYPES)})"
+                )
+            layer_table = _require_table(layer_value, layer_path)
+
+            driver = _optional_driver(layer_table.get("driver"), f"{layer_path}.driver")
+            params = {k: v for k, v in layer_table.items() if k not in ("driver", "instances")}
+
+            overrides: dict[str, _InstanceOverride] = {}
+            instances_raw = layer_table.get("instances")
+            if instances_raw is not None:
+                instances_table = _require_table(instances_raw, f"{layer_path}.instances")
+                for name, entry in instances_table.items():
+                    name = str(name)
+                    entry_table = _require_table(entry, f"{layer_path}.instances.{name}")
+                    entry_driver = _optional_driver(
+                        entry_table.get("driver"), f"{layer_path}.instances.{name}.driver"
+                    )
+                    overrides[name] = _InstanceOverride(
+                        driver=entry_driver,
+                        params={k: v for k, v in entry_table.items() if k != "driver"},
+                    )
+
+            storage[layer_key] = LayerSpec(
+                layer=layer_key,
+                driver=driver,
+                params=params,
+                instances=overrides,
+            )
+
+    return Config(preset=preset_raw, baseurl=baseurl_raw, storage=storage, source=path, raw=raw)
 
 
 def default_config_toml() -> str:
@@ -91,10 +209,13 @@ baseurl = "http://localhost:7788"
 
 # Per-layer overrides (required under the custom preset):
 # [storage.vector]
-# driver = "pgvector"
-# dsn = "postgresql://user:pass@host:5432/mnemoseed"
+# driver = "lancedb_embedded"
 #
 # [storage.graph]
 # driver = "sqlite_graph"
-# path = "~/.mnemoseed/graph.db"
+#
+# Named multi-instance (D6): a second GraphStore under its own name.
+# [storage.graph.instances.isolated]
+# driver = "sqlite_graph"
+# path = "~/.mnemoseed/isolated.db"
 """

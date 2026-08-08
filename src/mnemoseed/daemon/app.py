@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
         logger.info("storage stack ready, all required capabilities present")
     else:
         for deg in stores.report.missing:
-            logger.warning("degraded: %s — %s", deg.feature, deg.behavior)
+            logger.warning("degraded: %s - %s", deg.feature, deg.behavior)
     yield
     await stores.close()
 
