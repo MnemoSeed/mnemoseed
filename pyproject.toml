@@ -14,6 +14,13 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "httpx>=0.27",
+    # embedded vector layer: lancedb chunks table + hybrid search (FR-8.3)
+    "lancedb>=0.15",
+    # bge-m3 embedder: CPU inference + XLM-RoBERTa tokenization (FR-8.3)
+    "onnxruntime>=1.18",
+    "tokenizers>=0.20",
+    # vector math shared by the vector/embed drivers (synthetic, bge-m3, lancedb)
+    "numpy>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +61,12 @@ strict_equality = true
 warn_return_any = true
 warn_unused_configs = true
 show_error_codes = true
+
+# third-party libs without type stubs / py.typed markers
+[[tool.mypy.overrides]]
+module = ["pyarrow", "lancedb", "lancedb.query", "onnxruntime"]
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
 
 [[tool.mypy.overrides]]
 module = "mnemoseed.cli"
