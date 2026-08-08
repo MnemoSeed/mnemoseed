@@ -354,8 +354,21 @@ class LanceDbEmbeddedStore:
             ]
         )
 
+    def _existing_tables(self) -> list[str]:
+        """Table names in this database.
+
+        lancedb < 0.3x returned a plain list from list_tables(); newer
+        versions return a response object with a ``tables`` attribute. Normalise
+        both so the exists-check drives open-vs-create correctly.
+        """
+        listing = self._db.list_tables()
+        if isinstance(listing, (list, tuple)):
+            return [str(name) for name in listing]
+        tables = getattr(listing, "tables", None)
+        return [str(name) for name in tables] if tables is not None else []
+
     def _ensure_table(self) -> None:
-        if self.table_name in self._db.list_tables():
+        if self.table_name in self._existing_tables():
             self._table = self._db.open_table(self.table_name)
         else:
             self._table = self._db.create_table(self.table_name, schema=self._schema())

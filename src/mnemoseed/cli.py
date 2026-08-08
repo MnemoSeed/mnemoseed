@@ -1,16 +1,20 @@
 """mnemoseed CLI entry point.
 
-M0 scope: init / doctor / serve / version. Account, profile, link and console
-commands land in M1 with the identity layer.
+M0 scope: init / doctor / up / serve / embed-sidecar / version. ``up`` starts
+the daemon single-process (embedded preset by default — every driver runs in
+one process with zero external services); ``serve`` is kept as an alias.
+Account, profile, link and console commands land in M1 with the identity layer.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
+from collections.abc import Callable
 
 from mnemoseed import __version__
-from mnemoseed.config import CONFIG_DIR, CONFIG_PATH, default_config_toml, load_config
+from mnemoseed.config import CONFIG_DIR, CONFIG_PATH, ConfigError, default_config_toml, load_config
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -53,11 +57,55 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 2
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    import uvicorn
+def cmd_up(args: argparse.Namespace) -> int:
+    from mnemoseed.daemon.runner import run_server
+    from mnemoseed.storage.factory import build_stores
+    from mnemoseed.storage.ports import StorageError
 
-    uvicorn.run("mnemoseed.daemon.app:app", host=args.host, port=args.port, reload=False)
-    return 0
+    host, port = args.host, args.port
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"preset: {config.preset}")
+    if config.preset == "embedded":
+        print("embedded single-process daemon - all drivers in-process, zero external services")
+
+    # Resolve the storage stack up front so a bad driver key or invalid params
+    # fail with a clean one-line error (same treatment as cmd_doctor) instead of
+    # a uvicorn startup traceback. Only config/storage assembly errors are
+    # handled here; anything else propagates. The daemon rebuilds the stack
+    # inside its lifespan, so the probe build is closed right away.
+    try:
+        stores = build_stores(config)
+        asyncio.run(stores.close())
+    except StorageError as exc:
+        print(f"error: storage stack failed to build: {exc}", file=sys.stderr)
+        return 1
+
+    # Only reach here once the stack is confirmed assemblable, so a failed boot
+    # never announces a daemon that did not start.
+    print(f"daemon on http://{host}:{port}")
+    return run_server(host, port)
+
+
+def cmd_embed_sidecar(args: argparse.Namespace) -> int:
+    from mnemoseed.daemon.embed_sidecar import run_sidecar
+
+    host, port = args.host, args.port
+    print(f"embedding sidecar (dev stub) on http://{host}:{port}")
+    return run_sidecar(host, port)
+
+
+def _add_serve_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser], name: str, help_text: str
+) -> argparse.ArgumentParser:
+    parser = sub.add_parser(name, help=help_text)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7788)
+    parser.set_defaults(func=cmd_up)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,13 +120,20 @@ def main(argv: list[str] | None = None) -> int:
     p_doctor = sub.add_parser("doctor", help="build storage stack and report capabilities")
     p_doctor.set_defaults(func=cmd_doctor)
 
-    p_serve = sub.add_parser("serve", help="run the daemon")
-    p_serve.add_argument("--host", default="127.0.0.1")
-    p_serve.add_argument("--port", type=int, default=7788)
-    p_serve.set_defaults(func=cmd_serve)
+    _add_serve_parser(sub, "up", "start the daemon (embedded single-process default)")
+    _add_serve_parser(sub, "serve", "alias of up (kept for compatibility)")
+
+    p_embed = sub.add_parser(
+        "embed-sidecar",
+        help="serve the dev OpenAI-compatible embeddings stub (compose embed service)",
+    )
+    p_embed.add_argument("--host", default="0.0.0.0")
+    p_embed.add_argument("--port", type=int, default=7789)
+    p_embed.set_defaults(func=cmd_embed_sidecar)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    handler: Callable[[argparse.Namespace], int] = args.func
+    return handler(args)
 
 
 if __name__ == "__main__":

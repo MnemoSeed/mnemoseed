@@ -95,6 +95,17 @@ def test_registered_in_shared_registry():
     assert VECTOR_DRIVERS.contains("lancedb_embedded")
 
 
+def test_reopen_existing_uri_does_not_recreate(tmp_path):
+    """list_tables() changed shape in lancedb 0.3x; a second boot on the same
+    database must open the existing table instead of erroring on create."""
+    uri = tmp_path / "chunks.lance"
+    first = LanceDbEmbeddedStore(uri=uri, dimensions=_DIM)
+    asyncio.run(first.close())
+    second = LanceDbEmbeddedStore(uri=uri, dimensions=_DIM)
+    assert second.get_chunk("nope") is None
+    asyncio.run(second.close())
+
+
 def test_capabilities_declared(store):
     caps = store.capabilities()
     assert Capability.VECTOR_HYBRID_SEARCH in caps

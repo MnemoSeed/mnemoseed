@@ -1,0 +1,28 @@
+# VCS
+.git
+.gitignore
+
+# Local tool venv and caches
+.venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+__pycache__
+*.pyc
+
+# Tests and docs are not needed in the runtime image
+tests
+docs
+.claude
+
+# Local config / data must never leak into the image
+*.db
+*.lance
+config.toml
+!docker/config.toml
+
+# Artifacts
+build
+dist
+*.egg-info
+*.log

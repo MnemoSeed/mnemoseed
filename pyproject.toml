@@ -66,14 +66,6 @@ module = ["pyarrow", "lancedb", "lancedb.query", "onnxruntime"]
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
 
-[[tool.mypy.overrides]]
-module = "mnemoseed.cli"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "mnemoseed.daemon.*"
-ignore_errors = true
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
