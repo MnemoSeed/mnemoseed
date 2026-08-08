@@ -9,9 +9,9 @@
 gantt
     title MnemoSeed 开发路线图（2026 Q3–Q4）
     dateFormat  YYYY-MM-DD
-    section M0 地基
+    section M0 地基（PRD-08）
     repo CI/CD + docker-compose 骨架        :m0a, 2026-08-10, 7d
-    数据 schema + Provenance 基座            :m0b, after m0a, 7d
+    数据 schema + Provenance 基座            :m0b, after m0a, 9d
     section M1 本地闭环（免费轨可用）
     PRD-01 捕获子系统                        :m1a, after m0b, 10d
     PRD-02 梦境引擎(本地 Ollama)             :m1b, after m1a, 14d
