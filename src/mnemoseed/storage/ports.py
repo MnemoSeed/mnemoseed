@@ -479,7 +479,7 @@ class GraphStore(Protocol):
     def invalidate(self, node_id: str, valid_to: float) -> None:
         raise NotImplementedError
 
-    def append_version(self, node: GraphNode) -> None:
+    def append_version(self, node: GraphNode, *, invalidate_at: float | None = None) -> None:
         raise NotImplementedError
 
     def versions(self, node_id: str) -> list[GraphNode]:
