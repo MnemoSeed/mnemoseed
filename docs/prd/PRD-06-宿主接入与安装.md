@@ -24,7 +24,7 @@
 | FR-6.1d | `mnemoseed whoami`：当前环境身份自证（profile/daemon/token 有效性）；`mnemoseed status` 回读全部宿主配置生成绑定总表 | P0 |
 | FR-6.1e | 首次注册流程：daemon 首启无 owner → setup 态（记忆 API 503 + 指引，仅 `/console/setup` 可用）；setup 创建 owner（argon2 密码哈希），仅允许一次，此后端点永久关闭；`mnemoseed auth reset` 本机重置密码 | P0 |
 | FR-6.1f | 开源版单用户硬限：用户管理仅 owner，"添加用户"锁定并注明激活路径（官方云端 / commercial license）；license 激活入口（Ed25519 离线验签，entitlements 含 multi_user/seats/有效期，到期宽限 30 天且永不动数据） | P0 |
-| FR-6.2 | daemon embedded 模式：单进程内嵌 LanceDB + SQLite-Graph + bge-m3 ONNX（~150MB 模型下载含断点续传），零 Docker 依赖（默认栈选型见 design/03 §1） | P0 |
+| FR-6.2 | daemon embedded 模式：单进程内嵌 LanceDB + SQLite-Graph + bge-m3 ONNX（~543MiB int8 量化模型下载含断点续传），零 Docker 依赖（默认栈选型见 design/03 §1） | P0 |
 | FR-6.3 | Claude Code plugin（marketplace 分发，单包含 hooks + MCP + commands + skills）：SessionStart 暖场注入（additionalContext ≤800 tokens，远低于 10,000 字符上限）/ **UserPromptSubmit 逐轮注入**（daemon 2s 内返回高相关记忆，超时/空结果 fail-open 不注入）/ UserPromptSubmit+PostToolUse 自动捕获 / PreCompact flush / SessionEnd 结算（Stop hook 遵守连续 8 次 block 上限与 stop_hook_active 检查）；slash commands：/memory /dream /forget /recall | P0 |
 | FR-6.3b | Cursor 适配：`.cursor/hooks.json`（项目级）——afterAgentResponse 全文捕获 + postToolUse 捕获 + sessionStart 暖场注入；`.cursor/rules/*.mdc`（alwaysApply）常驻读取指引；**逐轮注入不可用**（beforeSubmitPrompt 只能 block），读取靠暖场 + rules + MCP recall；验证 Claude Code hooks 兼容层可复用程度 | P0 |
 | FR-6.3c | Codex CLI 适配：`~/.codex/hooks.json`——SessionStart 暖场 + UserPromptSubmit 逐轮注入（≤2,500 token）与捕获 + SessionEnd transcript 结算；AGENTS.md 常驻指引；**installer 必须引导用户完成 `/hooks` trust 审查**（按 hash，否则 hooks 静默不执行） | P1 |

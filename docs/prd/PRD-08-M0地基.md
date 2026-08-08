@@ -26,7 +26,7 @@
 | D4 | **保持双 repo**（core Python / mcp Node），不切 monorepo | 接入层本来就可替换；独立 CI、独立版本节奏；零代码阶段切结构只有成本没有收益 |
 | D5（v2 新增） | **profile 隔离走钢印字段**：chunks 加 `profile_id`，靠 `vector.metadata_filter` 过滤；不引入"每层多实例向量库"的配置复杂度 | 与 nodes 的 `profile_id` 对齐；PRD-06 身份模型每次调用显式携带 profile_id，天然匹配 |
 | D6（v2 新增） | **Tier-3 隔离图谱 = 第二个 GraphStore 命名实例**（embedded 下独立 SQLite 文件，PG 下独立 schema）；注册表支持按层命名多实例（`graph.main` / `graph.isolated`） | design/02 §5 承诺的是物理隔离，分区键降级会破坏"不可反向污染"的叙事；接口不变，只是注册表多一个名字 |
-| D7（v2 新增） | **契约测试用确定性合成 embedder**（固定维度的 hash 伪向量），bge-m3 真实推理单独走带模型缓存的冒烟测试 | CI 不可能每个 PR 拉 150MB 模型（NFR-8.2 ≤5min）；可移植性实证验的是接口行为不是向量质量 |
+| D7（v2 新增） | **契约测试用确定性合成 embedder**（固定维度的 hash 伪向量），bge-m3 真实推理单独走带模型缓存的冒烟测试 | CI 不可能每个 PR 拉 ~543MiB 模型（NFR-8.2 ≤5min）；可移植性实证验的是接口行为不是向量质量 |
 
 ## 4. 功能需求
 
@@ -34,7 +34,7 @@
 |---|---|---|
 | FR-8.1 | core repo 骨架：uv 管理 src-layout 包、pytest、ruff、mypy、GitHub Actions CI（lint + typecheck + test，PR 必过；bge-m3 模型文件走 CI 缓存） | P0 |
 | FR-8.2 | 四端口接口定义为 Protocol，**方法清单以附录 B 为准**；接口配驱动注册表，config.toml 按层选驱动且**支持按层命名多实例**（如 `graph.main` / `graph.isolated`）；preset（embedded/docker/custom）+ 逐层覆盖，`STORAGE_MODE` 保留为 preset 快捷方式；preset 枚举可扩展（cloud 预留），不写死 | P0 |
-| FR-8.3 | embedded 驱动四件：`lancedb_embedded` / `sqlite_graph`（自建邻接表）/ `sqlite_meta` / `bge_m3_onnx`（模型文件首次运行下载 ~150MB，进度可见；另有 `synthetic` 测试 embedder） | P0 |
+| FR-8.3 | embedded 驱动四件：`lancedb_embedded` / `sqlite_graph`（自建邻接表）/ `sqlite_meta` / `bge_m3_onnx`（模型文件首次运行下载 ~543MiB（int8 量化 ONNX，实测），进度可见；另有 `synthetic` 测试 embedder） | P0 |
 | FR-8.4 | 第二驱动：`pgvector` / `pg_graph`（纯关系表，与 sqlite_graph 同 schema 同查询）/ `pg_meta`；Embedder 第二驱动 = `openai_compatible`（任意兼容端点，**只出 dense**，声明缺 `embed.sparse_output`） | P0 |
 | FR-8.5 | **接口契约测试套件**：与驱动无关的行为测试，覆盖附录 B 每个方法（附"方法 ↔ 契约测试"映射表），对 embedded 与 pg 两套驱动各跑一遍；另含 SQLite/PG **迁移对账断言**（同一 schema_version 序列、同字段定义，两侧比对零差异） | P0 |
 | FR-8.6 | capability flags 最小集（11 个）：`vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`。缺能力的驱动组合：启动拒绝或走**明示降级**，降级行为表以附录 C 为准（代码与 config 文档同步） | P0 |
@@ -80,7 +80,7 @@
 ## 9. 已识别残留风险（M0 不解决，登记备查）
 
 - **SQLite 断电耐久**：score_pool/watermark 的并发正确性有契约测试覆盖，但 embedded 单进程断电崩溃恢复无 AC——M1 捕获链路（PRD-01）上线前补崩溃恢复测试；
-- **bge-m3 ONNX 分发实测**：150MB + ONNX runtime 依赖链与 TTFM < 3min 的真实适配，需 PRD-06 安装流程实测验证；
+- **bge-m3 ONNX 分发实测**：~543MiB（实测 569.7MB，int8 量化）+ ONNX runtime 依赖链与 TTFM < 3min 的真实适配，需 PRD-06 安装流程实测验证；
 - **LanceDB 十万级 p95**：M0 契约测试不暴露真实规模性能，PRD-03 NFR-3.1（300ms）届时独立验收。
 
 ---
