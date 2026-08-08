@@ -14,7 +14,7 @@
 | [01-记忆管线五阶段](design/01-记忆管线五阶段.md) | Capture / Consolidate / Retrieve / Reconcile / Decay + Provenance 全管线设计 |
 | [02-梦境引擎](design/02-梦境引擎.md) | 触发状态机、快照隔离、中断保护、双轨分流写入、增量脱水 |
 | [03-存储与检索](design/03-存储与检索.md) | 混合双库总线、STORAGE_MODE 路由矩阵、混合检索、抗稀释策略 |
-| [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、Persona 解耦、BYOK/TEE 零知识架构 |
+| [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、Anima 解耦（灵魂模型）、BYOK/TEE 零知识架构 |
 | [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
 | [06-接入与安装体验](design/06-接入与安装体验.md) | 三层适配架构（daemon/MCP/plugin）、profile 凭证身份模型（login/link）、宿主能力矩阵、3 分钟安装流程、断开卸载语义 |
 | [07-管理控制台](design/07-管理控制台.md) | MnemoSeed Console：profiles 管理、记忆浏览、图谱可视化、单条记忆全档案、梦境面板与 token 用量、模型路由设置 |

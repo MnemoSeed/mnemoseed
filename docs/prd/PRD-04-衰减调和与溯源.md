@@ -16,12 +16,13 @@
 
 | ID | 需求 | 优先级 |
 |---|---|---|
-| FR-4.1 | 衰减计算：`w = base_confidence × exp(-λ × days)`；λ 按记忆类型分层（fact 0.01 / preference 0.005 / episode 0.03） | P0 |
-| FR-4.2 | 强化回弹：检索使用事件触发 `last_reinforced=now`、`w` 回弹（spacing effect） | P0 |
+| FR-4.1 | 衰减计算：`w = base_confidence × exp(-λ_eff × days)`，`λ_eff = λ_base × (1 + κ × interference_load)`——相似邻居越多衰减越快（干扰理论 Wixted 2004，独特记忆天然抗衰）；λ_base 按记忆类型分层（fact 0.01 / preference 0.005 / episode 0.03） | P0 |
+| FR-4.2 | 强化回弹：检索使用事件触发 `last_reinforced=now`、`w` 回弹；**间隔效应冷却**——短时间窗内重复召回收益递减（Cepeda 2006），防集中刷权重 | P0 |
 | FR-4.3 | 软衰落阶梯：w<0.4 沉底（不进 top-k）→ w<0.1 冻结（不检索）→ w<0.05 且 90 天无访问归档（移出索引）；显式查询可复活（w→0.5） | P0 |
 | FR-4.4 | 永不衰减白名单：provenance、用户 pin、compliance/safety 约束 | P0 |
 | FR-4.5 | 写入侧冲突检测：同主同谓比对 → 相同强化 / **cues 可划界则情境作用域共存** / 可裁决则 invalidate 接管 / 不可裁决 flag_conflict（四分支，情境共存优先于裁决） | P0 |
-| FR-4.5b | 冲突确认渲染接口：引擎只输出结构化冲突对象（old/new + provenance），措辞由 Persona 层按其语气渲染为拟人对话，引擎不得自带话术 | P0 |
+| FR-4.5b | 冲突确认渲染接口：引擎只输出结构化冲突对象（old/new + provenance），措辞由在任 anima 演绎（性格核心+染层 → 语气），引擎不得自带话术（anima 模型见 design/04 §2） | P0 |
+| FR-4.5c | **偏好调和分支**：PREFERENCE 节点不走矛盾四分支——新旧偏好按漂移语义共存于版本链（"当时生效的我"），更新规则 `Δvalence = 学习率(∝prior_width) × 证据强度 × 类型权重(行为>陈述>情绪共现>曝光)`；证据只取自用户原始输入（design/01 §7、02 §5） | P0 |
 | FR-4.1b | 动态 λ 自校准：按沉底记忆的复活率反馈调节各层 λ（预留接口，初值手工） | P2 |
 | FR-4.3b | 源失效降权：provenance.source 失效的记忆自动额外降权（MemPalace sync 模式） | P1 |
 | FR-4.2b | 捕获时赫布强化：近重复命中即回弹，不等做梦（与 PRD-01 写入前 dedup 检查联动） | P0 |

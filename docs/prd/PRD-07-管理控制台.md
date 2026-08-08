@@ -26,6 +26,7 @@
 | FR-7.7 | Conflicts 收件箱：矛盾双方成对展示 + 四分支处理（强化/共存划界/作废/挂起），处理写回版本链 | P1（M1 末） |
 | FR-7.8 | Graph View：Cytoscape.js 交互图谱，节点透明度 = decay_weight（遗忘可视化），点击进档案页 | P1（M2） |
 | FR-7.9 | 全部写操作进 Audit Log；Audit Log 页面（M2） | P1 |
+| FR-7.10 | Anima 面板（M2）：特质雷达图（轴数随 schema 不锁死六轴；顶点=mean，误差带=width 不确定性可视，允许手动微调）；白话创建（自然语言描述 → 模型量化生成模板）；核心实线 + 染层当前表现虚线叠加；跨 profile 链接/换绑入口 + 换绑触发 re-dye 确认；drift_history 时间轴回放（design/04 §2.4） | P1（M2） |
 
 ## 4. 非功能需求
 

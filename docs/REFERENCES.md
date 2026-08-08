@@ -73,6 +73,30 @@
 |---|---|---|---|
 | R28 | Craik, F. I. M., & Lockhart, R. S. (1972). Levels of processing: A framework for memory research. *Journal of Verbal Learning and Verbal Behavior*, 11(6), 671–684. DOI: 10.1016/S0022-5371(72)80001-X | importance_hint 用户显式加权的依据（意向性编码优先于偶然编码） | ✅ Crossref 命中 |
 
+## 人格、偏好与系统动力学（2026-08-08 anima 模型 + 系统复盘新增）
+
+| # | 引用 | 用于 | 状态 |
+|---|---|---|---|
+| R29 | Fleeson, W. (2001). Toward a structure- and process-integrated view of personality. *Journal of Personality and Social Psychology*, 80(6), 1011–1027. | 特质=密度分布（mean+width 量化骨架）；说话方式是性格的自然流露 | ⚠️ 高置信经典，待 Crossref 抽查 |
+| R30 | McAdams, D. P., & Pals, J. L. (2006). A new Big Five. *American Psychologist*, 61(3), 204–217. | anima 三层架构（先天特质/特征适应/叙事身份） | ⚠️ 高置信经典，待抽查 |
+| R31 | Cloninger, C. R., Svrakic, D. M., & Przybeck, T. R. (1993). A psychobiological model of temperament and character. *Archives of General Psychiatry*, 50(12), 975–990. | 核心 immutable vs 染层可塑（temperament/character 分离） | ⚠️ 高置信经典，待抽查 |
+| R32 | Markus, H., & Wurf, E. (1987). The dynamic self-concept. *Annual Review of Psychology*, 38, 299–337. | 多自我按情境激活（anima 可切换的依据） | ⚠️ 高置信经典，待抽查 |
+| R33 | Hong, Y., Morris, M. W., Chiu, C., & Benet-Martínez, V. (2000). Multicultural minds. *American Psychologist*, 55(7), 709–720. | frame switching（换 anima = 切换整套行为倾向） | ⚠️ 高置信经典，待抽查 |
+| R34 | Bem, D. J. (1972). Self-perception theory. *Advances in Experimental Social Psychology*, 6, 1–62. | 行为证据 > 陈述证据（偏好更新权重） | ⚠️ 高置信经典，待抽查 |
+| R35 | De Houwer, J. (2007). A conceptual and theoretical analysis of evaluative conditioning. *The Spanish Journal of Psychology*, 10(2), 230–241. | 情绪共现染色偏好 | ⚠️ 待抽查 |
+| R36 | Zajonc, R. B. (1968). Attitudinal effects of mere exposure. *Journal of Personality and Social Psychology*, 9(2), 1–27. | 曝光计数喂偏好更新（低权重、有饱和） | ⚠️ 高置信经典，待抽查 |
+| R37 | Schultz, W., Dayan, P., & Montague, P. R. (1997). A neural substrate of prediction and reward. *Science*, 275(5306), 1593–1599. | 奖赏预测误差驱动价值更新（行为证据主通路） | ⚠️ 高置信经典，待抽查 |
+| R38 | Levy, D. J., & Glimcher, P. W. (2011). Comparing apples and oranges. *Annals of the New York Academy of Sciences*, 1239, 12–24. | vmPFC 共同价值货币 | ⚠️ 待抽查 |
+| R39 | Roberts, B. W., Wood, D., & Smith, J. L. (2005). Evaluating five factor theory and social investment perspectives on personality trait development. *Journal of Research in Personality*, 39(1), 166–184. | 人格定向漂移（人生阶段事件触发重估）；特质终身可变 | ⚠️ 待抽查 |
+| R40 | Anderson, M. C., Bjork, R. A., & Bjork, E. L. (1994). Remembering can cause forgetting. *Journal of Experimental Psychology: Learning, Memory, and Cognition*, 20(5), 1063–1087. | 检索-衰减正反馈环（retrieval-induced forgetting）→ 多样性/探索配额 | ⚠️ 高置信经典，待抽查 |
+| R41 | Wixted, J. T. (2004). The psychology and neuroscience of forgetting. *Annual Review of Psychology*, 55, 235–269. | 干扰项衰减（遗忘主引擎是干扰不是时间） | ⚠️ 高置信经典，待抽查 |
+| R42 | Walker, M. P., & van der Helm, E. (2009). Overnight therapy? *Psychological Bulletin*, 135(5), 731–748. | 梦境情绪脱敏（gist 永存、电荷渐消） | ⚠️ 高置信经典，待抽查 |
+| R43 | Tse, D., et al. (2007). Schemas and memory consolidation. *Science*, 316(5821), 76–82. | 图式加速同化（同构快速通道/异构加证据） | ⚠️ 高置信经典，待抽查 |
+| R44 | Forer, B. R. (1949). The fallacy of personal validation. *Journal of Abnormal and Social Psychology*, 44(1), 118–123. | 六边形可视化必须显示不确定性（防 Barnum 伪造精确） | ⚠️ 高置信经典，待抽查 |
+| R45 | MacLeod, C., Mathews, A., & Tata, P. (1986). Attentional bias in emotional disorders. *Journal of Abnormal Psychology*, 95(1), 15–20. | 捕获中性红线（anima 不参与捕获评分） | ⚠️ 高置信经典，待抽查 |
+| R46 | Pearce, J. M., & Hall, G. (1980). A model for Pavlovian learning. *Psychological Review*, 87(6), 532–552. | 学习率 ∝ 不确定性（偏好 Kalman 式更新） | ⚠️ 高置信经典，待抽查 |
+| R47 | Quoidbach, J., Gilbert, D. T., & Wilson, T. D. (2013). The end of history illusion. *Science*, 339(6115), 96–98. | 偏好漂移叙事（人低估自己未来的变化） | ⚠️ 待抽查 |
+
 ---
 
 *维护规则：任何文档新增理论引用时必须同步登记本表并标注核实状态；标注 ⚠️ 的条目在后续迭代中逐条抽查转正或替换。*
