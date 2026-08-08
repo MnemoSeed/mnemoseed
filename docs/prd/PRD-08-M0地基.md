@@ -149,6 +149,7 @@
 | mark_consolidated(chunk_ids) | 批量置 consolidated | 梦境清空 |
 | purge_range(session_id, turn_start, turn_end) | 按快照范围安全清空，两端互不干扰 | 梦境 FR-2.x |
 | update_weights(updates[]) | 批量写 decay_weight / last_reinforced / reinforce_count | 衰减与强化回弹 |
+| update_chunk_state(chunk_ids, hit_increment?, needs_reconcile?) | 批量写使用计数（hit_count / last_hit_at）与 needs_reconcile 置位/清除；hit_increment>0 时同时刷新 last_hit_at | 检索命中计数、捕获 FR-1.8 疑似矛盾标记 |
 | list_chunks(filter, page) | 过滤 + 分页列表 | console Browser |
 | capabilities() | 自报能力集 | 启动校验 |
 
