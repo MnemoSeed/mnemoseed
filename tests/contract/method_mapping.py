@@ -1,0 +1,83 @@
+"""Canonical appendix B method -> contract test mapping (prd-08 FR-8.5 / AC-3).
+
+One entry per protocol method; ``test_contract_coverage`` introspects the port
+Protocols and hard-fails on any method that has no contract test (or any mapped
+name that is not a protocol method). The same table produces the checked-in
+REPORT-method-mapping.md artifact.
+"""
+
+from __future__ import annotations
+
+PORT_ORDER: tuple[str, ...] = ("VectorStore", "GraphStore", "MetaStore", "Embedder")
+
+# Every value is "test_module.py::test_function" in this directory.
+COVERAGE: dict[str, dict[str, str]] = {
+    "VectorStore": {
+        "capabilities": "test_contract_vector.py::test_capabilities",
+        "upsert_chunk": "test_contract_vector.py::test_upsert_get_roundtrip",
+        "get_chunk": "test_contract_vector.py::test_upsert_get_roundtrip",
+        "delete_chunk": "test_contract_vector.py::test_delete_chunk",
+        "search": "test_contract_vector.py::test_search_profile_isolation_and_metadata_filters",
+        "near_duplicate": "test_contract_vector.py::test_near_duplicate_thresholds",
+        "snapshot_read": "test_contract_vector.py::test_snapshot_read_consistent_set",
+        "mark_consolidated": "test_contract_vector.py::test_mark_consolidated",
+        "purge_range": "test_contract_vector.py::test_purge_range_disjoint_safe",
+        "update_weights": "test_contract_vector.py::test_update_weights",
+        "update_chunk_state": "test_contract_vector.py::test_update_chunk_state_usage_counts",
+        "list_chunks": "test_contract_vector.py::test_list_chunks_filter_pagination",
+    },
+    "GraphStore": {
+        "capabilities": "test_contract_graph.py::test_capabilities",
+        "upsert_node": "test_contract_graph.py::test_upsert_get_roundtrip",
+        "get_node": "test_contract_graph.py::test_upsert_get_roundtrip",
+        "list_nodes": "test_contract_graph.py::test_list_nodes_filter_pagination",
+        "add_edge": "test_contract_graph.py::test_add_edge_weight_overwrite",
+        "bump_cooccurrence": "test_contract_graph.py::test_bump_cooccurrence_symmetric_and_increments",
+        "traverse": "test_contract_graph.py::test_traverse_profile_scoped",
+        "find_same_predicate": "test_contract_graph.py::test_find_same_predicate",
+        "set_flags": "test_contract_graph.py::test_set_and_clear_flags",
+        "clear_flags": "test_contract_graph.py::test_set_and_clear_flags",
+        "invalidate": "test_contract_graph.py::test_invalidate_closes_current_revision",
+        "append_version": "test_contract_graph.py::test_append_version_supersedes_previous",
+        "versions": "test_contract_graph.py::test_versions_chain",
+        "diff": "test_contract_graph.py::test_diff_reports_payload_change",
+        "timeline": "test_contract_graph.py::test_timeline_replays_versions",
+        "as_of": "test_contract_graph.py::test_as_of_bi_temporal_replay",
+        "batch_update_weights": "test_contract_graph.py::test_batch_update_weights",
+        "query_intentions": "test_contract_graph.py::test_query_intentions_status_and_due",
+    },
+    "MetaStore": {
+        "capabilities": "test_contract_meta.py::test_capabilities",
+        "pool_add": "test_contract_meta.py::test_pool_add_state_advance_watermark",
+        "pool_state": "test_contract_meta.py::test_pool_add_state_advance_watermark",
+        "advance_watermark": "test_contract_meta.py::test_pool_watermark_gap_raises",
+        "upsert_profile": "test_contract_meta.py::test_profile_crud_and_token_cascade",
+        "get_profile": "test_contract_meta.py::test_profile_crud_and_token_cascade",
+        "delete_profile": "test_contract_meta.py::test_profile_crud_and_token_cascade",
+        "list_profiles": "test_contract_meta.py::test_profile_crud_and_token_cascade",
+        "issue_token": "test_contract_meta.py::test_issue_token_and_revoke",
+        "revoke_token": "test_contract_meta.py::test_issue_token_and_revoke",
+        "get_config": "test_contract_meta.py::test_config_versioned_get_set_rollback",
+        "set_config": "test_contract_meta.py::test_config_versioned_get_set_rollback",
+        "rollback_config": "test_contract_meta.py::test_config_versioned_get_set_rollback",
+        "audit_append": "test_contract_meta.py::test_audit_append_and_query",
+        "audit_query": "test_contract_meta.py::test_audit_append_and_query",
+        "record_dream_run": "test_contract_meta.py::test_dream_runs_roundtrip",
+        "list_dream_runs": "test_contract_meta.py::test_dream_runs_roundtrip",
+        "schema_version": "test_contract_meta.py::test_schema_version_and_migrate_forward_only",
+        "migrate": "test_contract_meta.py::test_schema_version_and_migrate_forward_only",
+    },
+    "Embedder": {
+        "capabilities": "test_contract_embed.py::test_capabilities",
+        "embed": "test_contract_embed.py::test_embed_dense_deterministic_and_normalized",
+        "embed_batch": "test_contract_embed.py::test_embed_batch_preserves_order_and_matches_single",
+    },
+}
+
+# Appendix B reference method counts (prd-08 appendix B.1..B.4).
+EXPECTED_METHOD_COUNTS: dict[str, int] = {
+    "VectorStore": 12,
+    "GraphStore": 18,
+    "MetaStore": 19,
+    "Embedder": 3,
+}
