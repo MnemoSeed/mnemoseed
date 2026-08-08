@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -142,6 +143,33 @@ class LanceDbEmbeddedStore:
                 values["reinforce_count"] = int(update.reinforce_count)
             if values:
                 self._table.update(where=f"chunk_id = {_escape(update.chunk_id)}", values=values)
+
+    def update_chunk_state(
+        self,
+        chunk_ids: Sequence[str],
+        hit_increment: int | None = None,
+        needs_reconcile: bool | None = None,
+    ) -> None:
+        """Port update_chunk_state; one batched SQL-expression update. The
+        counter increment references the row; static pieces (last_hit_at,
+        needs_reconcile) go in as SQL literals because LanceDB rejects passing
+        `values` and `values_sql` in the same call."""
+        ids = list(chunk_ids)
+        if not ids:
+            return
+        if hit_increment is None and needs_reconcile is None:
+            return
+        clause = ", ".join(_escape(cid) for cid in ids)
+        where = f"chunk_id IN ({clause})"
+        updates_sql: dict[str, str] = {}
+        if hit_increment is not None and hit_increment != 0:
+            updates_sql["hit_count"] = f"hit_count + {int(hit_increment)}"
+            if hit_increment > 0:
+                updates_sql["last_hit_at"] = repr(time.time())
+        if needs_reconcile is not None:
+            updates_sql["needs_reconcile"] = "true" if needs_reconcile else "false"
+        if updates_sql:
+            self._table.update(where=where, values_sql=updates_sql)
 
     # ------------------------------------------------------------- reads
 

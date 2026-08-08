@@ -437,6 +437,29 @@ class VectorStore(Protocol):
     def update_weights(self, updates: Sequence[WeightUpdate]) -> None:
         raise NotImplementedError
 
+    def update_chunk_state(
+        self,
+        chunk_ids: Sequence[str],
+        hit_increment: int | None = None,
+        needs_reconcile: bool | None = None,
+    ) -> None:
+        """Batch-write per-chunk usage counters and the reconcile flag.
+
+        Port-level semantics so every vector driver behaves identically:
+
+        - ``hit_increment`` is added verbatim to each chunk's ``hit_count``.
+          Only a positive value also refreshes ``last_hit_at`` to the current
+          time; zero touches nothing.
+        - ``needs_reconcile`` sets (True) or clears (False) the flag.
+        - Unknown ``chunk_id`` values are ignored silently (no error); callers
+          may pass ids that were concurrently deleted (e.g. purged turns).
+        - Passing neither argument updates nothing.
+
+        Consumers: retrieval hit counting, and capture FR-1.8 where the
+        0.85-0.9 near-duplicate band marks chunks needs_reconcile.
+        """
+        raise NotImplementedError
+
     def list_chunks(self, filter: ChunkFilter, page: Page) -> PageResult[ChunkStamp]:
         raise NotImplementedError
 

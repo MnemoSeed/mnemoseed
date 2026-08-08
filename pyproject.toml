@@ -21,11 +21,9 @@ dependencies = [
     "tokenizers>=0.20",
     # vector math shared by the vector/embed drivers (synthetic, bge-m3, lancedb)
     "numpy>=2.0",
-]
-
-[project.optional-dependencies]
-# Postgres-family alternative drivers
-postgres = [
+    # postgres driver family (FR-8.4): pg_graph / pg_meta / pgvector second drivers.
+    # Base deps because the pg drivers are the docker preset defaults and CI
+    # imports them under a plain uv sync (AC-1).
     "psycopg[binary]>=3.2",
     "pgvector>=0.3",
 ]

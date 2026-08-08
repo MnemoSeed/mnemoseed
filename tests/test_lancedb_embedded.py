@@ -402,6 +402,69 @@ def test_update_weights_partial_fields(store, embedder):
     assert store.get_chunk("a1").decay_weight == pytest.approx(0.0)
 
 
+# ---------------------------------------------------------------- chunk state
+
+
+def _raw_row(store: LanceDbEmbeddedStore, chunk_id: str) -> dict:
+    rows = store._table.search().where(f"chunk_id = '{chunk_id}'").limit(1).to_list()
+    return rows[0] if rows else {}
+
+
+def test_update_chunk_state_hit_increment_refreshes_last_hit_at(store, embedder):
+    _write(store, embedder, _make("m1", "alpha beta gamma"))
+    store.update_chunk_state(["m1"], hit_increment=3)
+    row = _raw_row(store, "m1")
+    assert row["hit_count"] == 3
+    assert row["last_hit_at"] is not None and row["last_hit_at"] > 0.0
+
+
+def test_update_chunk_state_sets_and_clears_reconcile_flag(store, embedder):
+    _write(store, embedder, _make("m2", "alpha beta gamma"))
+    store.update_chunk_state(["m2"], needs_reconcile=True)
+    assert _raw_row(store, "m2")["needs_reconcile"] is True
+    store.update_chunk_state(["m2"], needs_reconcile=False)
+    assert _raw_row(store, "m2")["needs_reconcile"] is False
+
+
+def test_update_chunk_state_batches_multiple_ids(store, embedder):
+    _write(store, embedder, _make("m3", "alpha beta gamma"))
+    _write(store, embedder, _make("m4", "alpha beta delta"))
+    _write(store, embedder, _make("m5", "rho sigma tau"))
+    store.update_chunk_state(["m3", "m4"], hit_increment=2, needs_reconcile=True)
+    for cid in ("m3", "m4"):
+        row = _raw_row(store, cid)
+        assert row["hit_count"] == 2
+        assert row["needs_reconcile"] is True
+    untouched = _raw_row(store, "m5")
+    assert untouched["hit_count"] == 0
+    assert untouched["needs_reconcile"] is False
+
+
+def test_update_chunk_state_ignores_unknown_ids_silently(store, embedder):
+    _write(store, embedder, _make("m6", "alpha beta gamma"))
+    store.update_chunk_state(["never-written"], hit_increment=1, needs_reconcile=True)
+    row = _raw_row(store, "m6")
+    assert row["hit_count"] == 0
+    assert row["needs_reconcile"] is False
+
+
+def test_update_chunk_state_noop_cases(store, embedder):
+    _write(store, embedder, _make("m7", "alpha beta gamma"))
+    store.update_chunk_state(["m7"])  # neither argument
+    store.update_chunk_state([], hit_increment=1)  # empty batch
+    row = _raw_row(store, "m7")
+    assert row["hit_count"] == 0
+    assert row["last_hit_at"] is None
+
+
+def test_update_chunk_state_zero_hit_is_noop(store, embedder):
+    _write(store, embedder, _make("m8", "alpha beta gamma"))
+    store.update_chunk_state(["m8"], hit_increment=0)
+    row = _raw_row(store, "m8")
+    assert row["hit_count"] == 0
+    assert row["last_hit_at"] is None
+
+
 def test_purge_range_deletes_only_overlapping_turns(store, embedder):
     _write_turn_row(store, embedder, "t1", 100, 150)  # overlaps [120, 200]
     _write_turn_row(store, embedder, "t2", 300, 400)  # disjoint
