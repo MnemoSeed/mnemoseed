@@ -1,25 +1,30 @@
 """CapturePipeline seam — where the F1-F3 capture funnel plugs in.
 
 F1 (Stripper) is wired as StrippingPipeline, the embedded default below; F2
-(persistence classifier) and F3 (scoring) are later tasks consuming the same
-consumer contract. Submit must never block the ingest hot path: the default is
-an O(1) append, and F1 strips as a synchronous drain on read, never inside the
-HTTP handler.
+(persistence classifier) and F3 (scoring) run as ScoringPipeline, the funnel
+tail that scores drained turns into a score pool. Submit must never block the
+ingest hot path: every stage is an O(1) append, and F1-F3 process on the
+consumer side (``drain`` / ``turns``), never inside the HTTP handler.
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+import time
+from dataclasses import dataclass, field
+from typing import Protocol, cast
 
+from mnemoseed.capture.pool import ScorePool
 from mnemoseed.capture.rulesets_v1 import RULESET_V1
+from mnemoseed.capture.scorer import Durability, ScoredTurn, TurnScorer
 from mnemoseed.capture.stripper import (
     RuleSet,
     StrippedTurn,
     Stripper,
     StripStats,
 )
-from mnemoseed.schema.turn import Turn
-from mnemoseed.storage.ports import TurnRange
+from mnemoseed.schema.turn import Turn, TurnRole
+from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
+from mnemoseed.storage.ports import Embedder, TurnRange
 
 
 class CapturePipeline(Protocol):
@@ -124,3 +129,123 @@ class StrippingPipeline:
             bytes_out=self._bytes_out,
             rules_hit=dict(self._rules_hit),
         )
+
+
+def _user_text(turn: Turn) -> str:
+    """Forward, joined content of the USER steps (the scanner's raw input)."""
+    parts = [step.content for step in turn.steps if step.role is TurnRole.USER]
+    return " ".join(parts)
+
+
+@dataclass
+class ScoringStats:
+    """Cumulative F1-F3 funnel telemetry across every drained turn of a
+    ScoringPipeline. ``dropped_reasons`` counts DISPOSABLE verdicts per reason;
+    ``pool_triggers`` counts dream/forced events fired by the score pool."""
+
+    turns_in: int = 0
+    durable_kept: int = 0
+    dropped: int = 0
+    dropped_reasons: dict[str, int] = field(default_factory=dict)
+    pool_triggers: int = 0
+    bytes_in: int = 0
+    bytes_out: int = 0
+    rules_hit: dict[str, int] = field(default_factory=dict)
+
+
+class ScoringPipeline:
+    """Full funnel tail: O(1) submit, then strip -> score -> pool on drain.
+
+    ``submit_turn`` appends to the delegate buffer, so /ingest stays O(1). The
+    consumer side strips each pending turn (F1), classifies and scores it
+    (F2/F3), keeps DURABLE turns in the buffer, drops DISPOSABLE turns with a
+    reason, and credits the score pool with each durable turn's S. Recent text
+    per profile feeds the scorer's novelty / repetition terms.
+    """
+
+    def __init__(
+        self,
+        delegate: InMemoryCapturePipeline | None = None,
+        *,
+        stripper: Stripper | None = None,
+        scorer: TurnScorer | None = None,
+        pool: ScorePool | None = None,
+        recent_capacity: int = 16,
+    ) -> None:
+        self._delegate = delegate if delegate is not None else InMemoryCapturePipeline()
+        self._stripper = stripper if stripper is not None else Stripper(RULESET_V1)
+        self._scorer = (
+            scorer if scorer is not None else TurnScorer(embedder=cast(Embedder, SyntheticEmbedder()))
+        )
+        self._pool = pool if pool is not None else ScorePool(clock=time.monotonic)
+        self._recent_capacity = recent_capacity
+        self._stripped: dict[str, list[Turn]] = {}
+        self._scored: dict[str, list[ScoredTurn]] = {}
+        self._recent: dict[str, list[str]] = {}
+        self._stats = ScoringStats()
+
+    def submit_turn(self, turn: Turn) -> None:
+        self._delegate.submit_turn(turn)
+
+    def end_session(self, session_id: str, turn_range: TurnRange) -> None:
+        self._delegate.end_session(session_id, turn_range)
+
+    def reload_rules(self, ruleset: RuleSet) -> None:
+        """Swap the stripper ruleset; governs turns drained after this call."""
+        self._stripper.reload_rules(ruleset)
+
+    def drain(self, session_id: str) -> list[ScoredTurn]:
+        """Process pending turns of one session; returns newly durable results."""
+        raw = self._delegate.turns(session_id)
+        stripped_done = len(self._stripped.get(session_id, []))
+        results: list[ScoredTurn] = []
+        for turn in raw[stripped_done:]:
+            stripped = self._stripper.strip_turn(turn)
+            self._stats.bytes_in += stripped.stats.bytes_in
+            self._stats.bytes_out += stripped.stats.bytes_out
+            for rule_id, count in stripped.stats.rules_hit.items():
+                self._stats.rules_hit[rule_id] = self._stats.rules_hit.get(rule_id, 0) + count
+            self._stripped.setdefault(session_id, []).append(stripped.turn)
+            recent = self._recent.setdefault(turn.profile_id, [])
+            scored = self._scorer.score_turn(
+                stripped.turn,
+                recent_texts=tuple(recent),
+                importance_hint=None,
+            )
+            self._stats.turns_in += 1
+            next_recent = [*recent, _user_text(stripped.turn)]
+            self._recent[turn.profile_id] = next_recent[-self._recent_capacity :]
+            if scored.durability.durability is Durability.DURABLE:
+                self._stats.durable_kept += 1
+                self._scored.setdefault(session_id, []).append(scored)
+                fired = self._pool.add_points(
+                    turn.profile_id,
+                    scored.importance,
+                    TurnRange(turn.turn_index, turn.turn_index),
+                )
+                self._stats.pool_triggers += len(fired)
+                results.append(scored)
+            else:
+                self._stats.dropped += 1
+                reason = scored.durability.reasons[0] if scored.durability.reasons else "default-deferral"
+                self._stats.dropped_reasons[reason] = self._stats.dropped_reasons.get(reason, 0) + 1
+        return results
+
+    def turns(self, session_id: str) -> list[ScoredTurn]:
+        """Drain pending turns lazily and return the buffered durable results."""
+        self.drain(session_id)
+        return list(self._scored.get(session_id, []))
+
+    def settled(self, session_id: str) -> TurnRange | None:
+        return self._delegate.settled(session_id)
+
+    def sessions(self) -> tuple[str, ...]:
+        return self._delegate.sessions()
+
+    @property
+    def pool(self) -> ScorePool:
+        return self._pool
+
+    @property
+    def stats(self) -> ScoringStats:
+        return self._stats

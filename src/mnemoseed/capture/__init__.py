@@ -1,18 +1,41 @@
 """Capture funnel: /ingest intake, Turn segmentation, downstream seam.
 
 F1 (Local Stripper) is wired in as the StrippingPipeline seam default; F2
-(persistence classifier) and F3 (scoring) land here as later tasks consuming
-the same CapturePipeline contract.
+(persistence classifier) and F3 (scoring) run as ScoringPipeline, which scores
+drained turns into a watermark score pool.
 """
 
 from __future__ import annotations
 
+from mnemoseed.capture.lexicon_v1 import (
+    EN_LEXICON_V1,
+    LEXICON_V1,
+    ZH_LEXICON_V1,
+    AffectiveEntry,
+    Lexicon,
+)
 from mnemoseed.capture.pipeline import (
     CapturePipeline,
     InMemoryCapturePipeline,
+    ScoringPipeline,
+    ScoringStats,
     StrippingPipeline,
 )
+from mnemoseed.capture.pool import (
+    PoolBackend,
+    PoolEvent,
+    PoolEventKind,
+    PoolStats,
+    ScorePool,
+)
 from mnemoseed.capture.rulesets_v1 import RULESET_V1
+from mnemoseed.capture.scorer import (
+    Durability,
+    ScoreComponents,
+    ScoredTurn,
+    ScoringConfig,
+    TurnScorer,
+)
 from mnemoseed.capture.segment import (
     CaptureError,
     ProfileMismatchError,
@@ -32,14 +55,29 @@ from mnemoseed.capture.stripper import (
 )
 
 __all__ = [
+    "AffectiveEntry",
     "CaptureError",
     "CapturePipeline",
     "ContentTarget",
+    "Durability",
+    "EN_LEXICON_V1",
     "InMemoryCapturePipeline",
+    "LEXICON_V1",
+    "Lexicon",
+    "PoolBackend",
+    "PoolEvent",
+    "PoolEventKind",
+    "PoolStats",
     "ProfileMismatchError",
     "RULESET_V1",
     "Rule",
     "RuleSet",
+    "ScoreComponents",
+    "ScorePool",
+    "ScoredTurn",
+    "ScoringConfig",
+    "ScoringPipeline",
+    "ScoringStats",
     "SessionSettledError",
     "SessionUnknownError",
     "StripAction",
@@ -48,5 +86,7 @@ __all__ = [
     "Stripper",
     "StripperError",
     "StrippingPipeline",
+    "TurnScorer",
     "TurnSegmenter",
+    "ZH_LEXICON_V1",
 ]

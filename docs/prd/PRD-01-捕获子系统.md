@@ -19,7 +19,7 @@
 | FR-1.1 | daemon `/ingest` 端点接收宿主 hook 直推的每场对话每个 Turn（2s 超时 fail-open 由调用侧保证），提取 user/assistant 消息与 tool_call 序列，完成 Turn 切分与结构化 | P0 |
 | FR-1.2 | Local Stripper 规则引擎：剥离编译日志、包管理输出、死循环报错堆栈、ANSI 高亮符；规则集可热更新 | P0 |
 | FR-1.3 | 持久性分类（三个月测试）v1：规则（时间限定词/情绪词表）+ 词表与嵌入启发式（durable/disposable）；**v1 不引入边缘小模型**——先在基准标注集上实测 precision，未达 NFR-1.3 再以小模型补强（选型与校准届时以标注集为据） | P0 |
-| FR-1.4 | 评分 `S = w₁·min(arousal,θ_cap) + w₂·新颖度 + w₃·因果链`（arousal 截顶、valence 仅存 cues、emotion 永不进 confidence——依据见 design/01 §1.6），权重可配置。v1 量化手段：arousal/valence 走 NRC VAD 词表 + 中文情绪词表查词回归；新颖度 = bge-m3 嵌入与近期分片的距离；因果链 = 规则特征（连接词/决策句式） | P0 |
+| FR-1.4 | 评分 `S = w₁·min(arousal,θ_cap) + w₂·新颖度 + w₃·因果链`（arousal 截顶、valence 仅存 cues、emotion 永不进 confidence——依据见 design/01 §1.6），权重可配置。v1 量化手段：arousal/valence 走手工策划种子词表（NRC VAD 形态，EN+ZH 各数百条；NRC VAD 本体为申请表门控资源不可自动分发，后续以校准资源替换）；新颖度 = bge-m3 嵌入与近期分片的距离；因果链 = 规则特征（连接词/决策句式） | P0 |
 | FR-1.5 | 积分池：累计 S；`pool ≥ 10.0 且 idle ≥ 5s` 发出梦境触发事件；硬上限 50.0 强制微巩固 | P0 |
 | FR-1.6 | 写入钢印：cognitive_tier / model_id / anima_id（当时在任灵魂）/ cues（**含 entities 字段**，Freshness Guard 检索侧过滤依赖；**含 host / task 编码情境字段**，编码特异性检索侧依赖——可空不可缺席，schema 在 M0 冻结前预留）/ provenance / decay_weight=1.0（schema 见设计文档 §1） | P0 |
 | FR-1.6b | **捕获中性红线**：F1–F3 评分与过滤全程禁止读取 anima 状态与 PREFERENCE 节点（anima 只染检索与渲染，捕获必须中性——design/01 §1 红线；CI 加静态检查防回归） | P0 |
