@@ -77,6 +77,18 @@ class LayerSpec:
     instances: dict[str, _InstanceOverride] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DreamConfig:
+    """Dream-engine runtime flags (PRD-02 FR-2.8 manual-first discipline).
+
+    ``auto_trigger`` decides whether ScorePool events drive dreams directly
+    (True) or are held as pending manual runs for ``mnemoseed dream --once``
+    (False, the M1 default until reflection quality passes review).
+    """
+
+    auto_trigger: bool = False
+
+
 @dataclass
 class Config:
     """Resolved configuration. layer_instances() materializes per-layer drivers."""
@@ -84,6 +96,7 @@ class Config:
     preset: str = DEFAULT_PRESET
     baseurl: str = "http://localhost:7788"
     storage: dict[str, LayerSpec] = field(default_factory=dict)
+    dream: DreamConfig = field(default_factory=DreamConfig)
     source: Path | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -197,7 +210,23 @@ def load_config(path: Path | None = None) -> Config:
                 instances=overrides,
             )
 
-    return Config(preset=preset_raw, baseurl=baseurl_raw, storage=storage, source=path, raw=raw)
+    dream = DreamConfig()
+    dream_raw = raw.get("dream")
+    if dream_raw is not None:
+        dream_table = _require_table(dream_raw, "dream")
+        auto_raw = dream_table.get("auto_trigger", False)
+        if not isinstance(auto_raw, bool):
+            raise ConfigError("dream.auto_trigger", "must be a boolean")
+        dream = DreamConfig(auto_trigger=auto_raw)
+
+    return Config(
+        preset=preset_raw,
+        baseurl=baseurl_raw,
+        storage=storage,
+        dream=dream,
+        source=path,
+        raw=raw,
+    )
 
 
 def default_config_toml() -> str:
@@ -206,6 +235,11 @@ def default_config_toml() -> str:
 # MnemoSeed configuration — single source of truth
 preset = "embedded"          # embedded | docker | custom
 baseurl = "http://localhost:7788"
+
+# Dream-engine manual-first discipline (PRD-02 FR-2.8): keep dreams manual
+# until reflection quality passes review, then flip to automatic.
+# [dream]
+# auto_trigger = false
 
 # Per-layer overrides (required under the custom preset):
 # [storage.vector]

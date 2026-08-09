@@ -24,8 +24,9 @@ from mnemoseed import __version__
 from mnemoseed.capture import ScoringPipeline, StrippingPipeline, TurnScorer, TurnSegmenter, WritingPipeline
 from mnemoseed.capture.pool import ScorePool
 from mnemoseed.capture.stamper import WriteContext
-from mnemoseed.config import load_config
+from mnemoseed.config import Config, load_config
 from mnemoseed.daemon.ingest import router as ingest_router
+from mnemoseed.dream import DreamTrigger, NullSnapshotter
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.schema.turn import Turn
 from mnemoseed.storage.factory import Stores, build_stores
@@ -98,27 +99,35 @@ def _daemon_write_context(turn: Turn) -> WriteContext:
     )
 
 
-def _build_capture(stores: Stores) -> WritingPipeline:
+def _build_capture(stores: Stores, config: Config) -> tuple[WritingPipeline, DreamTrigger]:
     """Serving capture funnel: strip -> score -> pool -> stamp/write over the
     resolved storage stack. /ingest stays submit-only; the funnel drains on
     /session/end (v1 drain trigger, off the /ingest hot path).
 
-    The ScorePool binds the meta store as its persistence backend and is
-    restored at boot from the persisted per-profile ledgers, so a daemon
-    restart keeps un-triggered balances instead of losing them.
+    The ScorePool binds the meta store as its persistence backend, is restored
+    at boot from the persisted per-profile ledgers (so a daemon restart keeps
+    un-triggered balances), and sinks its dream events into the DreamTrigger.
+    The trigger binds the void snapshot seam until T2 supplies the real one and
+    honours the FR-2.8 manual-first ``[dream] auto_trigger`` flag. The trigger
+    is returned for the console panel (PRD-07) and the future /ingest
+    ``notify_activity`` wiring.
     """
-    pool = ScorePool(clock=time.monotonic, backend=stores.meta)
+    trigger = DreamTrigger(snapshotter=NullSnapshotter(), auto_trigger=config.dream.auto_trigger)
+    pool = ScorePool(clock=time.monotonic, backend=stores.meta, sink=trigger.handle_event)
     for profile_id, state in stores.meta.pool_states().items():
         pool.restore(profile_id, state.balance, state.watermark)
     scoring = ScoringPipeline(
         scorer=TurnScorer(embedder=stores.embed),
         pool=pool,
     )
-    return WritingPipeline(
-        store=stores.vector,
-        inner=scoring,
-        embedder=stores.embed,
-        context=_daemon_write_context,
+    return (
+        WritingPipeline(
+            store=stores.vector,
+            inner=scoring,
+            embedder=stores.embed,
+            context=_daemon_write_context,
+        ),
+        trigger,
     )
 
 
@@ -130,7 +139,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.stores = stores
     # The serving funnel is bound to the resolved stack here, not at app
     # construction: the VectorStore/Embedder instances only exist after boot.
-    app.state.capture = _build_capture(stores)
+    app.state.capture, app.state.dream = _build_capture(stores, config)
     app.state.segmenter = TurnSegmenter(app.state.capture)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),

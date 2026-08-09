@@ -179,3 +179,32 @@ def test_programmatic_config_resolves_without_file(tmp_path):
 def test_unknown_layer_resolution_names_key():
     with pytest.raises(ConfigError, match=r"config\[storage.unknown\]"):
         Config().layer_instances("unknown")
+
+
+def test_dream_auto_trigger_defaults_to_false(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    cfg = load_config(tmp_path / "missing.toml")
+    assert cfg.dream.auto_trigger is False
+
+
+def test_dream_auto_trigger_parses(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    p = tmp_path / "config.toml"
+    _write(p, 'preset = "embedded"\n[dream]\nauto_trigger = true\n')
+    assert load_config(p).dream.auto_trigger is True
+
+
+def test_dream_table_must_be_a_table(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    p = tmp_path / "config.toml"
+    _write(p, 'dream = "nope"\n')
+    with pytest.raises(ConfigError, match=r"config\[dream\]"):
+        load_config(p)
+
+
+def test_dream_auto_trigger_must_be_boolean(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    p = tmp_path / "config.toml"
+    _write(p, '[dream]\nauto_trigger = "yes"\n')
+    with pytest.raises(ConfigError, match=r"config\[dream.auto_trigger\]"):
+        load_config(p)

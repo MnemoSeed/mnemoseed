@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from mnemoseed.capture.pool import PoolEventKind
 from mnemoseed.daemon.app import create_app
+from mnemoseed.dream import DreamState, DreamTrigger
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_meta
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
@@ -61,8 +63,12 @@ def _serving_config_toml(tmp_path: Path) -> Path:
     return cfg
 
 
-def _user(text: str = "我决定以后都用 pnpm 管理依赖", ts: float = 1.0) -> dict:
-    return {
+def _user(
+    text: str = "我决定以后都用 pnpm 管理依赖",
+    ts: float = 1.0,
+    importance_hint: float | None = None,
+) -> dict:
+    payload = {
         "host": "claude_code",
         "event": "user_prompt",
         "session_id": _SESSION,
@@ -70,6 +76,9 @@ def _user(text: str = "我决定以后都用 pnpm 管理依赖", ts: float = 1.0
         "ts": ts,
         "content": {"text": text},
     }
+    if importance_hint is not None:
+        payload["importance_hint"] = importance_hint
+    return payload
 
 
 def _client(tmp_path, monkeypatch) -> TestClient:
@@ -146,3 +155,65 @@ def test_serving_boot_restores_persisted_score_pool(tmp_path, monkeypatch) -> No
         assert ledger is not None
         assert ledger.turns_pooled == 0
         assert ledger.points_added == 0.0
+
+
+_DURABLE_TEXTS = (
+    "我决定以后都用 pnpm 管理依赖来构建前端项目",
+    "我以后统一用 vite 来做前端打包方案",
+    "我打算把日志系统迁移到时序数据库存储",
+    "我认为代码 review 必须关注注释和可读性",
+    "我坚持每次提交前都跑一遍完整的测试",
+)
+
+
+def test_serving_boot_wires_dream_trigger_as_manual_sink(tmp_path, monkeypatch) -> None:
+    """The ScorePool sinks dream events into the trigger; the default embedded
+    config keeps the FR-2.8 manual-first flag (auto_trigger = false), so a
+    fired event is recorded as a pending manual run rather than driving.
+
+    Driven through HTTP (the sqlite connection is bound to the app loop
+    thread): five full-score durable turns reach the 50.0 hard cap and fire an
+    overflow event, which the pool ignores idleness for.
+    """
+    with _client(tmp_path, monkeypatch) as client:
+        trigger = client.app.state.dream
+        assert isinstance(trigger, DreamTrigger)
+        assert trigger.status(_PROFILE).state is DreamState.IDLE
+        for index, text in enumerate(_DURABLE_TEXTS):
+            resp = client.post("/ingest", json=_user(text=text, ts=float(index + 1), importance_hint=1.0))
+            assert resp.status_code == 202
+        resp = client.post("/session/end", json={"session_id": _SESSION, "profile_id": _PROFILE})
+        assert resp.status_code == 200
+        status = trigger.status(_PROFILE)
+        assert status.last_event is not None
+        assert status.last_event.kind is PoolEventKind.FORCED_CONSOLIDATION
+        # manual-first: the overflow is held as a pending manual run, nothing drives
+        assert status.pending_manual == 1
+        assert status.state is DreamState.IDLE
+
+
+def _auto_trigger_config_toml(tmp_path: Path) -> Path:
+    cfg = _serving_config_toml(tmp_path)
+    text = cfg.read_text(encoding="utf-8") + "[dream]\nauto_trigger = true\n"
+    cfg.write_text(text, encoding="utf-8")
+    return cfg
+
+
+def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -> None:
+    """With [dream] auto_trigger = true, a fired pool event drives the trigger
+    into SNAPSHOTTING through the (void) snapshot seam."""
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _auto_trigger_config_toml(tmp_path))
+    with TestClient(create_app()) as client:
+        trigger = client.app.state.dream
+        assert trigger.status(_PROFILE).state is DreamState.IDLE
+        for index, text in enumerate(_DURABLE_TEXTS):
+            resp = client.post("/ingest", json=_user(text=text, ts=float(index + 1), importance_hint=1.0))
+            assert resp.status_code == 202
+        resp = client.post("/session/end", json={"session_id": _SESSION, "profile_id": _PROFILE})
+        assert resp.status_code == 200
+        status = trigger.status(_PROFILE)
+        assert status.last_event is not None
+        assert status.last_event.kind is PoolEventKind.FORCED_CONSOLIDATION
+        # auto mode: the overflow fires the live dream through the snapshot seam
+        assert status.state is DreamState.SNAPSHOTTING
