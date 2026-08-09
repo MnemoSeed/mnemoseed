@@ -22,7 +22,7 @@ from mnemoseed.dream import DreamState, DreamTrigger
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_meta
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
-from mnemoseed.storage.ports import ChunkFilter, Page, TurnRange
+from mnemoseed.storage.ports import ChunkFilter, NodeFilter, Page, TurnRange
 from mnemoseed.storage.registry import (
     EMBED_DRIVERS,
     GRAPH_DRIVERS,
@@ -93,6 +93,20 @@ def _client(tmp_path, monkeypatch) -> TestClient:
 def _writes(client: TestClient) -> int:
     stores = client.app.state.stores
     return stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10)).total
+
+
+def _graph_nodes(path: Path) -> int:
+    """Read the graph through a connection bound to the CURRENT (test) thread.
+
+    The daemon's sqlite connections are created in the TestClient portal thread
+    and refuse cross-thread use, so asserts against the cortex DB open a fresh
+    driver over the same file in the test thread (WAL lets readers coexist)."""
+
+    driver = sqlite_graph.SqliteGraphDriver(path=path)
+    try:
+        return driver.list_nodes(NodeFilter(profile_id=_PROFILE), Page(limit=10)).total
+    finally:
+        asyncio.run(driver.close())
 
 
 def test_serving_pipeline_writes_on_session_end_not_on_ingest(tmp_path, monkeypatch) -> None:
@@ -203,14 +217,16 @@ def _auto_trigger_config_toml(tmp_path: Path) -> Path:
 
 
 def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -> None:
-    """With [dream] auto_trigger = true, a fired pool event drives the trigger
-    into DREAMING through the real snapshot seam, which completes synchronously
-    (capture + persist + dream_runs registration) on the request path."""
+    """With [dream] auto_trigger = true, a fired pool event drives the FULL
+    dream chain on the /session/end drain (off the /ingest heat path):
+    snapshot -> reflect -> merge -> safe-clear -> IDLE, with the journal
+    terminated in one merge-done file and the source chunks purged."""
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _auto_trigger_config_toml(tmp_path))
     monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
     with TestClient(create_app()) as client:
         trigger = client.app.state.dream
+        stores = client.app.state.stores
         assert trigger.status(_PROFILE).state is DreamState.IDLE
         for index, text in enumerate(_DURABLE_TEXTS):
             resp = client.post("/ingest", json=_user(text=text, ts=float(index + 1), importance_hint=1.0))
@@ -220,18 +236,23 @@ def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -
         status = trigger.status(_PROFILE)
         assert status.last_event is not None
         assert status.last_event.kind is PoolEventKind.FORCED_CONSOLIDATION
-        # auto mode: the overflow fires the live dream; the real snapshotter
-        # completed inline, so the trigger is already dreaming
-        assert status.state is DreamState.DREAMING
-        assert status.current_range is not None
-        # a snapshot file was persisted and a dream run registered
+        # auto mode: the overflow fired the live dream; the reflect + merge
+        # chain completed inline off the /ingest path, so the dream ended
+        assert status.state is DreamState.IDLE
+        assert status.current_range is None
+        # one snapshot journal entry survived (merge-done); source chunks purged
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+        assert stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10)).total == 0
+    # the reflected durable facts landed in the main graph (read back through a
+    # test-thread connection once the app's portal-thread stores closed)
+    assert _graph_nodes(tmp_path / "cortex.db") >= 1
 
 
 def test_serving_boot_recovery_resumes_preseeded_snapshot(tmp_path, monkeypatch) -> None:
-    """NFR-2.3: an interrupted dream (crash after snapshot) reboots into
-    DREAMING, ready for reflect, with the snapshot's scope, offline and before
-    serving starts."""
+    """NFR-2.3: an interrupted dream (crash after snapshot) reboots and the
+    daemon COMPLETES the chain offline before serving starts — reflect -> merge
+    -> safe-clear -> IDLE — covering exactly the snapshot's scope, with no
+    re-capture and no second dream_runs registration."""
     from mnemoseed.dream import FileSnapshotter as RealSnapshotter
     from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
     from mnemoseed.storage.drivers.lancedb_embedded import LanceDbEmbeddedStore
@@ -268,10 +289,11 @@ def test_serving_boot_recovery_resumes_preseeded_snapshot(tmp_path, monkeypatch)
     monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
     with TestClient(create_app()) as client:
         trigger = client.app.state.dream
-        # recovered snapshot resumed at the reflect boundary: DREAMING on the
-        # snapshot's scope, no re-capture, no second registration
-        assert trigger.status(_PROFILE).state is DreamState.DREAMING
-        assert trigger.status(_PROFILE).current_range == TurnRange(0, 1)
+        # recovered at the reflect boundary, the boot-time chain completed the
+        # dream: safe-clear fired exactly once with the snapshot's scope
+        assert trigger.status(_PROFILE).state is DreamState.IDLE
+        assert trigger.status(_PROFILE).current_range is None
+        assert client.app.state.stores.vector.get_chunk("seed-1") is None
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
     # the seed's dream_runs row was registered exactly once (recovery never
     # re-registers); read back through a fresh connection after the app closes
@@ -353,3 +375,96 @@ def test_serving_boot_recovers_reflect_done_snapshot_at_merge(tmp_path, monkeypa
     with TestClient(create_app()) as client:
         assert client.app.state.dream.status(_PROFILE).state is DreamState.IDLE
     assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+
+
+def test_serving_boot_merge_boundary_recovery_merges_once_no_double_write(tmp_path, monkeypatch) -> None:
+    """A snapshot that already ran reflect (REFLECT_DONE + persisted result)
+    reboots straight at the merge boundary: the daemon runs merge ONLY (never
+    re-reflects), commits, safe-clears exactly once, and terminates the
+    journal. A second boot finds nothing to recover and the graph rows stay
+    exactly one — idempotent write-back across restarts (NFR-2.3)."""
+    from mnemoseed.dream import FileSnapshotter as RealSnapshotter
+    from mnemoseed.dream import ReflectOrchestrator as Reflect
+    from mnemoseed.dream import StubReflectLLM
+    from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
+    from mnemoseed.storage.drivers.lancedb_embedded import LanceDbEmbeddedStore
+    from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
+
+    # seed one snapshot whose reflect pass produced a durable core triple and
+    # persisted REFLECT_DONE + the result payload; the daemon crashed pre-merge
+    seed_store = LanceDbEmbeddedStore(uri=tmp_path / "chunks.lance", dimensions=64)
+    seed_embed = SyntheticEmbedder(dimension=64)
+    embedding = seed_embed.embed("I prefer dark mode")
+    seed_store.upsert_chunk(
+        ChunkStamp(
+            chunk_id="seed-1",
+            profile_id=_PROFILE,
+            text="I prefer dark mode",
+            cognitive_tier=CognitiveTier.TIER_1,
+            model_id="test-model",
+            cues=Cues(entities=["test"]),
+            provenance=Provenance(asserted_by="user", session_id=_SESSION, source="manual"),
+            turn_start=0,
+            turn_end=1,
+        ),
+        embedding.dense,
+    )
+    seed_meta = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
+    seeder = RealSnapshotter(store=seed_store, meta=seed_meta, directory=tmp_path / "dreams")
+    captured = seeder.request(_PROFILE, TurnRange(0, 1)).snapshot
+    assert captured is not None
+    # the T3 reflect reports completion and journals result+marker atomically
+    # (this is the crash-safe journal entry the daemon will recover)
+    assert Reflect(llm=StubReflectLLM(), directory=tmp_path / "dreams").reflect(captured).ok
+    asyncio.run(seed_store.close())
+    asyncio.run(seed_meta.close())
+
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _serving_config_toml(tmp_path))
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
+
+    with TestClient(create_app()) as client:
+        trigger = client.app.state.dream
+        assert trigger.status(_PROFILE).state is DreamState.IDLE
+        assert trigger.status(_PROFILE).current_range is None
+        assert client.app.state.stores.vector.get_chunk("seed-1") is None
+    assert _graph_nodes(tmp_path / "cortex.db") == 1
+
+    with TestClient(create_app()) as client:
+        assert client.app.state.dream.status(_PROFILE).state is DreamState.IDLE
+    assert _graph_nodes(tmp_path / "cortex.db") == 1  # no duplicate row across the reboot
+
+
+def test_serving_dream_once_drives_full_manual_chain(tmp_path, monkeypatch) -> None:
+    """FR-2.8 manual-first: auto_trigger=false holds the fired event pending;
+    one dream_once call drives snapshot -> reflect -> merge -> safe-clear to
+    completion synchronously, off the /ingest hot path."""
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _serving_config_toml(tmp_path))
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
+    with TestClient(create_app()) as client:
+        trigger = client.app.state.dream
+        stores = client.app.state.stores
+        for index, text in enumerate(_DURABLE_TEXTS):
+            resp = client.post("/ingest", json=_user(text=text, ts=float(index + 1), importance_hint=1.0))
+            assert resp.status_code == 202
+        resp = client.post("/session/end", json={"session_id": _SESSION, "profile_id": _PROFILE})
+        assert resp.status_code == 200
+        status = trigger.status(_PROFILE)
+        assert status.last_event is not None
+        assert status.last_event.kind is PoolEventKind.FORCED_CONSOLIDATION
+        # manual-first: held as a pending manual run, nothing drives
+        assert status.pending_manual == 1
+        assert status.state is DreamState.IDLE
+
+        # run the manual cycle ON the daemon's event-loop thread: the sqlite
+        # graph/metadata connections are bound to the TestClient portal thread,
+        # exactly as a console command would drive the daemon's own stores
+        assert client.portal.call(trigger.dream_once, _PROFILE) is True
+        status = trigger.status(_PROFILE)
+        assert status.state is DreamState.IDLE
+        assert status.pending_manual == 0
+        assert stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10)).total == 0
+        assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+    # the reflected durable facts landed in the main graph (fresh connection)
+    assert _graph_nodes(tmp_path / "cortex.db") >= 1

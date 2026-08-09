@@ -13,24 +13,33 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI
 
 from mnemoseed import __version__
 from mnemoseed.capture import ScoringPipeline, StrippingPipeline, TurnScorer, TurnSegmenter, WritingPipeline
-from mnemoseed.capture.pool import ScorePool
+from mnemoseed.capture.pool import PoolEvent, ScorePool
 from mnemoseed.capture.stamper import WriteContext
 from mnemoseed.config import Config, load_config
 from mnemoseed.daemon.ingest import router as ingest_router
-from mnemoseed.dream import DreamTrigger, FileSnapshotter, resume_boundary
+from mnemoseed.dream import (
+    DreamPipeline,
+    DreamTrigger,
+    FileSnapshotter,
+    Merger,
+    ReflectOrchestrator,
+    StubReflectLLM,
+    resume_boundary,
+)
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.schema.turn import Turn
 from mnemoseed.storage.factory import Stores, build_stores
-from mnemoseed.storage.ports import CapabilityIssue
+from mnemoseed.storage.ports import CapabilityIssue, GraphStore
 
 logger = logging.getLogger("mnemoseed.daemon")
 
@@ -99,7 +108,36 @@ def _daemon_write_context(turn: Turn) -> WriteContext:
     )
 
 
-def _build_capture(stores: Stores, config: Config) -> tuple[WritingPipeline, DreamTrigger]:
+class _DreamRelay:
+    """Deferred dream-event delivery off the scoring hot path.
+
+    The ScorePool fires dream events while the ScoringPipeline is still scoring
+    a drained session — before the WritingPipeline has persisted that session's
+    chunks to the vector store. A dream launched at that instant would capture
+    an empty snapshot and its safe-clear would purge nothing. The relay instead
+    collects the fired events and, once the drain wrote the chunks (the daemon
+    flushes after ``WritingPipeline.drain``), hands them to the trigger in
+    order. Manual-first (FR-2.8) is untouched: with auto_trigger=False the relay
+    simply delivers events the trigger records as pending-manual.
+    """
+
+    def __init__(self, trigger: DreamTrigger) -> None:
+        self._trigger = trigger
+        self._pending: deque[PoolEvent] = deque()
+
+    def handle(self, event: PoolEvent) -> None:
+        """ScorePool sink seam: buffer a fired dream event during the drain."""
+        self._pending.append(event)
+
+    def flush(self) -> None:
+        """Deliver buffered events to the trigger, in fire order."""
+        while self._pending:
+            self._trigger.handle_event(self._pending.popleft())
+
+
+def _build_capture(
+    stores: Stores, config: Config
+) -> tuple[WritingPipeline, DreamTrigger, DreamPipeline, _DreamRelay]:
     """Serving capture funnel: strip -> score -> pool -> stamp/write over the
     resolved storage stack. /ingest stays submit-only; the funnel drains on
     /session/end (v1 drain trigger, off the /ingest hot path).
@@ -109,10 +147,12 @@ def _build_capture(stores: Stores, config: Config) -> tuple[WritingPipeline, Dre
     un-triggered balances), and sinks its dream events into the DreamTrigger.
     The trigger binds the real snapshotter (T2): a frozen capture written under
     the config directory and registered in dream_runs, whose completion seam
-    advances the trigger to DREAMING. Its safe-clear seam is wired to the merge
-    commit, and boot recovery (NFR-2.3) resumes interrupted dreams at the
-    reflect boundary, offline (no model calls) and before serving starts. It
-    still honours the FR-2.8 manual-first ``[dream] auto_trigger`` flag.
+    runs the T4 dream pipeline (reflect -> merge -> safe-clear commit) off the
+    ingest hot path. Boot recovery (NFR-2.3) resumes interrupted dreams at their
+    exact phase boundary — reflect for a fresh snapshot, merge ONLY for one that
+    already ran reflect — synchronously before serving starts, with no model
+    calls in the stub seam. The safe-clear purger fires exactly once, on
+    merge-commit. FR-2.8 manual-first ``[dream] auto_trigger`` stays honoured.
     """
     snapshotter = FileSnapshotter(store=stores.vector, meta=stores.meta)
     trigger = DreamTrigger(
@@ -120,7 +160,26 @@ def _build_capture(stores: Stores, config: Config) -> tuple[WritingPipeline, Dre
         auto_trigger=config.dream.auto_trigger,
         purger=snapshotter.purge_snapshot,
     )
-    snapshotter.on_ready = trigger.on_snapshot_ready
+    graph_isolated = cast(GraphStore | None, stores.instances.get("graph", {}).get("isolated"))
+    if graph_isolated is None:
+        logger.warning(
+            "no 'isolated' graph instance configured; tier-3 output is stranded "
+            "(the salvage review channel still captures the entry)"
+        )
+    reflector = ReflectOrchestrator(
+        llm=StubReflectLLM(),
+        directory=snapshotter.directory,
+        on_done=trigger.on_reflect_complete,
+    )
+    merger = Merger(
+        graph_main=stores.graph,
+        graph_isolated=graph_isolated,
+        meta=stores.meta,
+        on_committed=trigger.on_merge_committed,
+    )
+    pipeline = DreamPipeline(trigger=trigger, snapshotter=snapshotter, reflector=reflector, merger=merger)
+    relay = _DreamRelay(trigger)
+    snapshotter.on_ready = pipeline.on_snapshot_ready
     for snapshot in snapshotter.recover():
         snapshotter.adopt(snapshot)
         boundary = resume_boundary(snapshot)
@@ -131,7 +190,8 @@ def _build_capture(stores: Stores, config: Config) -> tuple[WritingPipeline, Dre
             # the merge-commit seam fires the safe-clear once and never re-runs
             # reflect (would duplicate the committed graph writes)
             trigger.resume_merge(snapshot.profile_id, snapshot.turn_range)
-    pool = ScorePool(clock=time.monotonic, backend=stores.meta, sink=trigger.handle_event)
+        pipeline.run(snapshot)
+    pool = ScorePool(clock=time.monotonic, backend=stores.meta, sink=relay.handle)
     for profile_id, state in stores.meta.pool_states().items():
         pool.restore(profile_id, state.balance, state.watermark)
     scoring = ScoringPipeline(
@@ -146,6 +206,8 @@ def _build_capture(stores: Stores, config: Config) -> tuple[WritingPipeline, Dre
             context=_daemon_write_context,
         ),
         trigger,
+        pipeline,
+        relay,
     )
 
 
@@ -157,7 +219,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.stores = stores
     # The serving funnel is bound to the resolved stack here, not at app
     # construction: the VectorStore/Embedder instances only exist after boot.
-    app.state.capture, app.state.dream = _build_capture(stores, config)
+    (
+        app.state.capture,
+        app.state.dream,
+        app.state.dream_pipeline,
+        app.state.dream_relay,
+    ) = _build_capture(stores, config)
     app.state.segmenter = TurnSegmenter(app.state.capture)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),

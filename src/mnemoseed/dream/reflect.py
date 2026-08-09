@@ -13,6 +13,16 @@ range), confidence, and a route (core | isolated | salvage) per dual-track
 rules. The deterministic StubReflectLLM implements the same de-biasing contract
 offline, so the whole pipeline is exercisable without any network (the M1
 manual-first phase and tests). No graph writes happen here (T4 owns them).
+
+Negation rule (g2, engine invariant): each mention carries a polarity
+("positive" / "negative") derived from negation markers on the matched span
+(e.g. "I never use vim"). AC-3 folding groups mentions by (subject, predicate,
+object) AND polarity: contradictory-polarity mentions of the same key are NOT
+folded into one false-confident reinforced triple — both are dropped and the
+key is reported on ``ReflectionResult.conflicts``. Same-polarity mentions still
+fold normally. The result is journaled inside the snapshot file (as the opaque
+``Snapshot.reflect_result`` payload) together with the REFLECT_DONE marker, so
+a crash after reflect resumes at the merge boundary without re-running reflect.
 """
 
 from __future__ import annotations
@@ -69,6 +79,7 @@ class ReflectedTriple:
     confidence: float  # 0..1, reinforced by dedup folding (AC-3)
     route: Route  # core | isolated | salvage; tier-3 provenance never yields core
     preference: bool = False  # preference-type extraction (FR-2.12 boundary)
+    polarity: str = "positive"  # "positive" | "negative" (negation guard, g2)
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,7 @@ class ReflectionResult:
     turn_range: TurnRange
     prompt_version: str
     triples: tuple[ReflectedTriple, ...]
+    conflicts: tuple[tuple[str, str, str], ...] = ()  # dropped contradictory-polarity keys
 
 
 @dataclass(frozen=True)
@@ -156,6 +168,12 @@ _STRIP_RE = re.compile(
     re.IGNORECASE,
 )
 _NON_WORD_RE = re.compile(r"[^\w\s一-鿿-]")
+
+# Negation markers used by the stub's polarity judgment (g2). v1 covers the
+# explicit English "never" plus strong Chinese negation adverbs; pattern gaps
+# (e.g. "不喝" embedded inside an object without a strong adverb) default to
+# "positive" and are documented as v1 stub scope, not engine truth.
+_NEGATION_RE = re.compile(r"\bnever\b|从不|不再|再也不")
 
 _PREF_EN = re.compile(
     r"\b(?:i|we)\b[^.!?\n]{0,25}?\b(?:like|love|prefer|enjoy|value|favour|favor)\b"
@@ -234,6 +252,7 @@ class StubReflectLLM:
                 obj = _clean_components(match.group("obj"))
                 if not obj:
                     continue
+                polarity = "negative" if _NEGATION_RE.search(match.group(0)) else "positive"
                 mentions.append(
                     {
                         "subject": "user",
@@ -244,6 +263,7 @@ class StubReflectLLM:
                         "confidence": _BASE_CONFIDENCE[predicate],
                         "route": _route_for(tier, predicate),
                         "preference": is_preference,
+                        "polarity": polarity,
                     }
                 )
         # tier-3 low-value noise: confident-but-unverifiable claims from a
@@ -340,22 +360,27 @@ class ReflectOrchestrator:
                     return ReflectOutcome(ok=False, result=None, error=last_error)
                 self._sleep(self._backoff(attempt))
 
+        assert result is not None
         try:
-            self._finalize(snapshot)
+            self._finalize(snapshot, result)
         except Exception as exc:  # noqa: BLE001 - marker before progress
             logger.warning(
                 "reflect done but REFLECT_DONE persist failed for %s: %s", snapshot.profile_id, exc
             )
             return ReflectOutcome(ok=False, result=result, error=f"persist failed: {exc}")
-        assert result is not None
         return ReflectOutcome(ok=True, result=result)
 
     def _backoff(self, attempt: int) -> float:
         """Exponential schedule: base, 2*base, 4*base across retries 1..3."""
         return self._backoff_base * (1 << attempt)
 
-    def _finalize(self, snapshot: Snapshot) -> None:
-        marked = snapshot.with_phase(SnapshotPhase.REFLECT_DONE.value)
+    def _finalize(self, snapshot: Snapshot, result: ReflectionResult) -> None:
+        """Persist the REFLECT_DONE marker AND the reflection payload as one
+        atomic journal file write (marker-before-progress, NFR-2.3): a crash
+        after this point resumes at the merge boundary with the result intact,
+        never re-runs reflect."""
+        carried = snapshot.with_reflect(_result_to_payload(result))
+        marked = carried.with_phase(SnapshotPhase.REFLECT_DONE.value)
         write_snapshot_file(self._directory, marked)
         if self._on_done is not None:
             self._on_done(snapshot.profile_id)
@@ -386,10 +411,13 @@ def _parse_triple(
         confidence = max(0.0, min(0.95, float(item["confidence"])))
         route = Route(str(item["route"]))
         preference = bool(item.get("preference", False))
+        polarity = str(item.get("polarity", "positive"))
     except (KeyError, TypeError, ValueError):
         return None  # malformed mention: skip, keep the pipeline alive
     if not subject or not predicate or not obj:
         return None
+    if polarity not in ("positive", "negative"):
+        polarity = "positive"
     # FR-2.12 engine invariant: preference-type evidence must be user-originated
     if preference and not all(origin_by_chunk.get(cid) == "user" for cid in chunk_ids):
         return None
@@ -406,24 +434,43 @@ def _parse_triple(
         confidence=confidence,
         route=route,
         preference=preference,
+        polarity=polarity,
     )
 
 
 def _fold_triples(snapshot: Snapshot, version: str, mentions: list[ReflectedTriple]) -> ReflectionResult:
     """AC-3 dedup fold: repeated mentions of the same canonical triple collapse
     into one entry with reinforced confidence, merged provenance, and the most
-    restrictive route (tier-3 evidence always dominates)."""
-    groups: dict[tuple[str, str, str], list[ReflectedTriple]] = {}
+    restrictive route (tier-3 evidence always dominates).
+
+    Negation guard (g2): groups are keyed by (subject, predicate, object) AND
+    polarity. A key evidenced by BOTH polarities is never folded into one
+    reinforced triple — both are dropped and the key is reported on
+    ``conflicts`` so no downstream consumer mistakes a contradiction for
+    confidence. Same-polarity mentions fold normally.
+    """
+    groups: dict[tuple[str, str, str], dict[str, list[ReflectedTriple]]] = {}
     for mention in mentions:
         key = (
             mention.subject.casefold().strip(),
             mention.predicate.casefold().strip(),
             mention.object.casefold().strip(),
         )
-        groups.setdefault(key, []).append(mention)
+        groups.setdefault(key, {}).setdefault(mention.polarity, []).append(mention)
 
     folded: list[ReflectedTriple] = []
-    for group in groups.values():
+    conflicts: list[tuple[str, str, str]] = []
+    for key, by_polarity in groups.items():
+        if len(by_polarity) > 1:
+            conflicts.append(key)
+            logger.warning(
+                "negation guard: contradictory-polarity mentions of %s dropped "
+                "(both positive and negative evidence)",
+                key,
+            )
+            continue
+        _, member_list = next(iter(by_polarity.items()))
+        group = member_list
         tiers = tuple(sorted({tier for m in group for tier in m.tiers}, key=int))
         chunk_ids = tuple(sorted({cid for m in group for cid in m.chunk_ids}))
         subject = min((m.subject for m in group), key=str.casefold)
@@ -444,6 +491,7 @@ def _fold_triples(snapshot: Snapshot, version: str, mentions: list[ReflectedTrip
                 confidence=confidence,
                 route=route,
                 preference=any(m.preference for m in group),
+                polarity=str(next(iter(by_polarity))),
             )
         )
 
@@ -456,4 +504,85 @@ def _fold_triples(snapshot: Snapshot, version: str, mentions: list[ReflectedTrip
         turn_range=snapshot.turn_range,
         prompt_version=version,
         triples=tuple(folded),
+        conflicts=tuple(conflicts),
+    )
+
+
+# ---------------------------------------------------------------- journal payload (T4 seam)
+
+
+def _result_to_payload(result: ReflectionResult) -> dict[str, Any]:
+    """Serialize a ReflectionResult for the opaque snapshot journal carrier.
+
+    Plain JSON words only (no enums/datetimes), so old engines can ignore the
+    key and new engines can rebuild the result byte-for-byte.
+    """
+
+    def _range(rng: TurnRange) -> dict[str, int]:
+        return {"start": rng.start, "end": rng.end}
+
+    return {
+        "snapshot_id": result.snapshot_id,
+        "profile_id": result.profile_id,
+        "turn_range": _range(result.turn_range),
+        "prompt_version": result.prompt_version,
+        "conflicts": [[s, p, o] for s, p, o in result.conflicts],
+        "triples": [
+            {
+                "subject": t.subject,
+                "predicate": t.predicate,
+                "object": t.object,
+                "tiers": [int(v) for v in t.tiers],
+                "chunk_ids": list(t.chunk_ids),
+                "turn_range": _range(t.turn_range),
+                "confidence": t.confidence,
+                "route": t.route.value,
+                "preference": t.preference,
+                "polarity": t.polarity,
+            }
+            for t in result.triples
+        ],
+    }
+
+
+def result_from_payload(payload: dict[str, Any] | None) -> ReflectionResult | None:
+    """Rebuild a ReflectionResult from the journal payload; None on malformed
+    content (degrade, never a raise — a merge-boundary recovery logs and keeps
+    the snapshot journaled when the payload is not recoverable)."""
+    if payload is None:
+        return None
+    try:
+        turn_range = payload["turn_range"]
+        triples = tuple(_triple_from_payload(t) for t in payload.get("triples") or [])
+        conflicts_raw = payload.get("conflicts") or []
+        conflicts = tuple(
+            (str(c[0]), str(c[1]), str(c[2])) for c in conflicts_raw if isinstance(c, list) and len(c) == 3
+        )
+        return ReflectionResult(
+            snapshot_id=str(payload["snapshot_id"]),
+            profile_id=str(payload["profile_id"]),
+            turn_range=TurnRange(int(turn_range["start"]), int(turn_range["end"])),
+            prompt_version=str(payload.get("prompt_version", "")),
+            triples=triples,
+            conflicts=conflicts,
+        )
+    except (KeyError, TypeError, ValueError):
+        logger.warning("ignoring unrecoverable reflect_result payload")
+        return None
+
+
+def _triple_from_payload(item: dict[str, Any]) -> ReflectedTriple:
+    tr = item["turn_range"]
+    polarity = str(item.get("polarity", "positive"))
+    return ReflectedTriple(
+        subject=str(item["subject"]),
+        predicate=str(item["predicate"]),
+        object=str(item["object"]),
+        tiers=tuple(sorted({CognitiveTier(int(v)) for v in item["tiers"]}, key=int)),
+        chunk_ids=tuple(str(c) for c in item["chunk_ids"]),
+        turn_range=TurnRange(int(tr["start"]), int(tr["end"])),
+        confidence=float(item["confidence"]),
+        route=Route(str(item["route"])),
+        preference=bool(item.get("preference", False)),
+        polarity=polarity if polarity in ("positive", "negative") else "positive",
     )

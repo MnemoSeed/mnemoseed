@@ -88,7 +88,14 @@ class SnapshotChunk:
 
 @dataclass(frozen=True)
 class Snapshot:
-    """Frozen, immutable view of one profile's dream scope (design/02 section 2)."""
+    """Frozen, immutable view of one profile's dream scope (design/02 section 2).
+
+    ``reflect_result`` is the T3/T4 journal carrier: the opaque ReflectionResult
+    payload persisted by the reflect pass inside the same file as the
+    REFLECT_DONE marker, so a merge-boundary recovery can resume the write-back
+    WITHOUT re-running reflect. Older journal files carry None and older
+    engines simply ignore the key.
+    """
 
     snapshot_id: str
     profile_id: str
@@ -96,6 +103,7 @@ class Snapshot:
     chunks: tuple[SnapshotChunk, ...]
     created_at: float
     phases: frozenset[str]
+    reflect_result: dict[str, Any] | None = None
 
     def with_phase(self, phase: str) -> Snapshot:
         return Snapshot(
@@ -105,6 +113,19 @@ class Snapshot:
             chunks=self.chunks,
             created_at=self.created_at,
             phases=frozenset({*self.phases, phase}),
+            reflect_result=self.reflect_result,
+        )
+
+    def with_reflect(self, payload: dict[str, Any] | None) -> Snapshot:
+        """Return a copy carrying the persisted reflection payload."""
+        return Snapshot(
+            snapshot_id=self.snapshot_id,
+            profile_id=self.profile_id,
+            turn_range=self.turn_range,
+            chunks=self.chunks,
+            created_at=self.created_at,
+            phases=self.phases,
+            reflect_result=payload,
         )
 
 
@@ -209,6 +230,18 @@ class FileSnapshotter:
         """Register a recovered snapshot as the profile's active read-only
         scope without re-capturing or re-persisting anything."""
         self._active[snapshot.profile_id] = snapshot
+
+    def active(self, profile_id: str) -> Snapshot | None:
+        """The currently adopted/captured snapshot for one profile (the dream
+        pipeline's seam to fetch the snapshot that just came ready)."""
+        return self._active.get(profile_id)
+
+    @property
+    def directory(self) -> Path:
+        """The journal directory this snapshotter persists into. Boot wiring
+        shares it with the reflect/merge engines so every phase of a dream
+        writes the same journal the recovery scan reads."""
+        return self._directory
 
     # ------------------------------------------------------------ safe clear
 
@@ -322,6 +355,7 @@ def _snapshot_to_json(snapshot: Snapshot) -> str:
         ],
         "created_at": snapshot.created_at,
         "phases": sorted(snapshot.phases),
+        "reflect_result": snapshot.reflect_result,
     }
     return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -338,6 +372,8 @@ def _snapshot_from_dict(data: Any) -> Snapshot | None:
         if chunk is None:
             return None
         chunks.append(chunk)
+    reflect_raw = data.get("reflect_result")
+    reflect_result = reflect_raw if isinstance(reflect_raw, dict) else None
     return Snapshot(
         snapshot_id=str(data.get("snapshot_id", "")),
         profile_id=str(data.get("profile_id", "")),
@@ -345,6 +381,7 @@ def _snapshot_from_dict(data: Any) -> Snapshot | None:
         chunks=tuple(chunks),
         created_at=float(data.get("created_at", 0.0)),
         phases=frozenset(str(p) for p in data.get("phases") or ()),
+        reflect_result=reflect_result,
     )
 
 

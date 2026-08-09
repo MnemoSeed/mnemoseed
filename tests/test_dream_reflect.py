@@ -504,3 +504,62 @@ def test_result_prompt_version_round_trip_and_stub_json_schema(tmp_path: Path) -
     assert result.turn_range == _RANGE
     # deterministic ordering of the emitted contract
     assert result.triples[0].route.value in ("core", "isolated", "salvage")
+
+
+# ---------------------------------------------------------------- negation guard (g2)
+
+
+def test_negation_guard_contradictory_polarities_never_fold(tmp_path: Path) -> None:
+    """ "I always use vim" + "I never use vim" must NOT collapse into one
+    false-confident reinforced triple: both mentions are dropped and the
+    conflict is reported on the result."""
+    snap = _snap(
+        _stamp("c1", "I always use vim"),
+        _stamp("c2", "I never use vim"),
+    )
+    result = _run(snap, tmp_path)
+    assert _find(result, "has_habit", "use vim") is None
+    assert result.triples == ()
+    assert result.conflicts == (("user", "has_habit", "use vim"),)
+
+
+def test_same_polarity_mentions_still_fold(tmp_path: Path) -> None:
+    """AC-3 still applies within one polarity: two positive habit mentions
+    collapse into one reinforced triple, no conflict reported."""
+    snap = _snap(
+        _stamp("c1", "I always use vim"),
+        _stamp("c2", "I usually use vim"),
+    )
+    result = _run(snap, tmp_path)
+    triple = _find(result, "has_habit", "use vim")
+    assert triple is not None
+    assert triple.polarity == "positive"
+    assert triple.tiers == (CognitiveTier.TIER_1,)
+    assert result.conflicts == ()
+
+
+def test_reflected_triple_defaults_to_positive_polarity(tmp_path: Path) -> None:
+    snap = _snap(_stamp("c1", "I prefer dark mode"))
+    result = _run(snap, tmp_path)
+    triple = _find(result, "prefers", "dark mode")
+    assert triple is not None
+    assert triple.polarity == "positive"
+
+
+def test_reflect_journal_round_trips_result_and_conflicts(tmp_path: Path) -> None:
+    from mnemoseed.dream import result_from_payload
+
+    snap = _snap(
+        _stamp("c1", "I always use vim"),
+        _stamp("c2", "I never use vim"),
+    )
+    outcome = _run_outcome(snap, tmp_path)
+    assert outcome.ok
+    assert outcome.result is not None
+    on_disk = load_snapshot_file(tmp_path / f"{snap.snapshot_id}.json")
+    assert on_disk is not None
+    assert SnapshotPhase.REFLECT_DONE.value in on_disk.phases
+    restored = result_from_payload(on_disk.reflect_result)
+    assert restored is not None
+    assert restored == outcome.result
+    assert restored.conflicts == (("user", "has_habit", "use vim"),)
