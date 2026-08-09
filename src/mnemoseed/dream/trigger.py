@@ -32,13 +32,18 @@ profile; the /ingest hook-up is a later task.
 
 from __future__ import annotations
 
+import logging
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
 from mnemoseed.capture.pool import PoolEvent
+from mnemoseed.dream.snapshot import SnapshotResult
 from mnemoseed.storage.ports import TurnRange
+
+logger = logging.getLogger("mnemoseed.dream.trigger")
 
 
 class DreamState(StrEnum):
@@ -54,25 +59,22 @@ class DreamState(StrEnum):
 
 
 class Snapshotter(Protocol):
-    """Read-only snapshot seam (T2 supplies the real implementation).
+    """Read-only snapshot seam. The real implementation (T2) captures a frozen
+    copy of the profile's chunks and reports completion synchronously through
+    ``on_ready``; the trigger otherwise advances from TRIGGERED to
+    SNAPSHOTTING. Store failures return a typed result, never raise into the
+    ingestion hot path (design/02 section 7)."""
 
-    The trigger records the request and advances to SNAPSHOTTING; the real
-    snapshot reads the hippocampus over the range read-only and reports
-    completion through ``DreamTrigger.on_snapshot_ready``.
-    """
-
-    def request(self, profile_id: str, turn_range: TurnRange) -> None: ...
+    def request(self, profile_id: str, turn_range: TurnRange) -> SnapshotResult: ...
 
 
 class NullSnapshotter:
-    """Void seam bound at daemon boot until the real snapshot (T2) exists.
+    """Void seam (tests and pre-T2 wiring): records nothing, always succeeds,
+    so the trigger advances through SNAPSHOTTING untouched."""
 
-    Records nothing: the trigger still advances through SNAPSHOTTING and the
-    completion seam stays free for T2 to attach.
-    """
-
-    def request(self, profile_id: str, turn_range: TurnRange) -> None:
+    def request(self, profile_id: str, turn_range: TurnRange) -> SnapshotResult:
         del profile_id, turn_range
+        return SnapshotResult(snapshot=None, ok=True)
 
 
 @dataclass(frozen=True)
@@ -107,9 +109,11 @@ class DreamTrigger:
         snapshotter: Snapshotter,
         *,
         auto_trigger: bool = False,
+        purger: Callable[[str, TurnRange], int] | None = None,
     ) -> None:
         self._snapshotter = snapshotter
         self._auto_trigger = auto_trigger
+        self._purger = purger  # safe-clear seam, invoked exactly on merge-commit
         self._profiles: dict[str, _Profile] = {}
 
     # ------------------------------------------------------------ pool intake
@@ -181,9 +185,14 @@ class DreamTrigger:
     # ------------------------------------------------------------ seam callbacks
 
     def on_snapshot_ready(self, profile_id: str) -> None:
-        """Snapshot seam completion: the read-only copy is ready."""
+        """Snapshot seam completion: the read-only copy is ready.
+
+        Accepts TRIGGERED too, because the real snapshot (T2) completes
+        synchronously from inside the request: ``_launch`` leaves the state at
+        TRIGGERED and this callback already advanced it to DREAMING.
+        """
         rec = self._profiles.get(profile_id)
-        if rec is None or rec.state is not DreamState.SNAPSHOTTING:
+        if rec is None or rec.state not in (DreamState.SNAPSHOTTING, DreamState.TRIGGERED):
             return
         rec.state = DreamState.DREAMING
 
@@ -213,19 +222,73 @@ class DreamTrigger:
         elif rec.state is DreamState.ACCUMULATING and rec.dream_in_flight:
             self._finish(profile_id, rec)
 
+    # ------------------------------------------------------------ recovery (NFR-2.3)
+
+    def resume(self, profile_id: str, turn_range: TurnRange) -> bool:
+        """Resume an interrupted dream from a recovered snapshot (NFR-2.3).
+
+        Only applies when the profile is not already dreaming, so double
+        recovery is a no-op (idempotent boot). The snapshot was already adopted
+        by the snapshotter; this restores the trigger's in-flight bookkeeping
+        and fixes the scope to the snapshot's range, ready for reflect.
+        """
+        rec = self._profiles.setdefault(profile_id, _Profile())
+        if rec.dream_in_flight or rec.state not in (DreamState.IDLE, DreamState.ACCUMULATING):
+            return False
+        rec.state = DreamState.DREAMING
+        rec.dream_in_flight = True
+        rec.current_range = turn_range
+        return True
+
+    def resume_merge(self, profile_id: str, turn_range: TurnRange) -> bool:
+        """Resume an interrupted dream at the merge boundary (NFR-2.3).
+
+        The recovered snapshot already ran reflect (REFLECT_DONE), so it must
+        never re-run it: the write-back committed, and re-entering DREAMING
+        would duplicate graph writes on the next reflect completion. Position
+        the profile straight into MERGING, so the (T4) merge-commit seam fires
+        the safe-clear exactly once and the journal marks the dream complete,
+        terminating recovery. Idempotent: double recovery is a no-op.
+        """
+        rec = self._profiles.setdefault(profile_id, _Profile())
+        if rec.dream_in_flight or rec.state not in (DreamState.IDLE, DreamState.ACCUMULATING):
+            return False
+        rec.state = DreamState.MERGING
+        rec.dream_in_flight = True
+        rec.current_range = turn_range
+        return True
+
     # ------------------------------------------------------------ internals
 
     def _launch(self, profile_id: str, rec: _Profile, event: PoolEvent) -> None:
         """Eligible -- trigger the dream: request the snapshot over the event's
-        range and enter SNAPSHOTTING (TRIGGERED is the transient instant of
-        eligibility before the snapshot request)."""
+        range. A failed snapshot (typed result) degrades the dream back to
+        ACCUMULATING: ingestion is never blocked (design/02 section 7).
+
+        On success the real snapshot completes synchronously through
+        ``on_ready`` (already DREAMING); TRIGGERED remaining here means a void
+        seam, so advance to SNAPSHOTTING.
+        """
         rec.dream_in_flight = True
         rec.state = DreamState.TRIGGERED
         rec.current_range = event.turn_range
-        self._snapshotter.request(profile_id, event.turn_range)
-        rec.state = DreamState.SNAPSHOTTING
+        result = self._snapshotter.request(profile_id, event.turn_range)
+        if not result.ok:
+            rec.state = DreamState.ACCUMULATING
+            rec.dream_in_flight = False
+            rec.current_range = None
+            return
+        if rec.state is DreamState.TRIGGERED:
+            rec.state = DreamState.SNAPSHOTTING
 
     def _finish(self, profile_id: str, rec: _Profile) -> None:
+        # safe-clear seam: purge the snapshot's range only once the merge for
+        # that range committed. Best-effort; the merge already wrote back.
+        if rec.current_range is not None and self._purger is not None:
+            try:
+                self._purger(profile_id, rec.current_range)
+            except Exception:
+                logger.warning("safe-clear failed for %s; snapshot stays journaled", profile_id)
         rec.state = DreamState.IDLE
         rec.dream_in_flight = False
         rec.current_range = None

@@ -11,7 +11,7 @@ connect. Every public call is O(1) bookkeeping.
 from __future__ import annotations
 
 from mnemoseed.capture.pool import PoolEvent, PoolEventKind
-from mnemoseed.dream import DreamState, DreamTrigger, NullSnapshotter, TriggerStatus
+from mnemoseed.dream import DreamState, DreamTrigger, NullSnapshotter, SnapshotResult, TriggerStatus
 from mnemoseed.storage.ports import TurnRange
 
 
@@ -21,8 +21,9 @@ class _RecordingSnapshotter:
     def __init__(self) -> None:
         self.requests: list[tuple[str, TurnRange]] = []
 
-    def request(self, profile_id: str, turn_range: TurnRange) -> None:
+    def request(self, profile_id: str, turn_range: TurnRange) -> SnapshotResult:
         self.requests.append((profile_id, turn_range))
+        return SnapshotResult(snapshot=None, ok=True)
 
 
 _DEFAULT_RANGE = TurnRange(0, 3)

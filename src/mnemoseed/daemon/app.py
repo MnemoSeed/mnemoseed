@@ -26,7 +26,7 @@ from mnemoseed.capture.pool import ScorePool
 from mnemoseed.capture.stamper import WriteContext
 from mnemoseed.config import Config, load_config
 from mnemoseed.daemon.ingest import router as ingest_router
-from mnemoseed.dream import DreamTrigger, NullSnapshotter
+from mnemoseed.dream import DreamTrigger, FileSnapshotter, resume_boundary
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.schema.turn import Turn
 from mnemoseed.storage.factory import Stores, build_stores
@@ -107,12 +107,30 @@ def _build_capture(stores: Stores, config: Config) -> tuple[WritingPipeline, Dre
     The ScorePool binds the meta store as its persistence backend, is restored
     at boot from the persisted per-profile ledgers (so a daemon restart keeps
     un-triggered balances), and sinks its dream events into the DreamTrigger.
-    The trigger binds the void snapshot seam until T2 supplies the real one and
-    honours the FR-2.8 manual-first ``[dream] auto_trigger`` flag. The trigger
-    is returned for the console panel (PRD-07) and the future /ingest
-    ``notify_activity`` wiring.
+    The trigger binds the real snapshotter (T2): a frozen capture written under
+    the config directory and registered in dream_runs, whose completion seam
+    advances the trigger to DREAMING. Its safe-clear seam is wired to the merge
+    commit, and boot recovery (NFR-2.3) resumes interrupted dreams at the
+    reflect boundary, offline (no model calls) and before serving starts. It
+    still honours the FR-2.8 manual-first ``[dream] auto_trigger`` flag.
     """
-    trigger = DreamTrigger(snapshotter=NullSnapshotter(), auto_trigger=config.dream.auto_trigger)
+    snapshotter = FileSnapshotter(store=stores.vector, meta=stores.meta)
+    trigger = DreamTrigger(
+        snapshotter=snapshotter,
+        auto_trigger=config.dream.auto_trigger,
+        purger=snapshotter.purge_snapshot,
+    )
+    snapshotter.on_ready = trigger.on_snapshot_ready
+    for snapshot in snapshotter.recover():
+        snapshotter.adopt(snapshot)
+        boundary = resume_boundary(snapshot)
+        if boundary == "reflect":
+            trigger.resume(snapshot.profile_id, snapshot.turn_range)
+        elif boundary == "merge":
+            # reflect already wrote back; resume straight at the merge stage so
+            # the merge-commit seam fires the safe-clear once and never re-runs
+            # reflect (would duplicate the committed graph writes)
+            trigger.resume_merge(snapshot.profile_id, snapshot.turn_range)
     pool = ScorePool(clock=time.monotonic, backend=stores.meta, sink=trigger.handle_event)
     for profile_id, state in stores.meta.pool_states().items():
         pool.restore(profile_id, state.balance, state.watermark)

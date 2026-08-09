@@ -84,6 +84,9 @@ def _user(
 def _client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _serving_config_toml(tmp_path))
+    # keep the snapshot journal out of the user's ~/.mnemoseed: boot recovery
+    # scans CONFIG_DIR/"dreams", so point it at the throwaway home.
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
     return TestClient(create_app())
 
 
@@ -201,9 +204,11 @@ def _auto_trigger_config_toml(tmp_path: Path) -> Path:
 
 def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -> None:
     """With [dream] auto_trigger = true, a fired pool event drives the trigger
-    into SNAPSHOTTING through the (void) snapshot seam."""
+    into DREAMING through the real snapshot seam, which completes synchronously
+    (capture + persist + dream_runs registration) on the request path."""
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _auto_trigger_config_toml(tmp_path))
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
     with TestClient(create_app()) as client:
         trigger = client.app.state.dream
         assert trigger.status(_PROFILE).state is DreamState.IDLE
@@ -215,5 +220,136 @@ def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -
         status = trigger.status(_PROFILE)
         assert status.last_event is not None
         assert status.last_event.kind is PoolEventKind.FORCED_CONSOLIDATION
-        # auto mode: the overflow fires the live dream through the snapshot seam
-        assert status.state is DreamState.SNAPSHOTTING
+        # auto mode: the overflow fires the live dream; the real snapshotter
+        # completed inline, so the trigger is already dreaming
+        assert status.state is DreamState.DREAMING
+        assert status.current_range is not None
+        # a snapshot file was persisted and a dream run registered
+        assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+
+
+def test_serving_boot_recovery_resumes_preseeded_snapshot(tmp_path, monkeypatch) -> None:
+    """NFR-2.3: an interrupted dream (crash after snapshot) reboots into
+    DREAMING, ready for reflect, with the snapshot's scope, offline and before
+    serving starts."""
+    from mnemoseed.dream import FileSnapshotter as RealSnapshotter
+    from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
+    from mnemoseed.storage.drivers.lancedb_embedded import LanceDbEmbeddedStore
+    from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
+    from mnemoseed.storage.ports import DreamRunFilter
+
+    # seed a snapshot file exactly where the daemon will scan (tmp_path/"dreams")
+    seed_store = LanceDbEmbeddedStore(uri=tmp_path / "seed.lance", dimensions=64)
+    seed_embed = SyntheticEmbedder(dimension=64)
+    embedding = seed_embed.embed("phased 快照测试")
+    seed_store.upsert_chunk(
+        ChunkStamp(
+            chunk_id="seed-1",
+            profile_id=_PROFILE,
+            text="phased 快照测试",
+            cognitive_tier=CognitiveTier.TIER_1,
+            model_id="test-model",
+            cues=Cues(entities=["test"]),
+            provenance=Provenance(asserted_by="test", session_id=_SESSION, source="manual"),
+            turn_start=0,
+            turn_end=1,
+        ),
+        embedding.dense,
+    )
+    seed_meta = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
+    seeder = RealSnapshotter(store=seed_store, meta=seed_meta, directory=tmp_path / "dreams")
+    result = seeder.request(_PROFILE, TurnRange(0, 1))
+    assert result.ok
+    asyncio.run(seed_store.close())
+    asyncio.run(seed_meta.close())
+
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _serving_config_toml(tmp_path))
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
+    with TestClient(create_app()) as client:
+        trigger = client.app.state.dream
+        # recovered snapshot resumed at the reflect boundary: DREAMING on the
+        # snapshot's scope, no re-capture, no second registration
+        assert trigger.status(_PROFILE).state is DreamState.DREAMING
+        assert trigger.status(_PROFILE).current_range == TurnRange(0, 1)
+        assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+    # the seed's dream_runs row was registered exactly once (recovery never
+    # re-registers); read back through a fresh connection after the app closes
+    read_meta = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
+    assert read_meta.list_dream_runs(DreamRunFilter(), Page(limit=10)).total == 1
+    asyncio.run(read_meta.close())
+
+
+def test_serving_boot_survives_corrupt_snapshot_file(tmp_path, monkeypatch) -> None:
+    """A malformed snapshot file in the journal must not crash daemon boot:
+    boot recovery skips it and serving continues (design/02 section 7)."""
+    dreams = tmp_path / "dreams"
+    dreams.mkdir()
+    bad_type = (
+        '{"snapshot_id": "bad", "profile_id": "p",'
+        ' "turn_range": {"start": 0, "end": 2}, "chunks": [],'
+        ' "created_at": null, "phases": []}'
+    )
+    (dreams / "bad-type.json").write_text(bad_type, encoding="utf-8")
+    (dreams / "broken-syntax.json").write_text('{"snapshot_id": ', encoding="utf-8")
+    with _client(tmp_path, monkeypatch) as client:
+        assert client.app.state.dream.status(_PROFILE).state is DreamState.IDLE
+        assert client.post("/ingest", json=_user(ts=1.0)).status_code == 202
+
+
+def test_serving_boot_recovers_reflect_done_snapshot_at_merge(tmp_path, monkeypatch) -> None:
+    """A snapshot that already ran reflect resumes at the merge boundary: the
+    daemon boots the profile into MERGING (never DREAMING, so reflect never
+    re-runs), the merge completion fires the safe-clear exactly once with the
+    snapshot's scope, and the finished dream is never re-recovered on later
+    boots (the journal terminates, no infinite re-recovery)."""
+    from mnemoseed.dream import FileSnapshotter as RealSnapshotter
+    from mnemoseed.dream import SnapshotPhase, write_snapshot_file
+    from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
+    from mnemoseed.storage.drivers.lancedb_embedded import LanceDbEmbeddedStore
+    from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
+
+    # seed into the exact lance uri the app config reserves, so the daemon's
+    # purge seam can be observed to have cleared the snapshot's scope
+    seed_store = LanceDbEmbeddedStore(uri=tmp_path / "chunks.lance", dimensions=64)
+    seed_embed = SyntheticEmbedder(dimension=64)
+    embedding = seed_embed.embed("已经反映过的测试")
+    seed_store.upsert_chunk(
+        ChunkStamp(
+            chunk_id="seed-1",
+            profile_id=_PROFILE,
+            text="已经反映过的测试",
+            cognitive_tier=CognitiveTier.TIER_1,
+            model_id="test-model",
+            cues=Cues(entities=["test"]),
+            provenance=Provenance(asserted_by="test", session_id=_SESSION, source="manual"),
+            turn_start=0,
+            turn_end=1,
+        ),
+        embedding.dense,
+    )
+    seed_meta = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
+    seeder = RealSnapshotter(store=seed_store, meta=seed_meta, directory=tmp_path / "dreams")
+    captured = seeder.request(_PROFILE, TurnRange(0, 1)).snapshot
+    assert captured is not None
+    # T3 wrote back and marked reflect done; the daemon crashed before merge
+    write_snapshot_file(tmp_path / "dreams", captured.with_phase(SnapshotPhase.REFLECT_DONE.value))
+    asyncio.run(seed_store.close())
+    asyncio.run(seed_meta.close())
+
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _serving_config_toml(tmp_path))
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
+    with TestClient(create_app()) as client:
+        trigger = client.app.state.dream
+        # resumed at the merge boundary, positioned to receive the merge commit
+        assert trigger.status(_PROFILE).state is DreamState.MERGING
+        assert trigger.status(_PROFILE).current_range == TurnRange(0, 1)
+        # the T4 Merger seam calls this on completion -> safe-clear fires once
+        trigger.on_merge_committed(_PROFILE)
+        assert trigger.status(_PROFILE).state is DreamState.IDLE
+        assert client.app.state.stores.vector.get_chunk("seed-1") is None
+    # terminated: a later boot finds the journal merge-complete, nothing recovers
+    with TestClient(create_app()) as client:
+        assert client.app.state.dream.status(_PROFILE).state is DreamState.IDLE
+    assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
