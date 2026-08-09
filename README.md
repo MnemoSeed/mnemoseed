@@ -61,17 +61,36 @@ You **must** purchase a Commercial License if you intend to:
 
 ## 🚀 Engine Deployment Guide
 
-To spin up the core computation server locally and orchestrate memory processing pipelines via python:
+To spin up the core computation server locally:
 
 ```bash
 # Clone the Core Engine
-git clone https://github.com
+git clone https://github.com/MnemoSeed/core.git
 cd core
 
-# Install underlying dependencies
-pip install -r requirements.txt
+# Install dependencies (uv manages the locked environment)
+uv sync
 
-# Launch local background reflection worker
-python -m mnemoseed.core.engine --host 127.0.0.1 --port 8000
+# Launch the embedded single-process daemon (all drivers in-process)
+uv run mnemoseed up
 ```
+
+Or bring up the full stack (Postgres + pgvector + daemon) with `docker compose up`. Every service exposes a `/healthz` probe.
+
 *Note: To attach this engine layer directly to your front-end IDEs (Cursor/Cline), verify you have mounted the official orchestration connector repository at: [mnemoseed/mcp](https://github.com).*
+
+---
+
+## 🛠️ Development
+
+MnemoSeed is developed **test-driven**:
+
+1. Every task starts from the acceptance criteria in `docs/prd/`. Observable behaviors are extracted and written as **failing tests first** (red), then implemented to green, then refactored with the suite green.
+2. Tests assert behavior through public surfaces (storage Protocols, CLI, HTTP endpoints) so refactors never require test rewrites.
+3. The existing suite is a regression fence — it must stay green on every change.
+4. Gate set before any commit: `uv run pytest -q`, `uv run ruff check src tests`, `uv run ruff format --check src tests`, `uv run mypy src`. All four run in CI on every PR.
+
+```bash
+uv sync                 # install locked deps
+uv run pytest -q        # full suite (offline-safe; Postgres arms skip without MNEMOSEED_TEST_PG_DSN)
+```
