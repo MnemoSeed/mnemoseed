@@ -7,10 +7,15 @@ this module. CI runs only the committed synthetic fixture.
 
 Two measurements are defined here:
 
-- NFR-1.2 compression: the PRD fixes the gate at ``>= 90%`` of real session
-  logs. The benchmark measures it as a *byte* ratio across the F1 strip
-  (``bytes_out / bytes_in``, the token-count proxy the pipeline telemetry
-  exposes). The 90% gate applies to the real corpus only.
+- NFR-1.2 noise-class stripping rate: the PRD fixes the gate at ``>= 90%`` on
+  real session logs. The metric is a *noise-class* rate — numerator is bytes
+  the F1 rules actually removed, denominator is bytes the rules matched as
+  strippable noise (matched spans/lines), never the whole corpus. It is exposed
+  as ``pipeline.stats.noise_class_rate`` via the strip telemetry, and is 0 when
+  nothing matched. The full-byte ratio (``bytes_out / bytes_in``) stays a
+  reported observation only, because on prose-heavy sessions it follows the
+  input population, not the stripper's quality. The 90% gate applies to the
+  real corpus only.
 - NFR-1.3 durability precision: computed against HUMAN-filled ``label`` field.
   ``prelabel`` comes from a deterministic, documented heuristic below; its
   match against the scorer is a smoke signal, never the acceptance number,

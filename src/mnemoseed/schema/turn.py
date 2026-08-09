@@ -10,9 +10,15 @@ response boundaries, see capture/segment.py).
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, Field, model_validator
+
+# Required identity field on every wire model. min_length=1 rejects the empty
+# string; the pattern rejects whitespace-only values. A blank profile_id must
+# never reach the vector drivers, where it would silently widen
+# near_duplicate probes and store filters to whole-table scans.
+ProfileRef = Annotated[str, Field(min_length=1, pattern=r".*\S.*")]
 
 
 class HostId(StrEnum):
@@ -71,7 +77,7 @@ class IngestEvent(BaseModel):
     host: HostId
     event: IngestEventType
     session_id: str
-    profile_id: str
+    profile_id: ProfileRef
     ts: float
     content: MessageContent | ToolContent
     importance_hint: float | None = Field(default=None, ge=0.0, le=1.0)  # FR-1.9
@@ -91,7 +97,7 @@ class SessionEndRequest(BaseModel):
     """Request body for /session/end (session settlement)."""
 
     session_id: str
-    profile_id: str
+    profile_id: ProfileRef
     ts: float | None = None  # host-stamped end time; server stamps when absent
 
 
@@ -113,7 +119,7 @@ class Turn(BaseModel):
 
     turn_index: int
     session_id: str
-    profile_id: str
+    profile_id: ProfileRef
     host: HostId
     model_id: str | None = None
     started_at: float

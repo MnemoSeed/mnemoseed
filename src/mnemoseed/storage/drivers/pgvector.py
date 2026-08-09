@@ -463,8 +463,8 @@ def _to_row(
         ),
         "profile_id": chunk.profile_id,
         "session_id": provenance.session_id,
-        "turn_start": None,
-        "turn_end": None,
+        "turn_start": chunk.turn_start,
+        "turn_end": chunk.turn_end,
         "cognitive_tier": int(chunk.cognitive_tier),
         "model_id": chunk.model_id,
         "anima_id": chunk.persona_id,
@@ -541,6 +541,8 @@ def _to_stamp(row: dict[str, Any]) -> ChunkStamp:
         score=float(score_row.get("total", 0.0)),
         consolidated=bool(row["consolidated"]),
         ingested_at=float(row["ingested_at"]),
+        turn_start=int(row["turn_start"]) if row.get("turn_start") is not None else None,
+        turn_end=int(row["turn_end"]) if row.get("turn_end") is not None else None,
     )
 
 

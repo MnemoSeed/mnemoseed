@@ -70,11 +70,18 @@ class RuleSet:
 
 @dataclass(frozen=True)
 class StripStats:
-    """Per-turn or cumulative stripping telemetry for the benchmark harness."""
+    """Per-turn or cumulative stripping telemetry for the benchmark harness.
+
+    ``matched_by_rule`` records, per rule, the UTF-8 byte size of the content
+    that rule matched as strippable noise. It is the NFR-1.2 denominator;
+    ``bytes_in - bytes_out`` is the numerator. ``compression_ratio`` measures
+    the whole-corpus full-byte ratio and stays a reported observation only.
+    """
 
     bytes_in: int = 0
     bytes_out: int = 0
     rules_hit: dict[str, int] = field(default_factory=dict)
+    matched_by_rule: dict[str, int] = field(default_factory=dict)
 
     @property
     def compression_ratio(self) -> float:
@@ -82,6 +89,35 @@ class StripStats:
         if self.bytes_in <= 0:
             return 0.0
         return (self.bytes_in - self.bytes_out) / self.bytes_in
+
+    @property
+    def noise_matched_bytes(self) -> int:
+        """Bytes the rules matched as strippable noise (NFR-1.2 denominator)."""
+        return sum(self.matched_by_rule.values())
+
+    @property
+    def noise_removed_bytes(self) -> int:
+        """Bytes actually removed by the strip rules (NFR-1.2 numerator)."""
+        return max(0, self.bytes_in - self.bytes_out)
+
+    @property
+    def noise_class_rate(self) -> float:
+        """NFR-1.2 noise-class stripping rate over this content.
+
+        numerator: bytes actually removed (``noise_removed_bytes``);
+        denominator: bytes the rules matched as strippable noise
+        (``noise_matched_bytes``) — both sides confined to rule-hit content,
+        never the whole corpus. REDACT_SPAN and STRIP_LINE remove every byte
+        they match (contribution 1.0). COLLAPSE_RUNS matches a whole repeated
+        block but keeps one canonical copy, so an N-unit run contributes
+        (N-1)/N — the documented approximation is that the retained canonical
+        byte still counts as matched because the block was classified as noise.
+        0 when nothing was matched.
+        """
+        matched = self.noise_matched_bytes
+        if matched <= 0:
+            return 0.0
+        return self.noise_removed_bytes / matched
 
 
 @dataclass(frozen=True)
@@ -122,38 +158,57 @@ class Stripper:
         bytes_in = 0
         bytes_out = 0
         hits: dict[str, int] = {}
+        matched: dict[str, int] = {}
         for step in turn.steps:
             target = ContentTarget.TOOL_OUTPUT if step.role is TurnRole.TOOL else ContentTarget.MESSAGE_TEXT
-            text, step_hits = self.strip_text(step.content, target)
+            text, step_hits, step_matched = self._strip_measured(step.content, target)
             bytes_in += len(step.content.encode("utf-8"))
             bytes_out += len(text.encode("utf-8"))
             for rule_id, count in step_hits.items():
                 hits[rule_id] = hits.get(rule_id, 0) + count
+            for rule_id, size in step_matched.items():
+                matched[rule_id] = matched.get(rule_id, 0) + size
             new_steps.append(step.model_copy(update={"content": text}))
         stripped = turn.model_copy(update={"steps": new_steps})
         return StrippedTurn(
             turn=stripped,
-            stats=StripStats(bytes_in=bytes_in, bytes_out=bytes_out, rules_hit=hits),
+            stats=StripStats(bytes_in=bytes_in, bytes_out=bytes_out, rules_hit=hits, matched_by_rule=matched),
         )
 
     def strip_text(self, text: str, target: ContentTarget) -> tuple[str, dict[str, int]]:
         """Apply the ruleset to one content blob; returns (text, rule hits)."""
+        text, hits, _ = self._strip_measured(text, target)
+        return text, hits
+
+    def _strip_measured(self, text: str, target: ContentTarget) -> tuple[str, dict[str, int], dict[str, int]]:
+        """Apply the ruleset; returns (text, rule hits, matched bytes per rule).
+
+        ``matched bytes`` is the UTF-8 size of the content the rule classified
+        as strippable noise — exact for REDACT_SPAN and STRIP_LINE (every
+        matched byte is removed), and the documented approximation for
+        COLLAPSE_RUNS (the whole repeated block counts as matched, including
+        the one canonical copy that is kept).
+        """
         hits: dict[str, int] = {}
+        matched: dict[str, int] = {}
         for compiled in self._compiled:
             rule = compiled.rule
             if rule.target is not ContentTarget.BOTH and rule.target is not target:
                 continue
+            before = text
             if rule.action is StripAction.REDACT_SPAN:
                 pattern = compiled.pattern
                 assert pattern is not None
                 text, count = pattern.subn("", text)
+                matched_bytes = _utf8_len(before) - _utf8_len(text)
             elif rule.action is StripAction.STRIP_LINE:
-                text, count = _strip_lines(text, rule, compiled.pattern)
+                text, count, matched_bytes = _strip_lines(text, rule, compiled.pattern)
             else:  # COLLAPSE_RUNS
-                text, count = _collapse_runs(text, rule.min_run)
+                text, count, matched_bytes = _collapse_runs(text, rule.min_run)
             if count:
                 hits[rule.id] = hits.get(rule.id, 0) + count
-        return text, hits
+                matched[rule.id] = matched.get(rule.id, 0) + matched_bytes
+        return text, hits, matched
 
     @staticmethod
     def _compile(ruleset: RuleSet) -> tuple[_CompiledRule, ...]:
@@ -216,11 +271,16 @@ def _join_terminated(units: list[tuple[str, str]]) -> str:
     return "".join(content + term for content, term in units)
 
 
-def _strip_lines(text: str, rule: Rule, pattern: re.Pattern[str] | None) -> tuple[str, int]:
-    """Drop every unit the rule matches; counts the removed units."""
+def _strip_lines(text: str, rule: Rule, pattern: re.Pattern[str] | None) -> tuple[str, int, int]:
+    """Drop every unit the rule matches.
+
+    Returns (text, removed_count, matched_bytes) where matched_bytes is the
+    UTF-8 size of the dropped units — exact: every matched byte is removed.
+    """
     units = _split_terminated(text)
     kept: list[tuple[str, str]] = []
     removed = 0
+    matched_bytes = 0
     for content, term in units:
         unit = content + term
         if rule.predicate is not None:
@@ -231,30 +291,37 @@ def _strip_lines(text: str, rule: Rule, pattern: re.Pattern[str] | None) -> tupl
             matched = False
         if matched:
             removed += 1
+            matched_bytes += _utf8_len(unit)
         else:
             kept.append((content, term))
     if removed == 0:
-        return text, 0
-    return _join_terminated(kept), removed
+        return text, 0, 0
+    return _join_terminated(kept), removed, matched_bytes
 
 
-def _collapse_runs(text: str, min_run: int) -> tuple[str, int]:
+def _collapse_runs(text: str, min_run: int) -> tuple[str, int, int]:
     """Collapse repeated blocks: adjacent duplicate units, then a full-coverage
-    periodic repetition of the whole unit sequence, to a single occurrence."""
+    periodic repetition of the whole unit sequence, to a single occurrence.
+
+    Returns (text, removed_count, matched_bytes). matched_bytes counts the
+    whole repeated block as matched-as-strippable — including the one canonical
+    copy that is kept — so an N-unit run contributes (N-1)/N to the rate.
+    """
     units = _split_terminated(text)
     if len(units) < min_run:
-        return text, 0
-    collapsed, removed = _collapse_adjacent(units, min_run)
-    collapsed, removed_blocks = _collapse_periodic(collapsed, min_run)
+        return text, 0, 0
+    collapsed, removed, matched = _collapse_adjacent(units, min_run)
+    collapsed, removed_blocks, matched_blocks = _collapse_periodic(collapsed, min_run)
     total = removed + removed_blocks
     if total == 0:
-        return text, 0
-    return _join_terminated(collapsed), total
+        return text, 0, 0
+    return _join_terminated(collapsed), total, matched + matched_blocks
 
 
-def _collapse_adjacent(units: list[tuple[str, str]], min_run: int) -> tuple[list[tuple[str, str]], int]:
+def _collapse_adjacent(units: list[tuple[str, str]], min_run: int) -> tuple[list[tuple[str, str]], int, int]:
     kept: list[tuple[str, str]] = []
     removed = 0
+    matched_bytes = 0
     index = 0
     length = len(units)
     while index < length:
@@ -265,16 +332,17 @@ def _collapse_adjacent(units: list[tuple[str, str]], min_run: int) -> tuple[list
         if run >= min_run:
             kept.append(units[index])
             removed += run - 1
+            matched_bytes += run * _utf8_len(units[index][0] + units[index][1])
         else:
             kept.extend(units[index:end])
         index = end
-    return kept, removed
+    return kept, removed, matched_bytes
 
 
-def _collapse_periodic(units: list[tuple[str, str]], min_run: int) -> tuple[list[tuple[str, str]], int]:
+def _collapse_periodic(units: list[tuple[str, str]], min_run: int) -> tuple[list[tuple[str, str]], int, int]:
     length = len(units)
     if length < min_run * 2:
-        return units, 0
+        return units, 0, 0
     for block in range(1, length):
         if length % block:
             continue
@@ -282,5 +350,10 @@ def _collapse_periodic(units: list[tuple[str, str]], min_run: int) -> tuple[list
         if repeats < min_run:
             break  # repeats fall as block grows; nothing left to try
         if units[:block] * repeats == units:
-            return units[:block], length - block
-    return units, 0
+            matched_bytes = sum(_utf8_len(u[0] + u[1]) for u in units)
+            return units[:block], length - block, matched_bytes
+    return units, 0, 0
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))

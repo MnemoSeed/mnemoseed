@@ -505,6 +505,62 @@ def test_strip_turn_never_mutates_input() -> None:
 # ---------------------------------------------------------------- edge inputs
 
 
+# ---------------------------------------------------------------- noise-class rate (NFR-1.2)
+
+
+def test_noise_class_rate_full_line_strip_is_one() -> None:
+    stripper = Stripper(RULESET_V1)
+    result = stripper.strip_turn(_turn(_tool_step(PIP_LOG)))
+    assert result.turn.steps[0].content == ""
+    assert result.stats.noise_matched_bytes == result.stats.bytes_in
+    assert result.stats.noise_removed_bytes == result.stats.bytes_in
+    assert result.stats.noise_class_rate == 1.0
+
+
+def test_noise_class_rate_redact_span_counts_matched_bytes() -> None:
+    stripper = Stripper(RULESET_V1)
+    ansi_text = "before \x1b[1;31mred\x1b[0m after\nkeep\n"
+    result = stripper.strip_turn(_turn(_tool_step(ansi_text)))
+    # the rule matches the two escape sequences, not the styled word "red"
+    escapes = "\x1b[1;31m" + "\x1b[0m"
+    assert result.turn.steps[0].content == "before red after\nkeep\n"
+    assert result.stats.matched_by_rule["ansi-codes"] == len(escapes.encode("utf-8"))
+    assert result.stats.noise_matched_bytes == result.stats.noise_removed_bytes
+    assert result.stats.noise_class_rate == 1.0
+
+
+def test_noise_class_rate_collapse_run_counts_whole_block() -> None:
+    stripper = Stripper(RULESET_V1)
+    looped = "Error: connection refused\n" * 5
+    result = stripper.strip_turn(_turn(_tool_step(looped)))
+    unit = len(b"Error: connection refused\n")
+    # a run of 5 identical units is flagged as a whole block: matched bytes
+    # count all 5 units, removed bytes count the 4 dropped after the canonical
+    assert result.turn.steps[0].content == "Error: connection refused\n"
+    assert result.stats.noise_matched_bytes == 5 * unit
+    assert result.stats.noise_removed_bytes == 4 * unit
+    assert result.stats.noise_class_rate == pytest.approx(4 / 5)
+
+
+def test_noise_class_rate_zero_when_nothing_matched() -> None:
+    stripper = Stripper(RULESET_V1)
+    prose = "the report should stay visible\n"
+    result = stripper.strip_turn(_turn(_tool_step(prose)))
+    assert result.stats.rules_hit == {}
+    assert result.stats.noise_matched_bytes == 0
+    assert result.stats.noise_class_rate == 0.0
+
+
+def test_noise_class_rate_never_counts_kept_bytes() -> None:
+    stripper = Stripper(RULESET_V1)
+    text = "npm warn deprecated x\nkeep this line\n"
+    result = stripper.strip_turn(_turn(_tool_step(text)))
+    # only the matched line feeds the denominator; the kept line never appears
+    expected_matched = len(b"npm warn deprecated x\n")
+    assert result.stats.noise_matched_bytes == expected_matched
+    assert result.stats.noise_class_rate == 1.0
+
+
 def test_empty_turn_and_empty_text() -> None:
     stripper = Stripper(RULESET_V1)
     result = stripper.strip_turn(_turn())

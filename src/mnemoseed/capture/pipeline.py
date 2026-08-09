@@ -91,6 +91,7 @@ class StrippingPipeline:
         self._bytes_in = 0
         self._bytes_out = 0
         self._rules_hit: dict[str, int] = {}
+        self._matched_by_rule: dict[str, int] = {}
 
     def submit_turn(self, turn: Turn) -> None:
         self._delegate.submit_turn(turn)
@@ -113,6 +114,8 @@ class StrippingPipeline:
             self._bytes_out += result.stats.bytes_out
             for rule_id, count in result.stats.rules_hit.items():
                 self._rules_hit[rule_id] = self._rules_hit.get(rule_id, 0) + count
+            for rule_id, size in result.stats.matched_by_rule.items():
+                self._matched_by_rule[rule_id] = self._matched_by_rule.get(rule_id, 0) + size
             results.append(result)
             self._stripped.setdefault(session_id, []).append(result.turn)
         return results
@@ -135,6 +138,7 @@ class StrippingPipeline:
             bytes_in=self._bytes_in,
             bytes_out=self._bytes_out,
             rules_hit=dict(self._rules_hit),
+            matched_by_rule=dict(self._matched_by_rule),
         )
 
 
@@ -158,6 +162,25 @@ class ScoringStats:
     bytes_in: int = 0
     bytes_out: int = 0
     rules_hit: dict[str, int] = field(default_factory=dict)
+    matched_by_rule: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def noise_matched_bytes(self) -> int:
+        """Bytes the rules matched as strippable noise (NFR-1.2 denominator)."""
+        return sum(self.matched_by_rule.values())
+
+    @property
+    def noise_removed_bytes(self) -> int:
+        """Bytes actually removed by the strip rules (NFR-1.2 numerator)."""
+        return max(0, self.bytes_in - self.bytes_out)
+
+    @property
+    def noise_class_rate(self) -> float:
+        """NFR-1.2 noise-class stripping rate; 0 when nothing was matched."""
+        matched = self.noise_matched_bytes
+        if matched <= 0:
+            return 0.0
+        return self.noise_removed_bytes / matched
 
 
 class ScoringPipeline:
@@ -212,6 +235,8 @@ class ScoringPipeline:
             self._stats.bytes_out += stripped.stats.bytes_out
             for rule_id, count in stripped.stats.rules_hit.items():
                 self._stats.rules_hit[rule_id] = self._stats.rules_hit.get(rule_id, 0) + count
+            for rule_id, size in stripped.stats.matched_by_rule.items():
+                self._stats.matched_by_rule[rule_id] = self._stats.matched_by_rule.get(rule_id, 0) + size
             self._stripped.setdefault(session_id, []).append(stripped.turn)
             recent = self._recent.setdefault(turn.profile_id, [])
             scored = self._scorer.score_turn(
@@ -290,14 +315,18 @@ class WritingPipeline:
         *,
         writer: StampWriter | None = None,
         context: Callable[[Turn], WriteContext] | None = None,
+        embedder: Embedder | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._inner = inner if inner is not None else ScoringPipeline()
+        resolved_embedder = embedder if embedder is not None else cast(Embedder, SyntheticEmbedder())
+        self._inner = (
+            inner if inner is not None else ScoringPipeline(scorer=TurnScorer(embedder=resolved_embedder))
+        )
         self._context = context if context is not None else _default_write_context
         if writer is None:
             writer = StampWriter(
                 store,
-                embedder=cast(Embedder, SyntheticEmbedder()),
+                embedder=resolved_embedder,
                 clock=clock,
                 pool=self._inner.pool,
             )

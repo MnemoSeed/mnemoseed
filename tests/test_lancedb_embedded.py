@@ -55,6 +55,8 @@ def _make(
     entities: tuple[str, ...] = (),
     consolidated: bool = False,
     ingested_at: float = 1.0,
+    turn_start: int | None = None,
+    turn_end: int | None = None,
 ) -> ChunkStamp:
     return ChunkStamp(
         chunk_id=chunk_id,
@@ -80,6 +82,8 @@ def _make(
         score=score,
         consolidated=consolidated,
         ingested_at=ingested_at,
+        turn_start=turn_start,
+        turn_end=turn_end,
     )
 
 
@@ -124,6 +128,8 @@ def test_upsert_and_get_round_trips_all_stamp_fields(store, embedder):
         entities=("math", "algebra"),
         consolidated=True,
         ingested_at=42.0,
+        turn_start=3,
+        turn_end=5,
     )
     _write(store, embedder, stamp)
     got = store.get_chunk("a1")
@@ -142,6 +148,8 @@ def test_upsert_and_get_round_trips_all_stamp_fields(store, embedder):
     assert got.decay_weight == pytest.approx(0.6)
     assert got.consolidated is True
     assert got.ingested_at == pytest.approx(42.0)
+    assert got.turn_start == 3
+    assert got.turn_end == 5
     assert store.list_chunks(ChunkFilter(profile_id="alice"), Page(limit=10)).total == 1
 
 
@@ -497,6 +505,24 @@ def test_purge_range_deletes_only_overlapping_turns(store, embedder):
 def test_purge_range_unknown_session(store, embedder):
     _write_turn_row(store, embedder, "t1", 100, 150)
     assert store.purge_range("other-session", turn_start=0, turn_end=10_000) == 0
+
+
+def test_purge_range_deletes_funnel_chunk_by_turn_window(store, embedder):
+    # A funnel-written chunk (turn bounds filled by the stamp-writer) must be
+    # targetable by purge_range through the public write surface, not only via
+    # raw row injection.
+    _write(store, embedder, _make("f1", "funnel chunk", turn_start=10, turn_end=10))
+    _write(store, embedder, _make("f2", "later funnel chunk", turn_start=50, turn_end=50))
+    _write(store, embedder, _make("plain", "no turn bounds"))
+
+    assert store.purge_range("s1", turn_start=10, turn_end=10) == 1
+
+    remaining = [
+        chunk.chunk_id for chunk in store.list_chunks(ChunkFilter(profile_id="alice"), Page(limit=10)).items
+    ]
+    assert "f1" not in remaining
+    assert "f2" in remaining
+    assert "plain" in remaining
 
 
 # ---------------------------------------------------------------- list / pagination

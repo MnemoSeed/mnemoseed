@@ -21,9 +21,12 @@ from typing import Any
 from fastapi import FastAPI
 
 from mnemoseed import __version__
-from mnemoseed.capture import StrippingPipeline, TurnSegmenter
+from mnemoseed.capture import StrippingPipeline, TurnSegmenter, WritingPipeline
+from mnemoseed.capture.stamper import WriteContext
 from mnemoseed.config import load_config
 from mnemoseed.daemon.ingest import router as ingest_router
+from mnemoseed.schema.stamp import CognitiveTier
+from mnemoseed.schema.turn import Turn
 from mnemoseed.storage.factory import Stores, build_stores
 from mnemoseed.storage.ports import CapabilityIssue
 
@@ -72,12 +75,49 @@ def _migrations_payload(stores: Stores) -> dict[str, int]:
     return versions
 
 
+def _daemon_write_context(turn: Turn) -> WriteContext:
+    """Per-write encoding context on the serving path (FR-1.6).
+
+    Every default is explicit because the wire model carries no situational
+    fields today:
+
+    - profile_id: the turn's identity (required, never guessed).
+    - host: the producing host label; free encoding-specificity context.
+    - cognitive_tier: TIER_1 until a model-tier config exists; Tier-1 hosts
+      route to the core graph by default.
+    - agent_label: None until the anima system exists; capture must stay
+      neutral, and the daemon is the only party allowed to supply the label.
+    - project / task: None; the /ingest wire model carries no such fields yet.
+    - time_bucket / entities: dataclass defaults.
+    """
+    return WriteContext(
+        profile_id=turn.profile_id,
+        host=turn.host.value,
+        cognitive_tier=CognitiveTier.TIER_1,
+    )
+
+
+def _build_capture(stores: Stores) -> WritingPipeline:
+    """Serving capture funnel: strip -> score -> pool -> stamp/write over the
+    resolved storage stack. /ingest stays submit-only; the funnel drains on
+    /session/end (v1 drain trigger, off the /ingest hot path)."""
+    return WritingPipeline(
+        store=stores.vector,
+        embedder=stores.embed,
+        context=_daemon_write_context,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config = load_config()
     stores = build_stores(config)
     app.state.config = config
     app.state.stores = stores
+    # The serving funnel is bound to the resolved stack here, not at app
+    # construction: the VectorStore/Embedder instances only exist after boot.
+    app.state.capture = _build_capture(stores)
+    app.state.segmenter = TurnSegmenter(app.state.capture)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,

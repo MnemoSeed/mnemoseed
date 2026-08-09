@@ -216,9 +216,18 @@ class TurnScorer:
         self._embedder = embedder
         self._config = config if config is not None else ScoringConfig()
         self._lexicon = lexicon if lexicon is not None else Lexicon()
-        config = self._config
-        self._durable_prototype = embedder.embed("我用模板管理复用代码").dense
-        self._disposable_prototype = embedder.embed("老是无缘无故卡住").dense
+        self._prototype_cache: tuple[Sequence[float], Sequence[float]] | None = None
+
+    def _prototypes(self) -> tuple[Sequence[float], Sequence[float]]:
+        """Lazy F3 prototype vectors: the first score_turn call embeds them.
+        Construction stays embedding-free so the daemon can assemble the funnel
+        before the (possibly not-yet-downloaded) model is needed."""
+        if self._prototype_cache is None:
+            self._prototype_cache = (
+                self._embedder.embed("我用模板管理复用代码").dense,
+                self._embedder.embed("老是无缘无故卡住").dense,
+            )
+        return self._prototype_cache
 
     @property
     def config(self) -> ScoringConfig:
@@ -276,8 +285,9 @@ class TurnScorer:
         causal_chain = float(causal_count) * 2.0
 
         # ---- embedding evidence (used by markers and the fallback alike)
-        durable_sim = _cosine(current, self._durable_prototype)
-        disposable_sim = _cosine(current, self._disposable_prototype)
+        durable_prototype, disposable_prototype = self._prototypes()
+        durable_sim = _cosine(current, durable_prototype)
+        disposable_sim = _cosine(current, disposable_prototype)
         margin = config.prototype_margin
 
         # ---- durability verdict

@@ -188,6 +188,36 @@ def test_writer_assembles_complete_stamp() -> None:
     assert stamp.score == pytest.approx(5.0)
     assert stamp.decay_weight == pytest.approx(1.0)
     assert stamp.ingested_at == pytest.approx(1000.0)
+    assert stamp.turn_start == 0
+    assert stamp.turn_end == 0
+
+
+def test_written_chunk_carries_the_turn_window() -> None:
+    # The stamp-writer fills the turn bounds from the turn so purge_range can
+    # later target a funnel-written chunk by its turn window.
+    store = _FakeVectorStore()
+    scored = _scored("以后都用 pnpm")
+    later = ScoredTurn(
+        turn=Turn(
+            turn_index=42,
+            session_id=SESSION,
+            profile_id=PROFILE,
+            host=HostId.GENERIC,
+            model_id="claude-sonnet-5",
+            started_at=0.0,
+            steps=[TurnStep(role=TurnRole.USER, content="以后都用 pnpm")],
+        ),
+        importance=scored.importance,
+        components=scored.components,
+        durability=scored.durability,
+        emotion=scored.emotion,
+        causal_reasons=[],
+        features={},
+    )
+    outcome = _writer(store, _Clock()).write(later, WriteContext(profile_id=PROFILE))
+    stamp = store.chunks[outcome.chunk_id]
+    assert stamp.turn_start == 42
+    assert stamp.turn_end == 42
 
 
 def test_stamp_text_joins_user_and_assistant_lines() -> None:

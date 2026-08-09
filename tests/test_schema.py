@@ -29,6 +29,18 @@ def test_metadata_filter_view_roundtrip():
     assert rebuilt.cues.entities == ["ui", "theme"]
     assert rebuilt.consolidated is False
     assert rebuilt.ingested_at == stamp.ingested_at
+    assert rebuilt.turn_start is None  # no turn bounds by default
+    assert rebuilt.turn_end is None
+
+
+def test_metadata_filter_view_roundtrips_turn_bounds():
+    stamp = make_stamp(turn_start=3, turn_end=5)
+    view = stamp.metadata_filter_view()
+    assert view["turn_start"] == 3
+    assert view["turn_end"] == 5
+    rebuilt = ChunkStamp.from_filter_view(stamp.chunk_id, stamp.text, view)
+    assert rebuilt.turn_start == 3
+    assert rebuilt.turn_end == 5
 
 
 def test_emotion_never_in_confidence():

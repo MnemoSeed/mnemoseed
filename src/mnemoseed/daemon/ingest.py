@@ -49,6 +49,13 @@ async def session_end(req: SessionEndRequest, request: Request) -> dict[str, Any
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ProfileMismatchError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # v1 drain trigger: no scheduled drain exists yet, so settlement is the
+    # natural off-HTTP-path moment to move buffered turns through the F2-F4
+    # funnel. /ingest stays submit-only (the client never waits on writes).
+    # Guarded so injection seams that bind a drain-less pipeline keep working.
+    drain = getattr(getattr(request.app.state, "capture", None), "drain", None)
+    if drain is not None:
+        drain(req.session_id)
     return {
         "status": "settled",
         "session_id": req.session_id,

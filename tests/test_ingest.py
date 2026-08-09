@@ -189,6 +189,43 @@ def test_missing_profile_id_rejected() -> None:
     assert "profile_id" in response.text
 
 
+def test_empty_profile_id_rejected_on_ingest() -> None:
+    # A blank profile_id must never reach the vector drivers, where the
+    # near_duplicate probe / store filters would silently widen to a
+    # whole-table scan.
+    pipeline = InMemoryCapturePipeline()
+    with _client(pipeline) as client:
+        response = client.post("/ingest", json=_user(profile_id=""))
+    assert response.status_code == 422
+    assert "profile_id" in response.text
+
+
+def test_whitespace_profile_id_rejected_on_ingest() -> None:
+    pipeline = InMemoryCapturePipeline()
+    with _client(pipeline) as client:
+        response = client.post("/ingest", json=_user(profile_id="   "))
+    assert response.status_code == 422
+    assert "profile_id" in response.text
+
+
+def test_empty_profile_id_rejected_on_session_end() -> None:
+    pipeline = InMemoryCapturePipeline()
+    with _client(pipeline) as client:
+        assert client.post("/ingest", json=_user()).status_code == 202
+        response = client.post("/session/end", json={"session_id": SESSION, "profile_id": ""})
+    assert response.status_code == 422
+    assert "profile_id" in response.text
+
+
+def test_whitespace_profile_id_rejected_on_session_end() -> None:
+    pipeline = InMemoryCapturePipeline()
+    with _client(pipeline) as client:
+        assert client.post("/ingest", json=_user()).status_code == 202
+        response = client.post("/session/end", json={"session_id": SESSION, "profile_id": "  "})
+    assert response.status_code == 422
+    assert "profile_id" in response.text
+
+
 def test_missing_event_and_content_rejected() -> None:
     pipeline = InMemoryCapturePipeline()
     with _client(pipeline) as client:

@@ -195,3 +195,14 @@ def test_to_row_emotion_cue_round_trip():
     assert got.cues.emotion is not None
     assert got.cues.emotion.valence == pytest.approx(0.4)
     assert got.cues.emotion.peripheral_gaps is True
+
+
+def test_to_row_round_trips_turn_bounds():
+    stamp = _stamp(turn_start=7, turn_end=9)
+    row = _to_row(stamp, [0.1], None)
+    assert row["turn_start"] == 7
+    assert row["turn_end"] == 9
+
+    got = _to_stamp(row)
+    assert got.turn_start == 7
+    assert got.turn_end == 9

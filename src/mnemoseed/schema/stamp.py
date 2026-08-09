@@ -85,6 +85,8 @@ class ChunkStamp(BaseModel):
     score: float = 0.0  # capture-time salience score
     consolidated: bool = False  # pinned after dream-engine write-back
     ingested_at: float = Field(default_factory=time.time)
+    turn_start: int | None = None  # capturing turn window (safe purge scoping)
+    turn_end: int | None = None  # inclusive; both ends must be set together
 
     def metadata_filter_view(self) -> dict[str, Any]:
         """Flat view stored in vector-DB metadata (driver-agnostic).
@@ -102,6 +104,8 @@ class ChunkStamp(BaseModel):
             "consolidated": self.consolidated,
             "decay_weight": self.decay_weight,
             "ingested_at": self.ingested_at,
+            "turn_start": self.turn_start,
+            "turn_end": self.turn_end,
         }
 
     @classmethod
@@ -127,4 +131,6 @@ class ChunkStamp(BaseModel):
             decay_weight=float(meta.get("decay_weight", 1.0)),
             consolidated=bool(meta.get("consolidated", False)),
             ingested_at=float(meta.get("ingested_at", 0.0)),
+            turn_start=(int(meta["turn_start"]) if meta.get("turn_start") is not None else None),
+            turn_end=int(meta["turn_end"]) if meta.get("turn_end") is not None else None,
         )

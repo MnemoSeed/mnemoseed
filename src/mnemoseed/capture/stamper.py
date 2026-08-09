@@ -306,6 +306,8 @@ class StampWriter:
             decay_weight=1.0,
             score=scored.importance,
             ingested_at=now,
+            turn_start=turn.turn_index,
+            turn_end=turn.turn_index,
         )
         stamp.persona_id = ctx.agent_label
         return stamp

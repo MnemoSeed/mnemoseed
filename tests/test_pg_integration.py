@@ -311,6 +311,24 @@ def test_vector_full_surface(vector, embedder):
     assert vector.get_chunk("missing") is None
 
 
+def test_vector_purge_range_deletes_funnel_chunk_by_turn_window(vector, embedder):
+    # Item C: a funnel-written chunk (turn bounds on the stamp) must be
+    # targetable by purge_range through the public write path.
+    a = embedder.embed("alpha beta gamma")
+    vector.upsert_chunk(_make("f1", "funnel chunk", turn_start=2, turn_end=2), a.dense, a.sparse)
+    vector.upsert_chunk(_make("f2", "later funnel chunk", turn_start=8, turn_end=8), a.dense, a.sparse)
+    vector.upsert_chunk(_make("plain", "no turn bounds"), a.dense, a.sparse)
+
+    assert vector.purge_range("s1", turn_start=2, turn_end=2) == 1
+
+    remaining = [
+        chunk.chunk_id for chunk in vector.list_chunks(ChunkFilter(profile_id="alice"), Page(limit=10)).items
+    ]
+    assert "f1" not in remaining
+    assert "f2" in remaining
+    assert "plain" in remaining
+
+
 def test_vector_profile_isolation(vector, embedder):
     a = embedder.embed("alpha beta gamma")
     vector.upsert_chunk(_make("a1", "alpha beta gamma"), a.dense, a.sparse)
