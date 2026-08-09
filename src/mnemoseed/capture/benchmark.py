@@ -20,6 +20,13 @@ Two measurements are defined here:
   ``prelabel`` comes from a deterministic, documented heuristic below; its
   match against the scorer is a smoke signal, never the acceptance number,
   because the heuristic and the scorer are intentionally independent.
+
+The harness mirrors the production funnel: the text of every labeled row runs
+through F1 (the Stripper) before F2 scores it, so host-injected artifacts
+(session-compaction wrappers, task-notification blocks, tool noise) do not leak
+decision-like phrasing into the durability verdict. A turn that strips to the
+empty string is scored disposable — its raw content carried only host
+scaffolding, i.e. no user speech to persist.
 """
 
 from __future__ import annotations
@@ -33,7 +40,9 @@ from pathlib import Path
 from typing import cast
 
 from mnemoseed.capture.pipeline import ScoringPipeline
+from mnemoseed.capture.rulesets_v1 import RULESET_V1
 from mnemoseed.capture.scorer import Durability, TurnScorer
+from mnemoseed.capture.stripper import ContentTarget, Stripper
 from mnemoseed.schema.turn import HostId, Turn, TurnRole, TurnStep
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
 from mnemoseed.storage.ports import Embedder
@@ -94,15 +103,30 @@ def drive_funnel(
     return pipeline
 
 
-def score_text(scorer: TurnScorer, text: str) -> Durability:
-    """Durability verdict for raw user text (the label-harness scoring path)."""
+def score_text(
+    scorer: TurnScorer,
+    text: str,
+    *,
+    stripper: Stripper | None = None,
+) -> Durability:
+    """Durability verdict for raw user text, after F1 stripping (the
+    label-harness scoring path).
+
+    Mirrors the production funnel: F1 runs before F2. A strip that leaves the
+    empty string scores disposable, because the raw content was host
+    scaffolding only — no user speech survived to persist.
+    """
+    resolved = stripper if stripper is not None else Stripper(RULESET_V1)
+    stripped, _ = resolved.strip_text(text, ContentTarget.MESSAGE_TEXT)
+    if not stripped.strip():
+        return Durability.DISPOSABLE
     turn = Turn(
         turn_index=0,
         session_id="label-harness",
         profile_id="prof-benchmark",
         host=HostId.GENERIC,
         started_at=0.0,
-        steps=[TurnStep(role=TurnRole.USER, content=text)],
+        steps=[TurnStep(role=TurnRole.USER, content=stripped)],
     )
     return scorer.score_turn(turn).durability.durability
 
@@ -306,8 +330,16 @@ class PrecisionReport:
 def evaluate_durability(
     rows: Sequence[DurabilityLabelRow],
     scorer: TurnScorer,
+    *,
+    stripper: Stripper | None = None,
 ) -> PrecisionReport:
-    """Score every labeled text and compute durable-class precision/recall."""
+    """Score every labeled text and compute durable-class precision/recall.
+
+    Each row's text is stripped with the ruleset first (default RULESET_V1), so
+    host-injected artifacts do not leak into the F2 verdict; a fully-stripped
+    row scores disposable (no user speech survived).
+    """
+    resolved = stripper if stripper is not None else Stripper(RULESET_V1)
     tp = fp = tn = fn = 0
     human_labeled = 0
     hp_tp = 0
@@ -315,7 +347,7 @@ def evaluate_durability(
     mismatches: list[tuple[str, str, str]] = []
     for row in rows:
         reference = row.label if row.label in ("durable", "disposable") else row.prelabel
-        verdict = score_text(scorer, row.text).value
+        verdict = score_text(scorer, row.text, stripper=resolved).value
         if row.label in ("durable", "disposable"):
             human_labeled += 1
             if reference == "durable":

@@ -340,6 +340,108 @@ def test_three_identical_adjacent_lines_collapsed() -> None:
     assert "collapse-repeated-blocks" in result.stats.rules_hit
 
 
+# ---------------------------------------------------------------- host-injected artifacts
+#
+# The host injects two system-artifact shapes into conversation turns that are
+# NOT user/assistant speech: the session-compaction summary wrapper and the
+# task-notification XML block. Both are structural-matched as scaffold noise;
+# words like "session", "summary", "task", "开始" alone never match.
+
+COMPACTION_WRAPPER = (
+    "This session is being continued from a previous conversation that ran out of context. "
+    "The summary below covers the earlier portion of the conversation.\n\n"
+    "Summary:\n"
+    "1. Primary Request and Intent:\n"
+    "   The user is building a memory layer; they prefer concise reviews.\n"
+    "Continue the conversation from where it left off without asking the user any further questions. "
+    "Resume directly \u2014 do not acknowledge the summary, do not recap what was happening, do not "
+    'preface with "I\'ll continue" or similar. Pick up the last task as if the break never happened.'
+)
+
+TASK_NOTIFICATION = (
+    "<task-notification>\n"
+    "<task-id>af715e0e7684ee2a4</task-id>\n"
+    "<tool-use-id>Agent_133</tool-use-id>\n"
+    "<output-file>C:\\Users\\temp\\task.output</output-file>\n"
+    "<status>completed</status>\n"
+    '<summary>Agent "research" finished</summary>\n'
+    "<note>a task-notification fires each time this agent stops</note>\n"
+    "<result>the structured report\nwith more lines\n</result>\n"
+    "<usage><subagent_tokens>682</subagent_tokens></usage>\n"
+    "</task-notification>\n"
+)
+
+# Human prose that merely mentions sessions / summaries / tasks / compaction or
+# quotes a fragment of the wrapper: structural anchoring must leave them intact.
+COMPACTION_NEAR_MISSES = [
+    "This session is being continued from a previous conversation that ran out of context.",
+    "The summary below covers the earlier portion, and we should pick up from there.",
+    "\u8bfb\u5b8c\u90a3\u4e2a "
+    "compaction summary \u4e4b\u540e\uff0c\u6211\u5bf9\u8bbe\u8ba1\u65b9\u6848\u66f4\u6e05\u695a\u4e86\u3002",
+    "\u4e0a\u6b21 session \u7684 summary "
+    "\u91cc\u5199\u7684\u662f\u6211\u4eec\u8ba8\u8bba\u5230\u5b89\u88c5\u4f53\u9a8c\u3002",
+    "\u8fd9\u4e2a task \u5b8c\u6210\u4e86\uff0c\u8fd8\u6709\u4e00\u4e2a task \u5f85\u5904\u7406\u3002",
+    "\u6211\u4eec\u5148\u628a\u4e4b\u524d\u7684\u8ba8\u8bba\u603b\u7ed3\u4e00\u4e0b\uff0c\u518d\u7ee7\u7eed\u3002",
+    "I read the session summary and the task list after the break.",
+    "Continue the conversation from where it left off",
+]
+
+
+def test_session_compaction_wrapper_stripped() -> None:
+    text, hits = Stripper(RULESET_V1).strip_text(COMPACTION_WRAPPER, ContentTarget.MESSAGE_TEXT)
+    assert text == ""
+    assert "compaction-summary-wrapper" in hits
+
+
+def test_task_notification_block_stripped() -> None:
+    text, hits = Stripper(RULESET_V1).strip_text(TASK_NOTIFICATION, ContentTarget.MESSAGE_TEXT)
+    assert text == ""
+    assert "task-notification-block" in hits
+
+
+def test_task_notification_inline_keeps_surrounding_speech() -> None:
+    blended = (
+        "\u5148\u770b\u770b\u7ed3\u679c\u3002\n"
+        + TASK_NOTIFICATION
+        + "\u63a5\u7740\u6211\u4eec\u7ee7\u7eed\u3002\n"
+    )
+    text, hits = Stripper(RULESET_V1).strip_text(blended, ContentTarget.MESSAGE_TEXT)
+    assert text == "\u5148\u770b\u770b\u7ed3\u679c\u3002\n\u63a5\u7740\u6211\u4eec\u7ee7\u7eed\u3002\n"
+    assert "task-notification-block" in hits
+
+
+def test_compaction_wrapper_with_trailing_user_speech_survives() -> None:
+    blended = COMPACTION_WRAPPER + (
+        "\n\u53e6\u5916\uff0c\u6211\u89c9\u5f97\u504f\u597d\u8bb0\u5f55\u5e94\u8be5\u66f4\u7b80\u6d01\u3002"
+    )
+    text, hits = Stripper(RULESET_V1).strip_text(blended, ContentTarget.MESSAGE_TEXT)
+    assert (
+        "\u53e6\u5916\uff0c\u6211\u89c9\u5f97\u504f\u597d\u8bb0\u5f55\u5e94\u8be5\u66f4\u7b80\u6d01\u3002"
+        in text
+    )
+    assert "compaction-summary-wrapper" in hits
+
+
+def test_artifact_rules_leave_compaction_discussion_prose_untouched() -> None:
+    stripper = Stripper(RULESET_V1)
+    for line in COMPACTION_NEAR_MISSES:
+        for target in (ContentTarget.MESSAGE_TEXT, ContentTarget.TOOL_OUTPUT):
+            text, stats = stripper.strip_text(line, target)
+            assert text == line, f"stripped near-miss: {line!r}"
+            assert stats == {}
+
+
+def test_artifact_matcher_stats_account_for_full_block_bytes() -> None:
+    stripper = Stripper(RULESET_V1)
+    blended = TASK_NOTIFICATION + COMPACTION_WRAPPER
+    result = stripper.strip_turn(_turn(_msg_step(TurnRole.USER, blended)))
+    assert result.turn.steps[0].content == ""
+    assert result.stats.rules_hit["task-notification-block"] == 1
+    assert result.stats.rules_hit["compaction-summary-wrapper"] == 1
+    assert result.stats.noise_class_rate == 1.0
+    assert result.stats.noise_matched_bytes == result.stats.noise_removed_bytes
+
+
 # ---------------------------------------------------------------- ruleset safety
 
 

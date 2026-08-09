@@ -143,6 +143,78 @@ def test_evaluate_falls_back_to_prelabel_and_reports_it() -> None:
     assert report.used_prelabels is True
 
 
+# ---------------------------------------------------------------- NFR-1.3 harness funnel
+# The harness runs F1 before F2: host-injected artifacts (compaction wrappers,
+# task notifications) are stripped first and a fully-stripped turn scores
+# disposable, because it carries no user speech.
+
+ARTIFACT_COMPACTION = (
+    "This session is being continued from a previous conversation that ran out of context. "
+    "The summary below covers the earlier portion of the conversation.\n\n"
+    "Summary:\n1. The user prefers concise communication.\n"
+    "Continue the conversation from where it left off without asking the user any further questions. "
+    "Resume directly — do not acknowledge the summary, do not recap what was happening, do not "
+    'preface with "I\'ll continue" or similar. Pick up the last task as if the break never happened.'
+)
+
+ARTIFACT_TASK_NOTIFICATION = (
+    "<task-notification>\n"
+    "<task-id>abc</task-id>\n"
+    "<tool-use-id>Agent_1</tool-use-id>\n"
+    "<status>completed</status>\n"
+    '<summary>Agent "research" finished</summary>\n'
+    "<result>the report\n</result>\n"
+    "</task-notification>\n"
+)
+
+CALIBRATED_FN_TEXTS = [
+    "官方云端还需要多一层，就是系统管理员，属于我管理整个系统运行，和查看所有数据，也可以查看销售增长等等，服务是否上线等等的管理。接下去可以开始M0",
+    (
+        "设计没问题，但我还有一个疑虑，就是用户使用cursor之类的工具时，"
+        "你说没有startsession hook的功能，那样要怎么确保AI会自行运用记忆服务呢？"
+        "在整个session的对话过程中，又怎么确保AI能有效写入和读取记忆呢？"
+    ),
+    "claude desktop/codex desktop这类的桌面型应用，也可以探讨一下是否能够接入MnemoSeed，有什么技术壁垒",
+    (
+        "AI Mode里的反馈并不是绝对的，你可以自行斟酌是否要加入设计。"
+        "还有目前我用着mempalace，但是有时候可能触发记忆存储的间隔太远，"
+        "一旦中间关闭session重开就失忆，你有办法解决吗？"
+        "顺带一提，我刚才说的希望语气拟人一点，沟通更多以说明情况并给出选择和背后原因，"
+        "而不是用很多缩写代号等等最后变成无字天书。但我同时要你尽量精简内容，节省token消耗"
+    ),
+    "如果效能结果都相似，甚至更好，并且没有资安风险，那就选bge-m3",
+]
+
+
+def test_system_artifact_turns_classify_disposable_through_harness() -> None:
+    """Host-injected artifacts score disposable through strip + score: the raw
+    text carries decision-looking markers, but F1 removes the scaffolding first."""
+    rows = [
+        _row("fp-1", ARTIFACT_COMPACTION, "durable", "decision-marker", label="disposable"),
+        _row("fp-2", ARTIFACT_TASK_NOTIFICATION, "durable", "decision-marker", label="disposable"),
+    ]
+    report = evaluate_durability(rows, _scorer())
+    assert report.tp == 0
+    assert report.fp == 0
+    assert report.tn == 2
+    assert report.fn == 0
+    # both human labels are disposable, so there is no positive reference class
+    # for human_precision; the noise-free verdict is the point, not precision.
+    assert report.human_labeled == 2
+
+
+def test_calibrated_false_negative_patterns_classify_durable_through_harness() -> None:
+    rows = [
+        _row(f"fn-{i}", text, "durable", "heuristic", label="durable")
+        for i, text in enumerate(CALIBRATED_FN_TEXTS)
+    ]
+    report = evaluate_durability(rows, _scorer())
+    assert report.fp == 0
+    assert report.fn == 0
+    assert report.tp == len(CALIBRATED_FN_TEXTS)
+    assert report.human_precision == pytest.approx(1.0)
+
+
 @pytest.mark.skipif(not CORPUS.exists(), reason="real corpus not present (local-only benchmark)")
 def test_real_corpus_compression_nfr_12() -> None:
     """NFR-1.2: >= 90% noise-class stripping rate on real session logs.

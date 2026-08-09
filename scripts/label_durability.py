@@ -12,6 +12,11 @@ pin a human verdict. The harness differs against the human ``label`` when
 filled, else falls back to ``prelabel`` and SAYS SO in its output — the
 auto-labeled precision is a smoke signal, not the NFR-1.3 acceptance number.
 The NFR-1.3 ``>= 0.9`` precision gate applies to human-labeled rows only.
+
+Scoring mirrors the production funnel: each row's text runs through F1 (the
+Stripper) before the durability classifier, so host-injected artifacts
+(compaction wrappers, task notifications) do not leak decision-looking phrasing
+into the verdict; a turn that strips to empty scores disposable.
 """
 
 from __future__ import annotations

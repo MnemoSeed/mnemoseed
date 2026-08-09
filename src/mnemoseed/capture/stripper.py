@@ -8,9 +8,11 @@ regex pattern or a per-unit predicate. The ruleset itself is plain data
 without a restart; a swap governs the next stripped turn.
 
 Red line (design/01 stage 1): F1 never touches prose. Rules match only
-mechanical shapes, a pure-prose turn exits byte-identical, and strip_turn
-returns copies — the input Turn is never mutated, so the raw provenance copy
-stays available.
+mechanical shapes plus host-injected scaffolding (session-compaction summary
+wrappers, ``<task-notification>`` blocks — both anchored on structural
+markers, so prose that mentions or paraphrases them never matches); a
+pure-prose turn exits byte-identical, and strip_turn returns copies — the
+input Turn is never mutated, so the raw provenance copy stays available.
 """
 
 from __future__ import annotations

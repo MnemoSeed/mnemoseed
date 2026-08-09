@@ -98,6 +98,115 @@ def test_embedding_fallback_rejects_markerless_disposable_anchor() -> None:
     assert "embedding-disposable" in result.durability.reasons
 
 
+# ---------------------------------------------------------------- F2 calibration (NFR-1.3)
+# Patterns from the human-labeled durability set that the v1 lexicon rejected; each
+# is a general Chinese durable-intent expression (no project-specific tokens).
+
+CALIBRATED_FN_TEXTS = [
+    # decision go-ahead ("接下去可以开始")
+    "官方云端还需要多一层，就是系统管理员，属于我管理整个系统运行，和查看所有数据，也可以查看销售增长等等，服务是否上线等等的管理。接下去可以开始M0",
+    # open design concern (疑虑 / 怎么确保)
+    (
+        "设计没问题，但我还有一个疑虑，就是用户使用cursor之类的工具时，"
+        "你说没有startsession hook的功能，那样要怎么确保AI会自行运用记忆服务呢？"
+        "在整个session的对话过程中，又怎么确保AI能有效写入和读取记忆呢？"
+    ),
+    # open exploration question (探讨 / 是否能够 / 技术壁垒)
+    "claude desktop/codex desktop这类的桌面型应用，也可以探讨一下是否能够接入MnemoSeed，有什么技术壁垒",
+    # preference statement with a mediated stance verb ("我刚才说的希望...")
+    (
+        "AI Mode里的反馈并不是绝对的，你可以自行斟酌是否要加入设计。"
+        "还有目前我用着mempalace，但是有时候可能触发记忆存储的间隔太远，"
+        "一旦中间关闭session重开就失忆，你有办法解决吗？"
+        "顺带一提，我刚才说的希望语气拟人一点，沟通更多以说明情况并给出选择和背后原因，"
+        "而不是用很多缩写代号等等最后变成无字天书。但我同时要你尽量精简内容，节省token消耗"
+    ),
+    # conditional decision (那就选)
+    "1)LanceDB\n2)我需要支持多语言，特别是中文和英文，bge-m3合适吗？如果使用gemma，有什么限制？对于未来产品推出有什么影响？两个模型之间的差别？如果效能结果都相似，甚至更好，并且没有资安风险，那就选bge-m3\n3）行",
+]
+
+
+@pytest.mark.parametrize("text", CALIBRATED_FN_TEXTS)
+def test_calibrated_chinese_durable_markers_classify_durable(text: str) -> None:
+    result = _scorer().score_turn(_turn(text))
+    assert result.durability.durability is Durability.DURABLE, text
+
+
+def test_mediated_preference_stance_classifies_durable() -> None:
+    result = _scorer().score_turn(_turn("我刚才说的希望语气拟人一点，尽量精简内容"))
+    assert result.durability.durability is Durability.DURABLE
+    assert "stance-marker" in result.durability.reasons
+
+
+def test_imperative_requests_do_not_flip_to_durable() -> None:
+    # Regression fence against overfitting: bare "可以开始" / bare "确保" / "我需要你"
+    # are one-off operational instructions, not durable signals.
+    disposable_kept = [
+        # "可以开始" appears but without the 接下去/接下来 decision prefix
+        "我想要你先补上缺失的references，然后可以开始讨论M0，不过M0是什么？",
+        # bare 确保 without 怎么/如何; "我需要你" is a request, not a requirement marker
+        "改，但同时我需要你仔细查看现在各个最新工具各自的能力，并针对性优化这些记忆使用模式，确保整个记忆使用体验是丝滑流畅无障碍的",
+    ]
+    for text in disposable_kept:
+        result = _scorer().score_turn(_turn(text))
+        assert result.durability.durability is Durability.DISPOSABLE, text
+
+
+def test_open_concern_immediate_tasks_do_not_flip_to_durable() -> None:
+    # Fence against open-concern-marker overreach: "怎么解决/如何处理/探讨..." on
+    # an immediate code/file task is a trouble-shooting ask, not an open design or
+    # product question. Only the latter class is durable (human labeling standard).
+    disposable_stays = [
+        "这个 bug 怎么解决",  # debugging ask, not a product concern
+        "文件权限问题如何处理",  # operational fix ask
+        "我们来探讨一下这个函数怎么写",  # in-the-moment code task
+        # 怎么/如何 + 确保/保证 on a concrete task object: still an immediate task
+        "怎么确保这个测试通过",  # task object: 测试
+        "怎么保证接口不超时",  # task object: 接口 (same noun the 探讨 gate already blocks)
+        "怎么确保部署成功",  # task object: 部署
+    ]
+    # mirror direction: the two human-durable open-concern rows must stay durable
+    durable_stays = [
+        # :59 design concern about product behavior
+        (
+            "设计没问题，但我还有一个疑虑，就是用户使用cursor之类的工具时，"
+            "你说没有startsession hook的功能，那样要怎么确保AI会自行运用记忆服务呢？"
+            "在整个session的对话过程中，又怎么确保AI能有效写入和读取记忆呢？"
+        ),
+        # :64 open product/platform exploration
+        "claude desktop/codex desktop这类的桌面型应用，也可以探讨一下是否能够接入MnemoSeed，有什么技术壁垒",
+    ]
+    for text in disposable_stays:
+        result = _scorer().score_turn(_turn(text))
+        assert result.durability.durability is Durability.DISPOSABLE, text
+    for text in durable_stays:
+        result = _scorer().score_turn(_turn(text))
+        assert result.durability.durability is Durability.DURABLE, text
+
+
+def test_go_ahead_decision_prefix_requires_modal() -> None:
+    # Fence against decision-prefix overreach: "接下来要开始..." / "接下去开始..." are
+    # one-off operational imperatives (disposable); only an explicit modal go-ahead
+    # ("接下去可以开始") is a milestone decision (decision-marker).
+    disposable_stays = [
+        "接下来要开始部署了",
+        "接下去开始跑测试",
+    ]
+    # mirror direction: the human-durable milestone go-ahead must stay durable
+    durable_stays = [
+        (
+            "官方云端还需要多一层，就是系统管理员，属于我管理整个系统运行，和查看所有数据，"
+            "也可以查看销售增长等等，服务是否上线等等的管理。接下去可以开始M0"
+        ),
+    ]
+    for text in disposable_stays:
+        result = _scorer().score_turn(_turn(text))
+        assert result.durability.durability is Durability.DISPOSABLE, text
+    for text in durable_stays:
+        result = _scorer().score_turn(_turn(text))
+        assert result.durability.durability is Durability.DURABLE, text
+
+
 # ---------------------------------------------------------------- F3 arousal
 
 

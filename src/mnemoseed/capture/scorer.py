@@ -91,13 +91,39 @@ _PREF_ZH = r"我[^。！？\n]{0,12}?(?:喜欢|爱|偏爱|欣赏|倾向于|偏�
 _PREF_EN = r"\b(?:i|we|i'?d)\b[^.!?\n]{0,20}?\b(?:like|love|prefer|enjoy|value|favor|favour)\b"
 _DECISION = (
     r"以后|决定|打算|改为|改成|换(?:用|成|掉)|弃用|一律用|统一(?:用|采用)|"
-    r"从今往后|之后都|下次开始|从此|坚持会|一定会用|此后都|改用"
+    r"从今往后|之后都|下次开始|从此|坚持会|一定会用|此后都|改用|"
+    r"那就选|就选|就这么(?:定|办)|就这样(?:定|办)|先暂定|"
+    # milestone/decision go-ahead only: requires an explicit 就/可以 modal.
+    # "接下来要开始..." / bare "接下去开始..." read as one-off operational
+    # imperatives (disposable), not milestone decisions.
+    r"(?:接下去|接下来)[^。！？\n]{0,8}?(?:就|可以)开始"
 )
 _RULE = (
     r"每次.{0,18}?(?:都要|都必须|都得|必须|一定要|不要|别|一律)|"
     r"(?:都必须|都要|一定得|一定要|绝不能|再也不会|从不|一律)"
 )
 _STANCE = r"我(?:认为|觉得|相信|坚持|反对|支持|建议|推荐|希望|看重|在意)"
+# Mediated stance: 我 separated from the stance verb by up to 12 non-sentence-final
+# chars (e.g. "我刚才说的希望..."), still an explicit first-person preference.
+_STANCE_MEDIATED = r"我[^。！？\n]{0,12}?希望"
+# Task nouns that mark an immediate implementation/troubleshooting object. Both
+# the 确保/保证 and the 探讨 alternatives of _OPEN_CONCERN_ZH gate on them: a
+# "怎么确保/探讨" whose object is one of these is an in-the-moment task, not an
+# open design/product concern. Shared so the two gates can never drift apart.
+_OPEN_TASK_NOUNS = r"(?:函数|代码|编码|模块|接口|组件|脚本|报错|重构|算法|写法|测试|部署|bug)"
+
+_OPEN_CONCERN_ZH = (
+    r"疑虑|顾虑|疑问|"
+    # design/product-concern phrasing only: 怎么/如何 + 确保/保证 question the
+    # behavior of the thing being designed. 怎么解决/如何处理 and a concrete task
+    # object ("怎么确保这个测试通过") read as immediate asks and stay disposable.
+    r"(?:怎么|如何)(?:确保|保证)(?!\s*[^。！？\n]{0,8}?" + _OPEN_TASK_NOUNS + r")|"
+    r"是否能够|"
+    # open exploration is durable only when the object is not a code-task noun;
+    # "探讨一下这个函数怎么写" is an in-the-moment implementation question.
+    r"探讨(?:一下|过)?(?!\s*[^。！？\n]{0,8}?" + _OPEN_TASK_NOUNS + r")|"
+    r"有什么技术壁垒"
+)
 _ABSTRACTION = (
     r"原则|方法论|习惯|规则|流程|方案|标准|规范|偏好|模板|套路|机制|"
     r"文化|风格|准则|纪律|定式"
@@ -168,7 +194,8 @@ _DURABLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("pref-marker", re.compile(_PREF_ZH + "|" + _PREF_EN, re.IGNORECASE)),
     ("decision-marker", re.compile(_DECISION)),
     ("rule-marker", re.compile(_RULE)),
-    ("stance-marker", re.compile(_STANCE)),
+    ("stance-marker", re.compile(_STANCE + "|" + _STANCE_MEDIATED)),
+    ("open-concern-marker", re.compile(_OPEN_CONCERN_ZH)),
     ("abstraction-noun", re.compile(_ABSTRACTION)),
 )
 

@@ -184,6 +184,37 @@ RULESET_V1 = RuleSet(
             action=StripAction.STRIP_LINE,
             pattern=r"^\s*[⠀-⣿]+(?:\s+[^\r\n]+)?\s*$",
         ),
+        # ---- host-injected system artifacts (framing, not user/assistant speech) ----
+        #
+        # The session-compaction wrapper is the block the host prepends when a
+        # conversation ran out of context. It is anchored on both structural
+        # markers (the opening scaffold sentence and the closing "continue"
+        # instruction), so a sentence that merely mentions or quotes a fragment
+        # of it never matches. The trailing host instruction is part of the
+        # scaffold; user speech that follows the block survives.
+        Rule(
+            id="compaction-summary-wrapper",
+            target=ContentTarget.BOTH,
+            action=StripAction.REDACT_SPAN,
+            pattern=(
+                r"(?s)This session is being continued from a previous conversation that ran out of context\. "
+                r"The summary below covers the earlier portion of the conversation\.?"
+                r".*?"
+                r"Continue the conversation from where it left off "
+                r"without asking the user any further questions\. "
+                r"(?:\s*Resume directly[\s\S]*?Pick up the last task as if the break never happened\.)?"
+            ),
+        ),
+        # Task-notification XML blocks are forwarded into the turn when a
+        # background agent stops; the whole block is host scaffolding. Closing
+        # tag anchors the span, so prose that simply names a task or discusses
+        # "the task-notification" without the wrapper stays intact.
+        Rule(
+            id="task-notification-block",
+            target=ContentTarget.BOTH,
+            action=StripAction.REDACT_SPAN,
+            pattern=r"(?s)<task-notification>.*?</task-notification>\s*",
+        ),
         # ---- dead-loop repeated error blocks ----
         Rule(
             id="collapse-repeated-blocks",
