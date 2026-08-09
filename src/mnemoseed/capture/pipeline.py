@@ -372,3 +372,8 @@ class WritingPipeline:
     @property
     def stats(self) -> WritingStats:
         return self._stats
+
+    @property
+    def pool(self) -> ScorePool:
+        """The inner funnel's score pool (daemon boot restore + observability)."""
+        return self._inner.pool

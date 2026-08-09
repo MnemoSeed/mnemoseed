@@ -538,13 +538,25 @@ class MetaStore(Protocol):
     def capabilities(self) -> frozenset[Capability]:
         raise NotImplementedError
 
-    def pool_add(self, points: float, turn_range: TurnRange) -> None:
+    def pool_add(self, profile_id: str, points: float, turn_range: TurnRange) -> None:
         raise NotImplementedError
 
-    def pool_state(self) -> PoolState:
+    def pool_state(self, profile_id: str) -> PoolState:
         raise NotImplementedError
 
-    def advance_watermark(self, turn_range: TurnRange) -> None:
+    def pool_credit(self, profile_id: str, balance: float, turn_range: TurnRange) -> None:
+        """Set a profile's persisted pool row absolutely (balance + watermark).
+
+        Used by the capture ScorePool after every state change, mirroring the
+        in-process ledger into the per-profile table without touching the
+        fired-event window.
+        """
+        raise NotImplementedError
+
+    def pool_states(self) -> dict[str, PoolState]:
+        raise NotImplementedError
+
+    def advance_watermark(self, profile_id: str, turn_range: TurnRange) -> None:
         raise NotImplementedError
 
     def upsert_profile(self, profile: StoredProfile) -> None:

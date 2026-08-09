@@ -42,13 +42,21 @@ class _FakeBackend:
     """MetaStore-shaped persistence stub satisfying the PoolBackend seam."""
 
     def __init__(self) -> None:
-        self.credits: list[tuple[float, TurnRange]] = []
+        self.credits: list[tuple[str, float, TurnRange]] = []  # pool_credit calls
+        self.fired: list[tuple[str, float, TurnRange]] = []  # pool_add calls
+        self._rows: dict[str, PoolState] = {}
 
-    def pool_add(self, points: float, turn_range: TurnRange) -> None:
-        self.credits.append((points, turn_range))
+    def pool_add(self, profile_id: str, points: float, turn_range: TurnRange) -> None:
+        self.fired.append((profile_id, points, turn_range))
+        state = self._rows.get(profile_id, PoolState(balance=0.0))
+        self._rows[profile_id] = PoolState(balance=state.balance + points, watermark=state.watermark)
 
-    def pool_state(self) -> PoolState:
-        return PoolState(balance=sum(points for points, _ in self.credits))
+    def pool_credit(self, profile_id: str, balance: float, turn_range: TurnRange) -> None:
+        self.credits.append((profile_id, balance, turn_range))
+        self._rows[profile_id] = PoolState(balance=balance, watermark=turn_range)
+
+    def pool_states(self) -> dict[str, PoolState]:
+        return dict(self._rows)
 
 
 def test_no_trigger_below_threshold() -> None:
@@ -181,7 +189,9 @@ def test_stats_observability() -> None:
     assert pool.stats("ghost") is None
 
 
-def test_meta_backend_persists_events() -> None:
+def test_meta_backend_persists_credits_and_fired_events() -> None:
+    """Every non-firing credit persists the live ledger; a fired event records
+    itself and resets the persisted balance to 0."""
     clock = _Clock()
     backend = _FakeBackend()
     pool = ScorePool(clock=clock, backend=backend)
@@ -189,8 +199,109 @@ def test_meta_backend_persists_events() -> None:
         pool.add_points("p", 4.0, TurnRange(index, index))
     clock.advance(5.0)
     pool.add_points("p", 1.0, TurnRange(3, 3))
-    assert backend.credits == [(13.0, TurnRange(0, 3))]
-    assert backend.pool_state().balance == pytest.approx(13.0)
+    assert backend.credits == [
+        ("p", 4.0, TurnRange(0, 0)),
+        ("p", 8.0, TurnRange(0, 1)),
+        ("p", 12.0, TurnRange(0, 2)),
+        ("p", 0.0, TurnRange(0, 3)),  # the fire reset the persisted ledger
+    ]
+    assert backend.fired == [("p", 13.0, TurnRange(0, 3))]
+    assert backend.pool_states()["p"].balance == pytest.approx(0.0)
+    assert backend.pool_states()["p"].watermark == TurnRange(0, 3)
+
+
+def test_backend_persists_per_profile_isolation() -> None:
+    clock = _Clock()
+    backend = _FakeBackend()
+    pool = ScorePool(clock=clock, backend=backend)
+    pool.add_points("a", 3.0, TurnRange(0, 0))
+    pool.add_points("b", 5.0, TurnRange(0, 0))
+    pool.add_points("a", 4.0, TurnRange(1, 1))
+    states = backend.pool_states()
+    assert states["a"].balance == pytest.approx(7.0)
+    assert states["a"].watermark == TurnRange(0, 1)
+    assert states["b"].balance == pytest.approx(5.0)
+    assert set(states) == {"a", "b"}
+
+
+def test_fire_resets_persisted_balance_and_records_event() -> None:
+    clock = _Clock()
+    backend = _FakeBackend()
+    events, sink = _sink()
+    pool = ScorePool(clock=clock, sink=sink, backend=backend)
+    for index in range(3):
+        pool.add_points("p", 4.0, TurnRange(index, index))
+    clock.advance(5.0)
+    pool.add_points("p", 1.0, TurnRange(3, 3))
+    assert backend.pool_states()["p"].balance == pytest.approx(0.0)
+    assert backend.fired == [("p", 13.0, TurnRange(0, 3))]
+    assert len(events) == 1
+
+
+def test_backend_optional_keeps_in_memory_behavior() -> None:
+    clock = _Clock()
+    pool = ScorePool(clock=clock)
+    pool.add_points("p", 4.0, TurnRange(0, 0))
+    assert pool.stats("p").balance == pytest.approx(4.0)
+
+
+def test_restore_seeds_ledger_without_firing_or_persisting() -> None:
+    clock = _Clock()
+    backend = _FakeBackend()
+    events, sink = _sink()
+    pool = ScorePool(clock=clock, sink=sink, backend=backend)
+    pool.restore("p", 12.0, TurnRange(2, 5))
+    ledger = pool.stats("p")
+    assert ledger is not None
+    assert ledger.balance == pytest.approx(12.0)
+    assert ledger.turns_pooled == 0
+    # conservative boot: a restored backlog cannot instantly dream-trigger even
+    # once the idle window has elided, because last_add stays fresh
+    clock.advance(10.0)
+    assert pool.evaluate() == ()
+    assert events == []
+    # restore writes nothing through the backend, either direction
+    assert backend.credits == []
+    assert backend.fired == []
+    assert backend.pool_states() == {}
+
+
+def test_restore_is_idempotent() -> None:
+    clock = _Clock()
+    pool = ScorePool(clock=clock)
+    pool.restore("p", 8.0, TurnRange(0, 2))
+    pool.restore("p", 8.0, TurnRange(0, 2))
+    assert pool.stats("p").balance == pytest.approx(8.0)
+
+
+def test_restored_pool_accumulates_and_fires_like_a_live_one() -> None:
+    clock = _Clock()
+    backend = _FakeBackend()
+    events, sink = _sink()
+    pool = ScorePool(clock=clock, sink=sink, backend=backend)
+    pool.restore("p", 8.0, TurnRange(2, 5))
+    pool.add_points("p", 4.0, TurnRange(6, 6))  # 8 + 4 = 12, idle fresh -> no fire
+    assert pool.stats("p").balance == pytest.approx(12.0)
+    assert backend.credits[-1] == ("p", 12.0, TurnRange(2, 6))
+    clock.advance(6.0)
+    fired = pool.evaluate()
+    assert len(fired) == 1
+    assert fired[0].kind is PoolEventKind.DREAM_TRIGGER
+    assert fired[0].turn_range == TurnRange(2, 6)
+    assert backend.fired[-1] == ("p", 12.0, TurnRange(2, 6))
+    assert backend.pool_states()["p"].balance == pytest.approx(0.0)
+
+
+def test_restored_balance_at_forced_cap_fires_forced_consolidation() -> None:
+    clock = _Clock()
+    backend = _FakeBackend()
+    events, sink = _sink()
+    pool = ScorePool(clock=clock, sink=sink, backend=backend)
+    pool.restore("p", 50.0, TurnRange(0, 9))
+    fired = pool.evaluate()
+    assert len(fired) == 1
+    assert fired[0].kind is PoolEventKind.FORCED_CONSOLIDATION
+    assert backend.pool_states()["p"].balance == pytest.approx(0.0)
 
 
 def test_balances_snapshot() -> None:

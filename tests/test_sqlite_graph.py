@@ -571,11 +571,12 @@ def test_meta_file_contains_only_meta_tables(tmp_path):
             "profiles",
             "tokens",
             "score_pool",
+            "profile_score_pool",
             "config",
             "audit_log",
             "dream_runs",
         }
-        assert current_schema_version(conn, "meta") == 1  # v2 never touches meta
+        assert current_schema_version(conn, "meta") == 3  # v2 is graph-only, v3 is meta
     finally:
         conn.close()
 
@@ -583,7 +584,7 @@ def test_meta_file_contains_only_meta_tables(tmp_path):
 def test_migration_sequence_is_shared_and_forward_only():
     versions = [m.version for m in MIGRATIONS]
     assert versions == sorted(versions)
-    assert versions == [1, 2]
+    assert versions == [1, 2, 3]
     stores = {op.store for m in MIGRATIONS for op in m.ops}
     assert stores == {"graph", "meta"}
     # every store-region can reach the tail of the shared sequence independently

@@ -112,45 +112,79 @@ class PgMetaDriver:
 
     # ------------------------------------------------------------ score pool
 
-    def pool_add(self, points: float, turn_range: TurnRange) -> None:
+    def pool_add(self, profile_id: str, points: float, turn_range: TurnRange) -> None:
         with _transaction(self._conn):
             self._conn.execute(
-                "INSERT INTO score_pool (id, balance, watermark_start, watermark_end, "
-                "last_event_start, last_event_end) "
-                "VALUES (1, %s, 0, 0, %s, %s) "
-                "ON CONFLICT (id) DO UPDATE SET "
-                "balance = score_pool.balance + EXCLUDED.balance, "
+                "INSERT INTO profile_score_pool (profile_id, balance, watermark_start, "
+                "watermark_end, last_event_start, last_event_end) "
+                "VALUES (%s, %s, 0, 0, %s, %s) "
+                "ON CONFLICT (profile_id) DO UPDATE SET "
+                "balance = profile_score_pool.balance + EXCLUDED.balance, "
                 "last_event_start = EXCLUDED.last_event_start, "
                 "last_event_end = EXCLUDED.last_event_end",
-                (points, turn_range.start, turn_range.end),
+                (profile_id, points, turn_range.start, turn_range.end),
             )
 
-    def pool_state(self) -> PoolState:
-        row = self._exec_row("SELECT balance, watermark_start, watermark_end FROM score_pool WHERE id = 1")
-        if row is None or (float(row["balance"]) == 0.0 and int(row["watermark_end"]) == 0):
-            return PoolState(balance=0.0)
+    def pool_credit(self, profile_id: str, balance: float, turn_range: TurnRange) -> None:
+        with _transaction(self._conn):
+            self._conn.execute(
+                "INSERT INTO profile_score_pool (profile_id, balance, watermark_start, "
+                "watermark_end, last_event_start, last_event_end) "
+                "VALUES (%s, %s, %s, %s, 0, 0) "
+                "ON CONFLICT (profile_id) DO UPDATE SET "
+                "balance = EXCLUDED.balance, watermark_start = EXCLUDED.watermark_start, "
+                "watermark_end = EXCLUDED.watermark_end",
+                (profile_id, balance, turn_range.start, turn_range.end),
+            )
+
+    def pool_state(self, profile_id: str) -> PoolState:
+        row = self._exec_row(
+            "SELECT balance, watermark_start, watermark_end FROM profile_score_pool WHERE profile_id = %s",
+            (profile_id,),
+        )
+        if row is None or int(row["watermark_end"]) == 0:
+            # no watermark advanced yet: balance may still be un-filed points
+            balance = float(row["balance"]) if row is not None else 0.0
+            return PoolState(balance=balance)
         watermark = TurnRange(start=int(row["watermark_start"]), end=int(row["watermark_end"]))
         return PoolState(balance=float(row["balance"]), watermark=watermark)
 
-    def advance_watermark(self, turn_range: TurnRange) -> None:
-        current = self._exec_row("SELECT watermark_start, watermark_end FROM score_pool WHERE id = 1")
+    def pool_states(self) -> dict[str, PoolState]:
+        rows = self._exec_rows(
+            "SELECT profile_id, balance, watermark_start, watermark_end FROM profile_score_pool"
+        )
+        states: dict[str, PoolState] = {}
+        for row in rows:
+            balance = float(row["balance"])
+            watermark: TurnRange | None = None
+            if int(row["watermark_end"]) != 0:
+                watermark = TurnRange(start=int(row["watermark_start"]), end=int(row["watermark_end"]))
+            states[str(row["profile_id"])] = PoolState(balance=balance, watermark=watermark)
+        return states
+
+    def advance_watermark(self, profile_id: str, turn_range: TurnRange) -> None:
+        current = self._exec_row(
+            "SELECT watermark_start, watermark_end FROM profile_score_pool WHERE profile_id = %s",
+            (profile_id,),
+        )
         with _transaction(self._conn):
             if current is None or int(current["watermark_end"]) == 0:
                 self._conn.execute(
-                    "INSERT INTO score_pool (id, balance, watermark_start, watermark_end, "
-                    "last_event_start, last_event_end) "
-                    "VALUES (1, 0.0, %s, %s, 0, 0) "
-                    "ON CONFLICT (id) DO UPDATE SET watermark_start = EXCLUDED.watermark_start, "
+                    "INSERT INTO profile_score_pool (profile_id, balance, watermark_start, "
+                    "watermark_end, last_event_start, last_event_end) "
+                    "VALUES (%s, 0.0, %s, %s, 0, 0) "
+                    "ON CONFLICT (profile_id) DO UPDATE SET watermark_start = EXCLUDED.watermark_start, "
                     "watermark_end = EXCLUDED.watermark_end",
-                    (turn_range.start, turn_range.end),
+                    (profile_id, turn_range.start, turn_range.end),
                 )
                 return
             start = int(current["watermark_start"])
             end = int(current["watermark_end"])
             new_start, new_end = _merge_watermark((start, end), (turn_range.start, turn_range.end))
             self._conn.execute(
-                "UPDATE score_pool SET watermark_start = %s, watermark_end = %s WHERE id = 1",
-                (new_start, new_end),
+                "UPDATE profile_score_pool SET watermark_start = %s, watermark_end = %s "
+                "WHERE profile_id = %s",
+                (new_start, new_end, profile_id),
             )
 
     # ------------------------------------------------------------ profiles

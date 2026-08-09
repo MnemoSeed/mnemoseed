@@ -50,7 +50,7 @@ Driver families covered by the `stack` fixture:
 | upsert_node | `test_contract_graph.py::test_upsert_get_roundtrip` |
 | versions | `test_contract_graph.py::test_versions_chain` |
 
-## MetaStore (19 methods)
+## MetaStore (21 methods)
 
 | Method | Contract test |
 |---|---|
@@ -66,7 +66,9 @@ Driver families covered by the `stack` fixture:
 | list_profiles | `test_contract_meta.py::test_profile_crud_and_token_cascade` |
 | migrate | `test_contract_meta.py::test_schema_version_and_migrate_forward_only` |
 | pool_add | `test_contract_meta.py::test_pool_add_state_advance_watermark` |
+| pool_credit | `test_contract_meta.py::test_pool_credit_upserts_row` |
 | pool_state | `test_contract_meta.py::test_pool_add_state_advance_watermark` |
+| pool_states | `test_contract_meta.py::test_pool_states_returns_all_rows` |
 | record_dream_run | `test_contract_meta.py::test_dream_runs_roundtrip` |
 | revoke_token | `test_contract_meta.py::test_issue_token_and_revoke` |
 | rollback_config | `test_contract_meta.py::test_config_versioned_get_set_rollback` |

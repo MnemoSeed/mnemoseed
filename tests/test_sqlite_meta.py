@@ -65,42 +65,75 @@ def test_pragmas_wal_and_foreign_keys(tmp_path):
 
 
 def test_pool_add_and_state(driver):
-    assert driver.pool_state() == PoolState(balance=0.0)
-    driver.pool_add(10.0, TurnRange(start=0, end=4))
-    state = driver.pool_state()
+    assert driver.pool_state("u1") == PoolState(balance=0.0)
+    driver.pool_add("u1", 10.0, TurnRange(start=0, end=4))
+    state = driver.pool_state("u1")
     assert state.balance == 10.0
-    driver.advance_watermark(TurnRange(start=0, end=4))
-    assert driver.pool_state().watermark == TurnRange(start=0, end=4)
-    driver.pool_add(-3.0, TurnRange(start=5, end=6))
-    assert driver.pool_state().balance == 7.0
+    driver.advance_watermark("u1", TurnRange(start=0, end=4))
+    assert driver.pool_state("u1").watermark == TurnRange(start=0, end=4)
+    driver.pool_add("u1", -3.0, TurnRange(start=5, end=6))
+    assert driver.pool_state("u1").balance == 7.0
+
+
+def test_pool_and_watermark_are_per_profile(driver):
+    driver.pool_add("a", 10.0, TurnRange(start=0, end=4))
+    driver.pool_add("b", 3.0, TurnRange(start=0, end=4))
+    assert driver.pool_state("a").balance == 10.0
+    assert driver.pool_state("b").balance == 3.0
+    driver.advance_watermark("a", TurnRange(start=0, end=4))
+    assert driver.pool_state("a").watermark == TurnRange(start=0, end=4)
+    assert driver.pool_state("b").watermark is None
+    assert driver.pool_state("ghost") == PoolState(balance=0.0)
+
+
+def test_pool_credit_sets_row_absolutely(driver):
+    driver.pool_credit("u1", 5.0, TurnRange(start=0, end=2))
+    state = driver.pool_state("u1")
+    assert state.balance == 5.0
+    assert state.watermark == TurnRange(start=0, end=2)
+    driver.pool_credit("u1", 3.0, TurnRange(start=3, end=5))
+    state = driver.pool_state("u1")
+    assert state.balance == 3.0
+    assert state.watermark == TurnRange(start=3, end=5)
+
+
+def test_pool_states_returns_all_rows(driver):
+    driver.pool_credit("u1", 4.0, TurnRange(start=0, end=1))
+    driver.pool_add("u2", 7.0, TurnRange(start=2, end=3))
+    states = driver.pool_states()
+    assert set(states) == {"u1", "u2"}
+    assert states["u1"].balance == 4.0
+    assert states["u1"].watermark == TurnRange(start=0, end=1)  # pool_credit carries the span
+    assert states["u2"].balance == 7.0
+    assert states["u2"].watermark is None  # pool_add alone advances no watermark
 
 
 def test_advance_watermark_monotonic_merge(driver):
-    driver.advance_watermark(TurnRange(start=0, end=4))
-    driver.advance_watermark(TurnRange(start=5, end=8))
-    state = driver.pool_state()
+    driver.advance_watermark("u1", TurnRange(start=0, end=4))
+    driver.advance_watermark("u1", TurnRange(start=5, end=8))
+    state = driver.pool_state("u1")
     assert state.watermark == TurnRange(start=0, end=8)
     # overlapping/backward advance stays a superset
-    driver.advance_watermark(TurnRange(start=2, end=6))
-    assert driver.pool_state().watermark == TurnRange(start=0, end=8)
+    driver.advance_watermark("u1", TurnRange(start=2, end=6))
+    assert driver.pool_state("u1").watermark == TurnRange(start=0, end=8)
 
 
 def test_advance_watermark_gap_raises(driver):
-    driver.advance_watermark(TurnRange(start=0, end=4))
+    driver.advance_watermark("u1", TurnRange(start=0, end=4))
     with pytest.raises(ValueError, match="watermark advance jumps over"):
-        driver.advance_watermark(TurnRange(start=7, end=9))
+        driver.advance_watermark("u1", TurnRange(start=7, end=9))
 
 
 def test_advance_watermark_on_empty_pool(driver):
-    driver.advance_watermark(TurnRange(start=3, end=9))
-    assert driver.pool_state().watermark == TurnRange(start=3, end=9)
+    driver.advance_watermark("u1", TurnRange(start=3, end=9))
+    assert driver.pool_state("u1").watermark == TurnRange(start=3, end=9)
 
 
 def test_pool_add_atomic_under_concurrent_writers(tmp_path):
     """Six driver instances racing pool_add must land exactly 30.0."""
     path = tmp_path / "concurrent.db"
     seed = SqliteMetaDriver(path=path)
-    seed.pool_add(0.0, TurnRange(start=0, end=0))  # create the singleton row
+    seed.pool_add("race", 0.0, TurnRange(start=0, end=0))  # create the profile row
     asyncio.run(seed.close())
 
     add_count = 5
@@ -113,7 +146,7 @@ def test_pool_add_atomic_under_concurrent_writers(tmp_path):
         try:
             # let pools of items catch up too
             for j in range(add_count):
-                db.pool_add(1.0, TurnRange(start=index * add_count + j, end=index * add_count + j))
+                db.pool_add("race", 1.0, TurnRange(start=index * add_count + j, end=index * add_count + j))
         finally:
             asyncio.run(db.close())
 
@@ -125,7 +158,7 @@ def test_pool_add_atomic_under_concurrent_writers(tmp_path):
 
     check = SqliteMetaDriver(path=path)
     try:
-        assert check.pool_state().balance == writer_count * add_count
+        assert check.pool_state("race").balance == writer_count * add_count
     finally:
         asyncio.run(check.close())
 
@@ -284,7 +317,7 @@ def test_dream_run_list_orders_and_filters(driver):
 
 
 def test_meta_migration_preserves_data_and_is_forward_only(tmp_path):
-    """A meta-only file at global version 1 auto-upgrades idempotently."""
+    """A meta-only file at global version 1 auto-upgrades to head idempotently."""
     path = tmp_path / "migrate-meta.db"
     conn = sqlite3.connect(path, isolation_level=None)
     apply_migrations(conn, "meta", target=1)
@@ -298,14 +331,15 @@ def test_meta_migration_preserves_data_and_is_forward_only(tmp_path):
 
     driver = SqliteMetaDriver(path=path)
     try:
-        # graph-tagged v2 is not applied to a meta-only file; the global
-        # sequence advance is what is shared, not the columns.
-        assert driver.schema_version() == 1
+        # graph-tagged v2 is not applied to a meta-only file; v3 adds the
+        # per-profile score pool, so meta lands at 3 (the legacy singleton
+        # score_pool is neither dropped nor migrated).
+        assert driver.schema_version() == 3
         got = driver.get_profile("u1")
         assert got is not None
         assert got.display_name == "survivor"
         driver.migrate()  # idempotent re-run
-        assert driver.schema_version() == 1
+        assert driver.schema_version() == 3
     finally:
         asyncio.run(driver.close())
 
@@ -314,7 +348,7 @@ def test_schema_version_equals_latest_new_install(tmp_path):
     db = SqliteMetaDriver(path=tmp_path / "fresh.db")
     try:
         assert db.schema_version() == db.migrate()
-        assert db.schema_version() >= 1
+        assert db.schema_version() == 3
         # a profile row written after init survives a migrate() no-op
         db.upsert_profile(StoredProfile(profile_id="u1", display_name="Uma"))
         db.migrate()

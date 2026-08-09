@@ -219,12 +219,16 @@ def test_graph_edges_traverse_flags_intentions_weights(graph):
 
 
 def test_meta_pool_profiles_tokens_config_audit_dreams(meta):
-    assert meta.pool_state() == PoolState(balance=0.0)
-    meta.pool_add(10.0, TurnRange(start=0, end=4))
-    meta.advance_watermark(TurnRange(start=0, end=4))
-    state = meta.pool_state()
+    assert meta.pool_state("u1") == PoolState(balance=0.0)
+    meta.pool_add("u1", 10.0, TurnRange(start=0, end=4))
+    meta.advance_watermark("u1", TurnRange(start=0, end=4))
+    state = meta.pool_state("u1")
     assert state.balance == 10.0
     assert state.watermark == TurnRange(start=0, end=4)
+    states = meta.pool_states()
+    assert states["u1"].balance == 10.0
+    meta.pool_credit("u2", 5.0, TurnRange(start=0, end=2))
+    assert meta.pool_state("u2").balance == 5.0
 
     meta.upsert_profile(StoredProfile(profile_id="u1", display_name="Uma"))
     token = meta.issue_token("u1", ("graph:read",), expires_at=time.time() + 60.0)

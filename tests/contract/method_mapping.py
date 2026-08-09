@@ -50,6 +50,8 @@ COVERAGE: dict[str, dict[str, str]] = {
         "capabilities": "test_contract_meta.py::test_capabilities",
         "pool_add": "test_contract_meta.py::test_pool_add_state_advance_watermark",
         "pool_state": "test_contract_meta.py::test_pool_add_state_advance_watermark",
+        "pool_credit": "test_contract_meta.py::test_pool_credit_upserts_row",
+        "pool_states": "test_contract_meta.py::test_pool_states_returns_all_rows",
         "advance_watermark": "test_contract_meta.py::test_pool_watermark_gap_raises",
         "upsert_profile": "test_contract_meta.py::test_profile_crud_and_token_cascade",
         "get_profile": "test_contract_meta.py::test_profile_crud_and_token_cascade",
@@ -78,6 +80,6 @@ COVERAGE: dict[str, dict[str, str]] = {
 EXPECTED_METHOD_COUNTS: dict[str, int] = {
     "VectorStore": 12,
     "GraphStore": 18,
-    "MetaStore": 19,
+    "MetaStore": 21,
     "Embedder": 3,
 }

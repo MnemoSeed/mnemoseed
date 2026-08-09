@@ -9,9 +9,9 @@ dream engine:
 
 Idle is measured from the injected clock only: the pool never reads a wall
 clock and tests never sleep. The per-profile ledger is authoritative in-process
-state; the optional ``backend`` seam persists each trigger event to the
-MetaStore score pool (which currently holds a single global row, so the
-profile dimension lives here).
+state; the optional ``backend`` seam mirrors it into the MetaStore per-profile
+score pool after every state change (so a daemon restart can restore balances),
+and records each trigger event there.
 """
 
 from __future__ import annotations
@@ -55,11 +55,19 @@ class PoolStats:
 
 
 class PoolBackend(Protocol):
-    """MetaStore-shaped persistence seam (structural subset of MetaStore)."""
+    """MetaStore-shaped persistence seam (structural subset of MetaStore).
 
-    def pool_add(self, points: float, turn_range: TurnRange) -> None: ...
+    ``pool_credit`` mirrors a non-firing ledger state into the store; ``pool_add``
+    records a fired event's accumulated total; ``pool_states`` is the boot-time
+    read back. The full MetaStore satisfies the seam, so ``stores.meta`` binds
+    directly.
+    """
 
-    def pool_state(self) -> PoolState: ...
+    def pool_add(self, profile_id: str, points: float, turn_range: TurnRange) -> None: ...
+
+    def pool_credit(self, profile_id: str, balance: float, turn_range: TurnRange) -> None: ...
+
+    def pool_states(self) -> dict[str, PoolState]: ...
 
 
 @dataclass
@@ -104,8 +112,10 @@ class ScorePool:
         """Pool points for a profile; returns any events fired by this credit.
 
         ``points`` are the S value of one scored turn; ``turn_range`` bounds that
-        turn. A fired event resets the profile balance to 0 and is persisted to
-        the optional backend before the sink is notified.
+        turn. Every state change mirrors into the optional backend: a non-firing
+        credit persists the new balance and span, a fired event records the
+        accumulated total (``pool_add``) and then resets the persisted balance to
+        0 (``pool_credit``) before the sink is notified.
         """
         ledger = self._ledgers.setdefault(profile_id, _Ledger())
         ledger.points_added += points
@@ -144,6 +154,8 @@ class ScorePool:
             ledger.range_start = start
             ledger.range_end = end
             ledger.last_add = now
+            if self._backend is not None:
+                self._backend.pool_credit(profile_id, accumulator, span)
 
         if event is not None:
             ledger.balance = 0.0
@@ -151,7 +163,8 @@ class ScorePool:
             ledger.range_end = 0
             ledger.last_add = None
             if self._backend is not None:
-                self._backend.pool_add(accumulator, span)
+                self._backend.pool_add(profile_id, accumulator, span)
+                self._backend.pool_credit(profile_id, 0.0, span)
             if self._sink is not None:
                 self._sink(event)
             return (event,)
@@ -199,7 +212,8 @@ class ScorePool:
             ledger.range_end = 0
             ledger.last_add = None
             if self._backend is not None:
-                self._backend.pool_add(accumulator, span)
+                self._backend.pool_add(profile_id, accumulator, span)
+                self._backend.pool_credit(profile_id, 0.0, span)
             if self._sink is not None:
                 self._sink(event)
         return tuple(fired)
@@ -217,6 +231,22 @@ class ScorePool:
             dream_triggers=ledger.dream_triggers,
             forced_triggers=ledger.forced_triggers,
         )
+
+    def restore(self, profile_id: str, balance: float, watermark: TurnRange | None) -> None:
+        """Seed a ledger from persisted state, e.g. at daemon boot.
+
+        Never fires events and never writes back through the backend: the
+        restored ledger is in-process state until the next real credit.
+        ``last_add`` stays None (idle-fresh) so a restored lineage cannot dream
+        or consolidate instantly — the returned balance only participates in
+        evaluation once a new turn advances the clock.
+        """
+        if balance <= 0 or watermark is None:
+            return
+        ledger = self._ledgers.setdefault(profile_id, _Ledger())
+        ledger.balance = balance
+        ledger.range_start = watermark.start
+        ledger.range_end = watermark.end
 
     def balances(self) -> dict[str, float]:
         """Current per-profile balances (profile_id -> points)."""

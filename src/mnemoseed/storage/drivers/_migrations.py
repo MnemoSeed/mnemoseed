@@ -517,6 +517,23 @@ _V2_ADD_PINNED = AddColumn(
     column=Column("pinned", "INTEGER", not_null=True, default=0),
 )
 
+# v3: per-profile score-pool persistence (M1-T6). The v1 score_pool singleton
+# is superseded rather than dropped: legacy installs keep their singleton row
+# untouched (no data migration), and the per-profile table carries each
+# profile's live balance and watermark keyed by profile_id (no FK).
+_PROFILE_SCORE_POOL_TABLE = CreateTable(
+    store="meta",
+    name="profile_score_pool",
+    columns=(
+        Column("profile_id", "TEXT", primary_key=True),
+        Column("balance", "REAL", not_null=True, default=0.0),
+        Column("watermark_start", "INTEGER", not_null=True, default=0),
+        Column("watermark_end", "INTEGER", not_null=True, default=0),
+        Column("last_event_start", "INTEGER", not_null=True, default=0),
+        Column("last_event_end", "INTEGER", not_null=True, default=0),
+    ),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -561,6 +578,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=2,
         description="AC-5 parity: harmless pinned column on graph.nodes",
         ops=(_V2_ADD_PINNED,),
+    ),
+    Migration(
+        version=3,
+        description="per-profile score pool: profile_id-keyed balances and watermarks",
+        ops=(_PROFILE_SCORE_POOL_TABLE,),
     ),
 )
 

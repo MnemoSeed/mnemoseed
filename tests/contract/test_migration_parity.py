@@ -130,12 +130,12 @@ def _expected_pg_kind(kind: str) -> str:
 
 
 def test_version_sequences_identical_on_both_dialects() -> None:
-    """The dialect-agnostic sequence IS the parity baseline (graph 1->2, meta 1)."""
-    assert latest_version() == 2
+    """The dialect-agnostic sequence IS the parity baseline (graph 1->2, meta 1->3)."""
+    assert latest_version() == 3
     graph_versions = sorted(m.version for m in MIGRATIONS if m.applies_to("graph"))
     meta_versions = sorted(m.version for m in MIGRATIONS if m.applies_to("meta"))
     assert graph_versions == [1, 2]
-    assert meta_versions == [1]
+    assert meta_versions == [1, 3]
     assert len(MIGRATIONS) == latest_version()
 
 
@@ -378,8 +378,8 @@ _GRAPH_TABLES = ("nodes", "node_versions", "edges")
 _META_TABLES = ("profiles", "tokens", "score_pool", "config", "audit_log", "dream_runs")
 
 
-def test_sqlite_v1_to_v2_forward_migration_preserves_data() -> None:
-    """A real file at v1 upgrades to v2: column added, every row survives."""
+def test_sqlite_v1_to_head_forward_migration_preserves_data() -> None:
+    """A real file at v1 upgrades to head: column added, every row survives."""
     graph, meta = _load_v1_sqlite()
     assert "pinned" not in _column_names(graph, "nodes")
     graph_before = _snapshot(graph, _GRAPH_TABLES)
@@ -387,11 +387,11 @@ def test_sqlite_v1_to_v2_forward_migration_preserves_data() -> None:
     assert current_schema_version(graph, "graph") == 1
     assert current_schema_version(meta, "meta") == 1
 
-    # forward migration: graph advances to 2, meta stays frozen at 1
+    # forward migration: graph advances to 2, meta to 3 (v2 is graph-only)
     assert apply_migrations(graph, "graph") == 2
-    assert apply_migrations(meta, "meta") == 1
+    assert apply_migrations(meta, "meta") == 3
     assert current_schema_version(graph, "graph") == 2
-    assert current_schema_version(meta, "meta") == 1
+    assert current_schema_version(meta, "meta") == 3
 
     assert "pinned" in _column_names(graph, "nodes")
     row = dict(graph.execute("SELECT pinned, payload FROM nodes WHERE node_id = 'mv1'").fetchone())
@@ -402,15 +402,31 @@ def test_sqlite_v1_to_v2_forward_migration_preserves_data() -> None:
     meta_after = _snapshot(meta, _META_TABLES)
     assert _project_without_pinned(graph_after["nodes"]) == graph_before["nodes"]
     for table in ("node_versions", "edges"):
-        assert graph_after[table] == graph_before[table], f"row drift in {table} across v1->v2"
+        assert graph_after[table] == graph_before[table], f"row drift in {table} across v1->v3"
     for table in _META_TABLES:
-        assert meta_after[table] == meta_before[table], f"row drift in {table} across v1->v2"
+        assert meta_after[table] == meta_before[table], f"row drift in {table} across v1->v3"
 
-    # tracker advanced exactly one step (v2 toward head, meta untouched)
+    # v3 supersedes the legacy score_pool: the new per-profile table exists,
+    # empty (no data migration), and the old singleton row is untouched.
+    assert _column_names(meta, "profile_score_pool") == [
+        "profile_id",
+        "balance",
+        "watermark_start",
+        "watermark_end",
+        "last_event_start",
+        "last_event_end",
+    ]
+    empty = meta.execute("SELECT COUNT(*) FROM profile_score_pool").fetchone()
+    assert int(empty[0]) == 0
+    legacy = dict(meta.execute("SELECT id, balance FROM score_pool").fetchone())
+    assert legacy["id"] == 1
+    assert legacy["balance"] == 0.0
+
+    # tracker advanced exactly one step per store (v2 graph, v3 meta)
     graph_versions = [int(r[0]) for r in graph.execute(f"SELECT version FROM {SCHEMA_VERSION_TABLE}")]
     meta_versions = [int(r[0]) for r in meta.execute(f"SELECT version FROM {SCHEMA_VERSION_TABLE}")]
     assert sorted(graph_versions) == [1, 2]
-    assert meta_versions == [1]
+    assert sorted(meta_versions) == [1, 3]
 
 
 def _project_without_pinned(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -437,8 +453,8 @@ def _pg_snapshot(conn: Any, schema: str, table: str) -> list[dict[str, object]]:
     return [dict(r) for r in conn.execute(f"SELECT * FROM {schema}.{table}").fetchall()]
 
 
-def test_postgres_v1_to_v2_forward_migration_preserves_data() -> None:
-    """Live Postgres mirrors the sqlite arm: v1 data survives the v2 upgrade."""
+def test_postgres_v1_to_head_forward_migration_preserves_data() -> None:
+    """Live Postgres mirrors the sqlite arm: v1 data survives the head upgrade."""
     dsn = require_pg()
     graph_schema = f"par_g_{uuid.uuid4().hex[:8]}"
     meta_schema = f"par_m_{uuid.uuid4().hex[:8]}"
@@ -471,8 +487,20 @@ def test_postgres_v1_to_v2_forward_migration_preserves_data() -> None:
         before_nodes = _pg_snapshot(conn, graph_schema, "nodes")
 
         assert apply_postgres_migrations(conn, "graph", schema=graph_schema) == 2
-        assert apply_postgres_migrations(conn, "meta", schema=meta_schema) == 1
+        assert apply_postgres_migrations(conn, "meta", schema=meta_schema) == 3
         assert current_postgres_schema_version(conn, "graph", schema=graph_schema) == 2
+        assert current_postgres_schema_version(conn, "meta", schema=meta_schema) == 3
+        pool_columns = [c["column_name"] for c in _pg_columns(conn, meta_schema, "profile_score_pool")]
+        assert pool_columns == [
+            "profile_id",
+            "balance",
+            "watermark_start",
+            "watermark_end",
+            "last_event_start",
+            "last_event_end",
+        ]
+        empty = conn.execute("SELECT COUNT(*) AS n FROM " + meta_schema + ".profile_score_pool").fetchone()
+        assert empty is not None and int(empty["n"]) == 0
 
         columns = [c["column_name"] for c in _pg_columns(conn, graph_schema, "nodes")]
         assert "pinned" in columns

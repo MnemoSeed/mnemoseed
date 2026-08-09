@@ -42,24 +42,63 @@ def test_capabilities(stack) -> None:
 
 
 def test_pool_add_state_advance_watermark(stack) -> None:
-    assert stack.meta.pool_state() == PoolState(balance=0.0)
-    stack.meta.pool_add(10.0, TurnRange(start=0, end=4))
-    stack.meta.advance_watermark(TurnRange(start=0, end=4))
-    state = stack.meta.pool_state()
+    profile = "u1"
+    assert stack.meta.pool_state(profile) == PoolState(balance=0.0)
+    stack.meta.pool_add(profile, 10.0, TurnRange(start=0, end=4))
+    stack.meta.advance_watermark(profile, TurnRange(start=0, end=4))
+    state = stack.meta.pool_state(profile)
     assert state.balance == 10.0
     assert state.watermark == TurnRange(start=0, end=4)
 
-    stack.meta.advance_watermark(TurnRange(start=1, end=8))
-    assert stack.meta.pool_state().watermark == TurnRange(start=0, end=8)
+    stack.meta.advance_watermark(profile, TurnRange(start=1, end=8))
+    assert stack.meta.pool_state(profile).watermark == TurnRange(start=0, end=8)
 
-    stack.meta.pool_add(5.0, TurnRange(start=5, end=9))
-    assert stack.meta.pool_state().balance == 15.0
+    stack.meta.pool_add(profile, 5.0, TurnRange(start=5, end=9))
+    assert stack.meta.pool_state(profile).balance == 15.0
+
+
+def test_pool_per_profile_isolation(stack) -> None:
+    stack.meta.pool_add("a", 10.0, TurnRange(start=0, end=4))
+    stack.meta.pool_add("b", 3.0, TurnRange(start=0, end=4))
+    assert stack.meta.pool_state("a").balance == 10.0
+    assert stack.meta.pool_state("b").balance == 3.0
+    stack.meta.advance_watermark("a", TurnRange(start=0, end=4))
+    assert stack.meta.pool_state("a").watermark == TurnRange(start=0, end=4)
+    assert stack.meta.pool_state("b").watermark is None
+
+
+def test_pool_state_unknown_profile_is_empty(stack) -> None:
+    assert stack.meta.pool_state("ghost") == PoolState(balance=0.0)
+
+
+def test_pool_credit_upserts_row(stack) -> None:
+    """pool_credit sets a profile's row absolutely (balance + watermark)."""
+    stack.meta.pool_credit("u1", 5.0, TurnRange(start=0, end=2))
+    state = stack.meta.pool_state("u1")
+    assert state.balance == 5.0
+    assert state.watermark == TurnRange(start=0, end=2)
+    # a second credit overwrites instead of accumulating
+    stack.meta.pool_credit("u1", 3.0, TurnRange(start=3, end=5))
+    state = stack.meta.pool_state("u1")
+    assert state.balance == 3.0
+    assert state.watermark == TurnRange(start=3, end=5)
+
+
+def test_pool_states_returns_all_rows(stack) -> None:
+    stack.meta.pool_credit("u1", 4.0, TurnRange(start=0, end=1))
+    stack.meta.pool_add("u2", 7.0, TurnRange(start=2, end=3))
+    states = stack.meta.pool_states()
+    assert set(states) == {"u1", "u2"}
+    assert states["u1"].balance == 4.0
+    assert states["u1"].watermark == TurnRange(start=0, end=1)  # pool_credit carries the span
+    assert states["u2"].balance == 7.0
+    assert states["u2"].watermark is None  # pool_add alone advances no watermark
 
 
 def test_pool_watermark_gap_raises(stack) -> None:
-    stack.meta.advance_watermark(TurnRange(start=0, end=4))
+    stack.meta.advance_watermark("u1", TurnRange(start=0, end=4))
     with pytest.raises(ValueError, match="jumps over unprocessed turns"):
-        stack.meta.advance_watermark(TurnRange(start=10, end=12))
+        stack.meta.advance_watermark("u1", TurnRange(start=10, end=12))
 
 
 def test_profile_crud_and_token_cascade(stack) -> None:
@@ -156,10 +195,12 @@ def test_dream_runs_roundtrip(stack) -> None:
 
 
 def test_schema_version_and_migrate_forward_only(stack) -> None:
-    """meta's frozen head is v1; migrate is idempotent and forward-only."""
-    assert stack.meta.schema_version() == 1
-    assert stack.meta.migrate(target=1) == 1
-    assert stack.meta.migrate() == stack.meta.schema_version()
+    """meta's head is v3 (frozen v1 schema + v3 profile_score_pool); migrate is
+    idempotent and forward-only."""
+    assert stack.meta.schema_version() == 3
+    assert stack.meta.migrate() == 3
+    assert stack.meta.migrate(target=1) == 3  # back-targeting is a no-op at head
+    assert stack.meta.schema_version() == 3
 
 
 def test_meta_stamp_helpers_used(stack) -> None:

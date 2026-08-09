@@ -151,7 +151,7 @@ def test_up_server_shuts_down_cleanly(tmp_path, monkeypatch) -> None:
     # lifefspan teardown closed the sqlite meta store: queries now fail
     # uvicorn serves the module-level `app` created by create_app()
     with pytest.raises(sqlite3.ProgrammingError):
-        daemon_app.app.state.stores.meta.pool_state()
+        daemon_app.app.state.stores.meta.pool_state("u1")
 
 
 def test_up_bad_preset_fails_clearly(tmp_path) -> None:

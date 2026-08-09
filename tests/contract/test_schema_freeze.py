@@ -188,7 +188,15 @@ def test_graph_schema_freeze_walk() -> None:
 # ---------------------------------------------------------------- A.3 meta
 
 
-_FROZEN_META_TABLES = ("profiles", "tokens", "score_pool", "config", "audit_log", "dream_runs")
+_FROZEN_META_TABLES = (
+    "profiles",
+    "tokens",
+    "score_pool",
+    "profile_score_pool",
+    "config",
+    "audit_log",
+    "dream_runs",
+)
 _FROZEN_META_INDEXES = ("idx_tokens_profile", "idx_audit_at", "idx_dream_session")
 _FROZEN_TRIGGERS = (("trg_audit_no_update", "UPDATE"), ("trg_audit_no_delete", "DELETE"))
 

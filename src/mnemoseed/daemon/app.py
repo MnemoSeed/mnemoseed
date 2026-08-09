@@ -21,7 +21,8 @@ from typing import Any
 from fastapi import FastAPI
 
 from mnemoseed import __version__
-from mnemoseed.capture import StrippingPipeline, TurnSegmenter, WritingPipeline
+from mnemoseed.capture import ScoringPipeline, StrippingPipeline, TurnScorer, TurnSegmenter, WritingPipeline
+from mnemoseed.capture.pool import ScorePool
 from mnemoseed.capture.stamper import WriteContext
 from mnemoseed.config import load_config
 from mnemoseed.daemon.ingest import router as ingest_router
@@ -100,9 +101,22 @@ def _daemon_write_context(turn: Turn) -> WriteContext:
 def _build_capture(stores: Stores) -> WritingPipeline:
     """Serving capture funnel: strip -> score -> pool -> stamp/write over the
     resolved storage stack. /ingest stays submit-only; the funnel drains on
-    /session/end (v1 drain trigger, off the /ingest hot path)."""
+    /session/end (v1 drain trigger, off the /ingest hot path).
+
+    The ScorePool binds the meta store as its persistence backend and is
+    restored at boot from the persisted per-profile ledgers, so a daemon
+    restart keeps un-triggered balances instead of losing them.
+    """
+    pool = ScorePool(clock=time.monotonic, backend=stores.meta)
+    for profile_id, state in stores.meta.pool_states().items():
+        pool.restore(profile_id, state.balance, state.watermark)
+    scoring = ScoringPipeline(
+        scorer=TurnScorer(embedder=stores.embed),
+        pool=pool,
+    )
     return WritingPipeline(
         store=stores.vector,
+        inner=scoring,
         embedder=stores.embed,
         context=_daemon_write_context,
     )

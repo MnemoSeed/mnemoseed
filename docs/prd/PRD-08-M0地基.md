@@ -79,7 +79,7 @@
 
 ## 9. 已识别残留风险（M0 不解决，登记备查）
 
-- **SQLite 断电耐久**：score_pool/watermark 的并发正确性有契约测试覆盖，但 embedded 单进程断电崩溃恢复无 AC——M1 捕获链路（PRD-01）上线前补崩溃恢复测试；
+- **SQLite 断电耐久**：profile_score_pool/watermark 的并发正确性有契约测试覆盖，但 embedded 单进程断电崩溃恢复无 AC——M1 捕获链路（PRD-01）上线前补崩溃恢复测试；
 - **bge-m3 ONNX 分发实测**：~543MiB（实测 569.7MB，int8 量化）+ ONNX runtime 依赖链与 TTFM < 3min 的真实适配，需 PRD-06 安装流程实测验证；
 - **LanceDB 十万级 p95**：M0 契约测试不暴露真实规模性能，PRD-03 NFR-3.1（300ms）届时独立验收。
 
@@ -124,7 +124,7 @@
 
 ### A.3 MetaStore（SQLite 与 PG 同构）
 
-- **schema_version**（迁移机制自身）、**profiles**、**tokens**（凭证签发/吊销）、**score_pool**（watermark + 积分池水位，要求事务原子更新；事件含 turn_range）、**config**（版本化 + 可回滚）、**audit_log**（append-only，读写事件流；保留与聚合策略：明细 90 天滚动 + 聚合计数永久——**用量计数不从 audit_log 派生**，走 A.1/A.2 的计数字段）、**dream_runs**（梦境运行历史：turn_range/模型/tokens/成本/分流计数/中断标记，console Dream 面板与幂等恢复依赖）
+- **schema_version**（迁移机制自身）、**profiles**、**tokens**（凭证签发/吊销）、**profile_score_pool**（per-profile 积分池：`profile_id` 主键且无外键，`balance / watermark_start / watermark_end / last_event_start / last_event_end`，事务原子更新，事件含 turn_range；迁移 v3 引入并**取代** legacy 单行 `score_pool`，后者保留、无数据迁移）、**config**（版本化 + 可回滚）、**audit_log**（append-only，读写事件流；保留与聚合策略：明细 90 天滚动 + 聚合计数永久——**用量计数不从 audit_log 派生**，走 A.1/A.2 的计数字段）、**dream_runs**（梦境运行历史：turn_range/模型/tokens/成本/分流计数/中断标记，console Dream 面板与幂等恢复依赖）
 
 ### A.4 显式不冻结
 
@@ -175,8 +175,10 @@
 
 | 方法 | 语义 | 消费方 |
 |---|---|---|
-| pool_add(points, turn_range) / pool_state() | 积分池原子累计 / 水位与 watermark 读取 | 捕获 FR-1.5 |
-| advance_watermark(turn_range) | watermark 原子推进 | 梦境 |
+| pool_add(profile_id, points, turn_range) | 单 profile 积分原子累计（记录 last_event） | 捕获 FR-1.5 |
+| pool_credit(profile_id, balance, turn_range) | 单 profile 行整体置为 balance + watermark（upsert，绝对覆盖非累加） | 捕获 FR-1.5 |
+| pool_state(profile_id) / pool_states() | 单 profile / 全量 balance 与 watermark 读取 | 捕获 FR-1.5、守护进程启动恢复 |
+| advance_watermark(profile_id, turn_range) | 单 profile watermark 单调向前推进 | 梦境 |
 | profiles CRUD / tokens issue / revoke | 身份与凭证 | PRD-06 |
 | config get / set（版本化 + rollback） | 配置版本化 | console Settings |
 | audit_append / audit_query(filter, page) | 审计 append-only 写 / 过滤分页读 | 全局 |

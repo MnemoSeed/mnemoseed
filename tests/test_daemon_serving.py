@@ -10,6 +10,7 @@ touches the network or a model download.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ from mnemoseed.daemon.app import create_app
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_meta
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
-from mnemoseed.storage.ports import ChunkFilter, Page
+from mnemoseed.storage.ports import ChunkFilter, Page, TurnRange
 from mnemoseed.storage.registry import (
     EMBED_DRIVERS,
     GRAPH_DRIVERS,
@@ -128,3 +129,20 @@ def test_serving_pipeline_single_turn_context(tmp_path, monkeypatch) -> None:
         assert chunk.persona_id is None
         assert chunk.turn_start == 0
         assert chunk.turn_end == 0
+
+
+def test_serving_boot_restores_persisted_score_pool(tmp_path, monkeypatch) -> None:
+    """Per-profile pool balances survive a daemon restart: the ScorePool is
+    seeded at boot from the meta store, not from the (lost) in-process ledgers."""
+    seed = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
+    seed.pool_credit(_PROFILE, 13.0, TurnRange(start=2, end=6))
+    asyncio.run(seed.close())
+
+    with _client(tmp_path, monkeypatch) as client:
+        pool = client.app.state.capture.pool
+        assert pool.balances() == {_PROFILE: pytest.approx(13.0)}
+        # restore is conservative: no turns pooled, no ledger counters bumped
+        ledger = pool.stats(_PROFILE)
+        assert ledger is not None
+        assert ledger.turns_pooled == 0
+        assert ledger.points_added == 0.0
