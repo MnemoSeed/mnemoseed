@@ -10,12 +10,19 @@ consumer side (``drain`` / ``turns``), never inside the HTTP handler.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from mnemoseed.capture.pool import ScorePool
 from mnemoseed.capture.rulesets_v1 import RULESET_V1
 from mnemoseed.capture.scorer import Durability, ScoredTurn, TurnScorer
+from mnemoseed.capture.stamper import (
+    StampWriter,
+    WriteContext,
+    WriteOutcome,
+    WriteOutcomeKind,
+)
 from mnemoseed.capture.stripper import (
     RuleSet,
     StrippedTurn,
@@ -24,7 +31,7 @@ from mnemoseed.capture.stripper import (
 )
 from mnemoseed.schema.turn import Turn, TurnRole
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
-from mnemoseed.storage.ports import Embedder, TurnRange
+from mnemoseed.storage.ports import Embedder, TurnRange, VectorStore
 
 
 class CapturePipeline(Protocol):
@@ -210,7 +217,7 @@ class ScoringPipeline:
             scored = self._scorer.score_turn(
                 stripped.turn,
                 recent_texts=tuple(recent),
-                importance_hint=None,
+                importance_hint=turn.importance_hint,
             )
             self._stats.turns_in += 1
             next_recent = [*recent, _user_text(stripped.turn)]
@@ -248,4 +255,91 @@ class ScoringPipeline:
 
     @property
     def stats(self) -> ScoringStats:
+        return self._stats
+
+
+@dataclass
+class WritingStats:
+    """Cumulative stamp-writer telemetry across every drained turn."""
+
+    turns_written: int = 0
+    new_chunks: int = 0
+    reinforced: int = 0
+    needs_reconcile: int = 0
+
+
+def _default_write_context(turn: Turn) -> WriteContext:
+    """Bare write context: only the identity the wire model always carries."""
+    return WriteContext(profile_id=turn.profile_id)
+
+
+class WritingPipeline:
+    """ScoringPipeline plus the stamp writer (FR-1.6/FR-1.8/FR-1.9).
+
+    ``submit_turn`` stays an O(1) append through the inner ScoringPipeline —
+    the /ingest hot path never touches embeddings or the store. The consumer
+    side (``drain`` / ``turns``) first scores the pending turns, then sends the
+    durable ones through the StampWriter, recording per-outcome telemetry.
+    Read paths drain first so a producer cannot bypass the write path.
+    """
+
+    def __init__(
+        self,
+        store: VectorStore,
+        inner: ScoringPipeline | None = None,
+        *,
+        writer: StampWriter | None = None,
+        context: Callable[[Turn], WriteContext] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._inner = inner if inner is not None else ScoringPipeline()
+        self._context = context if context is not None else _default_write_context
+        if writer is None:
+            writer = StampWriter(
+                store,
+                embedder=cast(Embedder, SyntheticEmbedder()),
+                clock=clock,
+                pool=self._inner.pool,
+            )
+        self._writer = writer
+        self._stats = WritingStats()
+
+    def submit_turn(self, turn: Turn) -> None:
+        self._inner.submit_turn(turn)
+
+    def end_session(self, session_id: str, turn_range: TurnRange) -> None:
+        self._inner.end_session(session_id, turn_range)
+
+    def reload_rules(self, ruleset: RuleSet) -> None:
+        self._inner.reload_rules(ruleset)
+
+    def drain(self, session_id: str) -> list[WriteOutcome]:
+        """Score pending turns, then write the durable ones to the store."""
+        scored = self._inner.drain(session_id)
+        outcomes: list[WriteOutcome] = []
+        for item in scored:
+            outcome = self._writer.write(item, self._context(item.turn))
+            outcomes.append(outcome)
+            self._stats.turns_written += 1
+            if outcome.kind is WriteOutcomeKind.NEW_CHUNK:
+                self._stats.new_chunks += 1
+            elif outcome.kind is WriteOutcomeKind.REINFORCED:
+                self._stats.reinforced += 1
+            else:
+                self._stats.needs_reconcile += 1
+        return outcomes
+
+    def turns(self, session_id: str) -> list[ScoredTurn]:
+        """Drain pending turns (writing them) and return the scored view."""
+        self.drain(session_id)
+        return self._inner.turns(session_id)
+
+    def settled(self, session_id: str) -> TurnRange | None:
+        return self._inner.settled(session_id)
+
+    def sessions(self) -> tuple[str, ...]:
+        return self._inner.sessions()
+
+    @property
+    def stats(self) -> WritingStats:
         return self._stats

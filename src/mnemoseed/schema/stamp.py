@@ -40,6 +40,8 @@ class Cues(BaseModel):
     retrieval context matches the encoding context)."""
 
     project: str | None = None
+    host: str | None = None  # encoding context: which host wrote the chunk
+    task: str | None = None  # encoding context: active task clue (FR-1.6)
     tools_used: list[str] = Field(default_factory=list)
     time_bucket: str | None = None  # e.g. "2026-W32", "weekday-evening"
     entities: list[str] = Field(default_factory=list)  # required for freshness checks

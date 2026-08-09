@@ -115,6 +115,7 @@ class _SessionState:
             profile_id=self.profile_id,
             host=event.host,
             started_at=event.ts,
+            importance_hint=event.importance_hint,
         )
         self.turn_index += 1
         self.open_turn = turn

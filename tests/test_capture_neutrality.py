@@ -42,8 +42,11 @@ def scan_source(source: str, path: str) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                top = alias.name.split(".", 1)[0]
-                bad = _forbidden_part(top) or (alias.asname and _forbidden_part(alias.asname))
+                # Dotted imports hide the forbidden module in a later segment
+                # (`import mnemoseed.anima as am`), so every segment is scanned.
+                bad = next((part for part in alias.name.split(".") if _forbidden_part(part)), "")
+                if not bad and alias.asname:
+                    bad = _forbidden_part(alias.asname)
                 if bad:
                     _record_violation(violations, path, node.lineno, bad)
         elif isinstance(node, ast.ImportFrom):
@@ -97,6 +100,13 @@ def test_capture_sources_never_read_anima_or_preferences() -> None:
 def test_scanner_flags_import_of_forbidden_module() -> None:
     bad = "from mnemoseed.anima import state\n"
     assert scan_source(bad, "f.py")
+
+
+def test_scanner_flags_dotted_import_under_forbidden_submodule() -> None:
+    # Regression: `import mnemoseed.anima as am` evaded the Import branch
+    # because it only checked the top-level package segment ("mnemoseed").
+    assert scan_source("import mnemoseed.anima as am\n", "f.py")
+    assert scan_source("import mnemoseed.anima.state\n", "f.py")
 
 
 def test_scanner_flags_forbidden_identifier() -> None:

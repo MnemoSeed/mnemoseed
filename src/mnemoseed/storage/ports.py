@@ -422,7 +422,13 @@ class VectorStore(Protocol):
     ) -> list[SearchHit]:
         raise NotImplementedError
 
-    def near_duplicate(self, vector: Sequence[float], threshold: float) -> list[ChunkStamp]:
+    def near_duplicate(self, vector: Sequence[float], threshold: float, profile_id: str) -> list[ChunkStamp]:
+        """Near-duplicate probe within one profile (D5 isolation is explicit).
+
+        ``profile_id`` scopes the probe to a single profile — same isolation
+        contract as ChunkFilter. The capture path (FR-1.8) must never scan
+        another profile's chunks when deciding reinforce/reconcile/new.
+        """
         raise NotImplementedError
 
     def snapshot_read(self, filter: ChunkFilter) -> list[ChunkStamp]:

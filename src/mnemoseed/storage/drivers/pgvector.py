@@ -470,6 +470,8 @@ def _to_row(
         "anima_id": chunk.persona_id,
         "cues": {
             "project": cues.project,
+            "host": cues.host,
+            "task": cues.task,
             "tools_used": [str(tool) for tool in cues.tools_used],
             "time_bucket": cues.time_bucket,
             "entities": [str(entity) for entity in cues.entities],
@@ -519,6 +521,8 @@ def _to_stamp(row: dict[str, Any]) -> ChunkStamp:
         persona_id=row.get("anima_id"),
         cues=Cues(
             project=cues_row.get("project"),
+            host=cues_row.get("host"),
+            task=cues_row.get("task"),
             tools_used=[str(tool) for tool in (cues_row.get("tools_used") or [])],
             time_bucket=cues_row.get("time_bucket"),
             entities=[str(entity) for entity in (cues_row.get("entities") or [])],

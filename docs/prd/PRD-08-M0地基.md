@@ -144,7 +144,7 @@
 |---|---|---|
 | upsert_chunk / get_chunk / delete_chunk | 写入 / 按 id 取单片 / forget_this 删除 | 捕获、console Detail、PRD-03 |
 | search(dense, sparse?, filter, top_k) | 混合检索 + metadata 过滤（profile_id / decay_weight 下限 / 时间区间） | 检索 |
-| near_duplicate(vector, threshold) | 近重复探测，支持 0.9 / 0.85 双阈值 | 捕获 FR-1.8 赫布强化 |
+| near_duplicate(vector, threshold, profile_id) | 近重复探测，支持 0.9 / 0.85 双阈值；profile_id 必填（D5 隔离） | 捕获 FR-1.8 赫布强化 |
 | snapshot_read(filter) | 梦境只读快照；无 snapshot 能力时退化 turn_range 逻辑读 | 梦境引擎 |
 | mark_consolidated(chunk_ids) | 批量置 consolidated | 梦境清空 |
 | purge_range(session_id, turn_start, turn_end) | 按快照范围安全清空，两端互不干扰 | 梦境 FR-2.x |

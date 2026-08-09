@@ -12,9 +12,10 @@ from __future__ import annotations
 import time
 from contextlib import asynccontextmanager
 
+import pytest
 from fastapi.testclient import TestClient
 
-from mnemoseed.capture import InMemoryCapturePipeline, TurnSegmenter
+from mnemoseed.capture import InMemoryCapturePipeline, ScoringPipeline, TurnSegmenter
 from mnemoseed.daemon.app import create_app
 from mnemoseed.schema.turn import HostId, TurnRole
 from mnemoseed.storage.ports import TurnRange
@@ -335,6 +336,48 @@ def test_session_end_settled_wrong_profile_is_409() -> None:
         )
     assert response.status_code == 409
     assert "profile" in response.text
+
+
+def test_importance_hint_propagates_to_turn_and_raises_score() -> None:
+    # FR-1.9 wire path: the host hook's explicit "remember this" hint travels
+    # through /ingest -> Turn -> scorer, where it max-merges into S and never
+    # lowers it. A durable turn carrying hint=1.0 lands at the 10-point ceiling.
+    pipe = ScoringPipeline()
+    with _client(pipe) as client:
+        assert (
+            client.post("/ingest", json=_user(text="我 review 喜欢简洁", importance_hint=1.0)).status_code
+            == 202
+        )
+        _settle(client)
+
+    scored = pipe.turns(SESSION)[0]
+    assert scored.turn.importance_hint == pytest.approx(1.0)
+    assert scored.importance == pytest.approx(10.0)
+
+
+def test_importance_hint_never_lowers_score() -> None:
+    # A mid-range hint max-merges: a well-scored turn must not be dragged down.
+    text = "因为接口变了 导致全部报错 我决定以后都用这个库"
+    plain_pipe = ScoringPipeline()
+    hinted_pipe = ScoringPipeline()
+    with _client(plain_pipe) as client:
+        assert client.post("/ingest", json=_user(text=text)).status_code == 202
+        _settle(client)
+    with _client(hinted_pipe) as client:
+        assert client.post("/ingest", json=_user(text=text, importance_hint=0.2)).status_code == 202
+        _settle(client)
+
+    plain = plain_pipe.turns(SESSION)[0].importance
+    hinted = hinted_pipe.turns(SESSION)[0].importance
+    assert hinted >= plain
+    assert hinted == pytest.approx(plain)  # auto-S already above 2.0, hint lost the max
+
+
+def test_importance_hint_out_of_range_rejected() -> None:
+    pipe = InMemoryCapturePipeline()
+    with _client(pipe) as client:
+        assert client.post("/ingest", json=_user(importance_hint=1.5)).status_code == 422
+        assert client.post("/ingest", json=_user(importance_hint=-0.1)).status_code == 422
 
 
 def test_ingest_latency_far_under_caller_budget() -> None:

@@ -20,6 +20,8 @@ from mnemoseed.capture.pipeline import (
     ScoringPipeline,
     ScoringStats,
     StrippingPipeline,
+    WritingPipeline,
+    WritingStats,
 )
 from mnemoseed.capture.pool import (
     PoolBackend,
@@ -43,6 +45,15 @@ from mnemoseed.capture.segment import (
     SessionUnknownError,
     TurnSegmenter,
 )
+from mnemoseed.capture.stamper import (
+    ConsistencyVerdict,
+    NearDuplicateChecker,
+    StampWriter,
+    WriteConfig,
+    WriteContext,
+    WriteOutcome,
+    WriteOutcomeKind,
+)
 from mnemoseed.capture.stripper import (
     ContentTarget,
     Rule,
@@ -58,12 +69,14 @@ __all__ = [
     "AffectiveEntry",
     "CaptureError",
     "CapturePipeline",
+    "ConsistencyVerdict",
     "ContentTarget",
     "Durability",
     "EN_LEXICON_V1",
     "InMemoryCapturePipeline",
     "LEXICON_V1",
     "Lexicon",
+    "NearDuplicateChecker",
     "PoolBackend",
     "PoolEvent",
     "PoolEventKind",
@@ -80,6 +93,7 @@ __all__ = [
     "ScoringStats",
     "SessionSettledError",
     "SessionUnknownError",
+    "StampWriter",
     "StripAction",
     "StripStats",
     "StrippedTurn",
@@ -88,5 +102,11 @@ __all__ = [
     "StrippingPipeline",
     "TurnScorer",
     "TurnSegmenter",
+    "WriteConfig",
+    "WriteContext",
+    "WriteOutcome",
+    "WriteOutcomeKind",
+    "WritingPipeline",
+    "WritingStats",
     "ZH_LEXICON_V1",
 ]

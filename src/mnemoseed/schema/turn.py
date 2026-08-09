@@ -74,6 +74,7 @@ class IngestEvent(BaseModel):
     profile_id: str
     ts: float
     content: MessageContent | ToolContent
+    importance_hint: float | None = Field(default=None, ge=0.0, le=1.0)  # FR-1.9
     raw: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -118,4 +119,5 @@ class Turn(BaseModel):
     started_at: float
     ended_at: float | None = None
     closed: bool = False
+    importance_hint: float | None = Field(default=None, ge=0.0, le=1.0)  # FR-1.9
     steps: list[TurnStep] = Field(default_factory=list)
