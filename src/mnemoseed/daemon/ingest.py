@@ -1,0 +1,58 @@
+"""Daemon capture surface: POST /ingest and POST /session/end.
+
+Receives Tier 1 host hook events (design/06 2.5), segments them into Turns,
+and hands them to the CapturePipeline seam for the F1-F3 funnel (later tasks).
+Profile identity is the payload's explicit profile_id only — the daemon never
+guesses identity. Token auth lands with PRD-06; only the shape is reserved.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request, status
+
+from mnemoseed.capture import (
+    ProfileMismatchError,
+    SessionSettledError,
+    SessionUnknownError,
+    TurnSegmenter,
+)
+from mnemoseed.schema.turn import IngestEvent, SessionEndRequest
+
+router = APIRouter()
+
+
+@router.post("/ingest", status_code=status.HTTP_202_ACCEPTED)
+async def ingest(event: IngestEvent, request: Request) -> dict[str, Any]:
+    segmenter: TurnSegmenter = request.app.state.segmenter
+    try:
+        segmenter.ingest(event)
+    except ProfileMismatchError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except SessionSettledError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return {
+        "status": "accepted",
+        "session_id": event.session_id,
+        "profile_id": event.profile_id,
+        "event": event.event.value,
+    }
+
+
+@router.post("/session/end")
+async def session_end(req: SessionEndRequest, request: Request) -> dict[str, Any]:
+    segmenter: TurnSegmenter = request.app.state.segmenter
+    try:
+        turn_range = segmenter.end_session(req.session_id, req.profile_id)
+    except SessionUnknownError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ProfileMismatchError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return {
+        "status": "settled",
+        "session_id": req.session_id,
+        "profile_id": req.profile_id,
+        "turns": turn_range.end - turn_range.start + 1,
+        "turn_range": turn_range,
+    }

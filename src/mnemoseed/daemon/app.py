@@ -21,7 +21,9 @@ from typing import Any
 from fastapi import FastAPI
 
 from mnemoseed import __version__
+from mnemoseed.capture import InMemoryCapturePipeline, TurnSegmenter
 from mnemoseed.config import load_config
+from mnemoseed.daemon.ingest import router as ingest_router
 from mnemoseed.storage.factory import Stores, build_stores
 from mnemoseed.storage.ports import CapabilityIssue
 
@@ -96,6 +98,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="MnemoSeed", version=__version__, lifespan=lifespan)
+    # Capture intake lives per-app state; the F1-F3 funnel consumes the same
+    # pipeline instance the /ingest router hands turns to.
+    app.state.capture = InMemoryCapturePipeline()
+    app.state.segmenter = TurnSegmenter(app.state.capture)
+    app.include_router(ingest_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
