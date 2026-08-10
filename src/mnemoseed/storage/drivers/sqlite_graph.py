@@ -475,6 +475,38 @@ class SqliteGraphDriver:
             (iso8601_utc(valid_to), iso8601_utc(time.time()), node_id),
         )
 
+    def tombstone(self, node_id: str, deleted_at: float | None = None) -> bool:
+        """Tombstone the current revision (design/03 2.4, GDPR right-to-erasure).
+
+        Close the current revision at ``deleted_at`` and append a ``deleted``
+        provenance event to that revision's version-chain payload. Nothing is
+        physically removed: every current-revision read (get / list / traverse)
+        and any future as_of stops seeing the node, while the chain survives for
+        audit and as_of historical replay. Returns False when the node has no
+        current revision to tombstone.
+        """
+        at = time.time() if deleted_at is None else deleted_at
+        with _transaction(self._conn):
+            current_version = self._get_current_version(node_id)
+            if current_version is None:
+                return False
+            self._invalidate_locked(node_id, at)
+            row = self._conn.execute(
+                "SELECT payload FROM node_versions WHERE node_id = ? AND version = ?",
+                (node_id, current_version),
+            ).fetchone()
+            if row is not None:
+                payload = json.loads(str(row["payload"]))
+                provenance = payload.setdefault("provenance", {})
+                history = provenance.setdefault("history", [])
+                if not any(event.get("action") == "deleted" for event in history):
+                    history.append({"at": at, "action": "deleted", "actor": "user", "detail": {}})
+                self._conn.execute(
+                    "UPDATE node_versions SET payload = ? WHERE node_id = ? AND version = ?",
+                    (json.dumps(payload), node_id, current_version),
+                )
+            return True
+
     def append_version(self, node: GraphNode, *, invalidate_at: float | None = None) -> None:
         """Write ``node`` as a new current revision.
 

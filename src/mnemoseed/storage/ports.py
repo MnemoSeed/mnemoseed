@@ -508,6 +508,18 @@ class GraphStore(Protocol):
     def invalidate(self, node_id: str, valid_to: float) -> None:
         raise NotImplementedError
 
+    def tombstone(self, node_id: str, deleted_at: float | None = None) -> bool:
+        """Delete a node for good (GDPR right-to-erasure, design/03 2.4).
+
+        The current revision is closed at ``deleted_at`` and a ``deleted``
+        provenance event is appended to that revision's version-chain payload;
+        nothing is physically removed, so the chain survives for audit and
+        as_of historical replay while every current-revision read (get / list /
+        traverse / future as_of) stops seeing the node. Returns False when the
+        node has no current revision to tombstone.
+        """
+        raise NotImplementedError
+
     def append_version(self, node: GraphNode, *, invalidate_at: float | None = None) -> None:
         raise NotImplementedError
 

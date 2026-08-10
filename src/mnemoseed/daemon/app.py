@@ -27,6 +27,8 @@ from mnemoseed.capture.pool import PoolEvent, ScorePool
 from mnemoseed.capture.stamper import WriteContext
 from mnemoseed.config import Config, load_config
 from mnemoseed.daemon.ingest import router as ingest_router
+from mnemoseed.daemon.memory import MemoryService
+from mnemoseed.daemon.memory import router as memory_router
 from mnemoseed.dream import (
     DreamPipeline,
     DreamTrigger,
@@ -226,6 +228,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.dream_relay,
     ) = _build_capture(stores, config)
     app.state.segmenter = TurnSegmenter(app.state.capture)
+    # The memory surface (T4) owns one retrieval engine whose track executor is
+    # shut down in teardown, before the stores close (no worker outlives boot).
+    app.state.memory = MemoryService(stores, config)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,
@@ -241,6 +246,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         for deg in stores.report.missing:
             logger.warning("degraded: %s - %s", deg.feature, deg.behavior)
     yield
+    # Close the memory engine before the stores: the retrieval executor's
+    # worker threads own sqlite handles and must join first (lifecycle fix).
+    app.state.memory.close()
     await stores.close()
 
 
@@ -252,6 +260,7 @@ def create_app() -> FastAPI:
     app.state.capture = StrippingPipeline()
     app.state.segmenter = TurnSegmenter(app.state.capture)
     app.include_router(ingest_router)
+    app.include_router(memory_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:

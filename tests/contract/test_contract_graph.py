@@ -336,6 +336,55 @@ def test_batch_update_weights(stack) -> None:
     assert stack.graph.get_node("w2").decay_weight == pytest.approx(0.9, abs=1e-9)
 
 
+# ---------------------------------------------------------------- tombstone
+
+
+def test_tombstone_tombstoned_node_via_port(stack) -> None:
+    """`tombstone` (design/03 2.4): a deleted node is invisible to reads /
+    traversal / future as_of, yet its version chain survives for audit.
+
+    Tombstone semantics are expressible entirely through the existing
+    version-chain machinery: close the current revision at ``deleted_at`` and
+    append a ``deleted`` provenance event to the archived payload — nothing is
+    ever physically dropped (GDPR log-preserve, design/03 3).
+    """
+    leaf = make_pref(node_id="tm-leaf", entities=["tm"], decay_weight=0.9)
+    hub = make_pref(node_id="tm-hub", entities=["tm"], decay_weight=0.9)
+    stack.graph.upsert_node(leaf)
+    stack.graph.upsert_node(hub)
+    stack.graph.add_edge(make_edge("tm-hub", "tm-leaf"))
+
+    deleted_at = time.time()
+    assert stack.graph.tombstone("tm-leaf", deleted_at) is True
+
+    # invisible to the current-revision reads and to the future as_of window
+    assert stack.graph.get_node("tm-leaf") is None
+    current_ids = {
+        n.node_id for n in stack.graph.list_nodes(NodeFilter(profile_id=PROFILE), Page(0, 50)).items
+    }
+    assert current_ids == {"tm-hub"}
+    reachable = {
+        n.node_id for n in stack.graph.traverse("tm-hub", depth=1, filter=NodeFilter(profile_id=PROFILE))
+    }
+    assert "tm-leaf" not in reachable
+    after = {n.node_id for n in stack.graph.as_of(deleted_at + 1.0, NodeFilter(profile_id=PROFILE))}
+    assert "tm-leaf" not in after
+
+    # the historical read still finds the fact as it was before the deletion
+    before = {n.node_id for n in stack.graph.as_of(deleted_at - 1.0, NodeFilter(profile_id=PROFILE))}
+    assert "tm-leaf" in before
+
+    # the version chain is preserved: one closed revision marking the deletion
+    versions = stack.graph.versions("tm-leaf")
+    assert len(versions) == 1
+    assert versions[0].valid_to == pytest.approx(deleted_at, abs=0.002)
+    names = {event.action for event in versions[0].provenance.history}
+    assert "deleted" in names
+
+    # deleting an unknown node reports False so the caller can report honestly
+    assert stack.graph.tombstone("tm-missing", time.time()) is False
+
+
 def test_query_intentions_status_and_due(stack) -> None:
     now = time.time()
     due = make_intention(node_id="i1", valid_from=now - 50.0)

@@ -144,6 +144,16 @@ class HybridRetriever:
     def config(self) -> HybridConfig:
         return self._config
 
+    def close(self) -> None:
+        """Release the track executor.
+
+        The daemon owns the retriever lifecycle (T4): shutdown the cached
+        two-worker executor on teardown so worker threads and their sqlite
+        handles never outlive the process. Idempotent; ``recall`` after close
+        raises the executor's RuntimeError instead of deadlocking.
+        """
+        self._executor.shutdown(wait=True)
+
     def recall(
         self,
         query_text: str,

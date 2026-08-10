@@ -98,6 +98,12 @@ def cmd_embed_sidecar(args: argparse.Namespace) -> int:
     return run_sidecar(host, port)
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from mnemoseed.mcp.server import run_server
+
+    return run_server()
+
+
 def _add_serve_parser(
     sub: argparse._SubParsersAction[argparse.ArgumentParser], name: str, help_text: str
 ) -> argparse.ArgumentParser:
@@ -130,6 +136,19 @@ def main(argv: list[str] | None = None) -> int:
     p_embed.add_argument("--host", default="0.0.0.0")
     p_embed.add_argument("--port", type=int, default=7789)
     p_embed.set_defaults(func=cmd_embed_sidecar)
+
+    p_mcp = sub.add_parser(
+        "mcp",
+        help="run the stdio MCP memory gateway (FR-3.1)",
+        description=(
+            "Run the stdio MCP memory gateway (FR-3.1): exposes memory.recall / "
+            "memory.remember / memory.audit / memory.timeline / memory.export / "
+            "memory.forget_this over the MCP protocol. Point MNEMOSEED_BASE_URL "
+            "at the running daemon and either set MNEMOSEED_PROFILE_ID or pass "
+            "profile_id on every call."
+        ),
+    )
+    p_mcp.set_defaults(func=cmd_mcp)
 
     args = parser.parse_args(argv)
     handler: Callable[[argparse.Namespace], int] = args.func

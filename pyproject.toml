@@ -26,6 +26,8 @@ dependencies = [
     # imports them under a plain uv sync (AC-1).
     "psycopg[binary]>=3.2",
     "pgvector>=0.3",
+    # MCP stdio memory gateway (PRD-03 FR-3.1): official MCP SDK, pinned to 2.x.
+    "mcp>=2.0,<3",
 ]
 
 [dependency-groups]

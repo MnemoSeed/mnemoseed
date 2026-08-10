@@ -45,6 +45,7 @@ COVERAGE: dict[str, dict[str, str]] = {
         "as_of": "test_contract_graph.py::test_as_of_bi_temporal_replay",
         "batch_update_weights": "test_contract_graph.py::test_batch_update_weights",
         "query_intentions": "test_contract_graph.py::test_query_intentions_status_and_due",
+        "tombstone": "test_contract_graph.py::test_tombstone_tombstoned_node_via_port",
     },
     "MetaStore": {
         "capabilities": "test_contract_meta.py::test_capabilities",
@@ -79,7 +80,7 @@ COVERAGE: dict[str, dict[str, str]] = {
 # Appendix B reference method counts (prd-08 appendix B.1..B.4).
 EXPECTED_METHOD_COUNTS: dict[str, int] = {
     "VectorStore": 12,
-    "GraphStore": 18,
+    "GraphStore": 19,
     "MetaStore": 21,
     "Embedder": 3,
 }
