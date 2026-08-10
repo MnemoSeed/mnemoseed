@@ -18,7 +18,7 @@ This repository houses the core algorithmic stack responsible for emotional impa
 Humans do not compress long-term memories in real-time while performing tasks. MnemoSeed splits memory operations into two distinct neurological layers:
 *   **The Hippocampus (Hot Memory Layer)**: A high-concurrency, zero-latency local memory cache that temporarily tracks raw user interaction strings.
 *   **The Cerebral Cortex (Cold Memory Layer)**: A structured **Cognitive Graph** storing long-term experience weights, habits, and user pattern nodes.
-*   **The Impact Evaluator**: Every incoming packet is evaluated asynchronously by an ultra-fast local edge model scoring across three vectors: *Emotional Intensity, Informational Novelty,* and *Causal Long-Chains*. 
+*   **The Impact Evaluator**: Every incoming packet is scored locally by a deterministic, zero-LLM scorer (rules + curated lexicons + embedding heuristics — no model call, no tokens spent) across three vectors: *Emotional Intensity, Informational Novelty,* and *Causal Long-Chains*.
 *   **Snapshot Isolation Sleep**: Once the accumulated scores cross the **Watermark Threshold (>=10.0)** and the agent registers 5 seconds of idle time, an asynchronous "Dreaming Thread" takes a read-only snapshot of the hot memory to run reflective synthesis. If a user interrupts mid-dream, the agent responds with 0 latency, appending new chats to the tail without blocking.
 
 ### 👥 2. Cognitive Grading Isolation (Anti-Contamination Protocol)
@@ -26,10 +26,11 @@ To support a decentralized future where multiple agents share the same baseline,
 *   **One-Way Inheritance**: Tier 3 models (e.g., local consumer-grade edge LLMs) can read and inherit structural rules from the `Tier_1_Core_Graph` to accurately guide their actions.
 *   **Write Protection Boundary**: Conversations run by low-tier models are synthesized exclusively into a segregated `Tier_3_Isolated_Graph`. High-end frontier models (Tier 1) never read low-tier noise directly; they only pull them when a Tier 1 model runs a "high-cognitive secondary reflection" over the historical raw logs, preserving the pristine quality of your core cognitive asset.
 
-### 🎭 3. Persona-Memory Decoupling (De-biasing Filter)
-AI Agents require different "masks" (System Prompts/Capabilities) for different tasks (e.g., a sarcastic developer copilot vs. a rigorous corporate lawyer). 
-*   To prevent cross-persona contamination, MnemoSeed decouples the **Persona Mask** from the **Experience Baseline**. 
-*   During the asynchronous dream consolidation phase, the de-biasing algorithm strips away tonal, stylistic, and character-driven pollution from the chat logs, extracting only hard facts, structural knowledge trees, and verified user habits into the graph.
+### 🎭 3. Anima-Memory Decoupling (De-biasing Filter)
+AI agents wear different "souls" for different tasks (e.g., a sarcastic developer copilot vs. a rigorous corporate lawyer). MnemoSeed models this as the **anima**: an immutable temperament core (quantified trait dimensions), a plastic dye layer shaped by experience, and preferences stored as Bayesian posteriors anchored to that core — while speech style is re-derived at render time and **never stored** (full model: `docs/design/04` §2).
+*   The memory base underneath stays **neutral**: during asynchronous dream consolidation, the de-biasing filter strips anima-rendered tone, role-play, and stylistic pollution from the chat logs, extracting only hard facts, structural knowledge, and verified user habits into the graph.
+*   Dye layers and preferences learn **only from raw user input, never from agent output** — letting the soul vote on its own coloring would be a slow-drift self-lock.
+*   Swap the anima and nothing leaks: zero style residue in the memory base, and the new anima re-dyes itself from the same neutral history in a background batch pass.
 
 ---
 

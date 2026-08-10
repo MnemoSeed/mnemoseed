@@ -114,12 +114,15 @@ class RoleLLMConfig:
 
 # Route defaults per design/02 section 6 (PRD FR-2.14): deep_reflection ->
 # Kimi K3 via Fireworks (OpenAI-compatible); short_increment -> DeepSeek V4
-# Flash via Fireworks; local_track -> a local Ollama model. NOTE: design/02 §6
-# + FR-2.7 pin the offline default to a <=14B quantized model ("70B is not a
-# default assumption"), which conflicts with PRD FR-2.14's Llama-3.3-70B line;
-# the <=14B default wins here (flagged in the T6 report). Provider model ids
-# verified against the Fireworks catalog: kimi-k3 ($3.00/$0.30/$15.00 per M
-# input/cached/output) and deepseek-v4-flash ($0.14/$0.028/$0.28).
+# Flash (0731) via Fireworks; local_track -> a local Ollama model. NOTE:
+# design/02 §6 + FR-2.7 pin the offline default to a <=14B quantized model
+# ("70B is not a default assumption"), which conflicts with PRD FR-2.14's
+# Llama-3.3-70B line; the <=14B default wins here (flagged in the T6 report).
+# Provider model ids verified against the Fireworks catalog: kimi-k3
+# ($3.00/$0.30/$15.00 per M input/cached/output) and deepseek-v4-flash-0731
+# ($0.14/$0.028/$0.28). Each role defaults to its own key env var with the
+# shared FIREWORKS_API_KEY as fallback, so the two cloud roles can be pointed
+# at different providers/keys independently.
 DEFAULT_LLM_ROUTES: dict[str, RoleLLMConfig] = {
     "deep_reflection": RoleLLMConfig(
         role="deep_reflection",
@@ -127,17 +130,17 @@ DEFAULT_LLM_ROUTES: dict[str, RoleLLMConfig] = {
         model="accounts/fireworks/models/kimi-k3",
         params={
             "base_url": "https://api.fireworks.ai/inference/v1",
-            "api_key_env": "FIREWORKS_API_KEY",
+            "api_key_env": "MNEMOSEED_DEEP_REFLECTION_API_KEY,FIREWORKS_API_KEY",
             "max_tokens": 2048,
         },
     ),
     "short_increment": RoleLLMConfig(
         role="short_increment",
         driver="openai_compatible",
-        model="accounts/fireworks/models/deepseek-v4-flash",
+        model="accounts/fireworks/models/deepseek-v4-flash-0731",
         params={
             "base_url": "https://api.fireworks.ai/inference/v1",
-            "api_key_env": "FIREWORKS_API_KEY",
+            "api_key_env": "MNEMOSEED_SHORT_INCREMENT_API_KEY,FIREWORKS_API_KEY",
         },
     ),
     "local_track": RoleLLMConfig(

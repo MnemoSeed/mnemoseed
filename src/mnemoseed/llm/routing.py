@@ -69,7 +69,17 @@ class RoleRouter:
             raise LLMRouteError(f"no llm route configured for role {role!r}")
         params = dict(cfg.params)
         env_name = params.pop("api_key_env", None)
-        api_key = (self._env(env_name) or "") if env_name else ""
+        # api_key_env may name a comma-separated fallback chain ("role-specific
+        # var, shared provider var"): the first variable actually set wins, so
+        # a single provider key covers every role by default while any role can
+        # be pointed at a different provider/key on its own.
+        api_key = ""
+        if env_name:
+            for name in (n.strip() for n in env_name.split(",")):
+                value = self._env(name) if name else None
+                if value:
+                    api_key = value
+                    break
         params["model"] = cfg.model
         params["api_key"] = api_key
         instance = cast(DreamLLM, self._registry.build(cfg.driver, params))

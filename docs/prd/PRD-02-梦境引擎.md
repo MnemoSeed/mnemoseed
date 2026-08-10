@@ -29,14 +29,14 @@
 | FR-2.11 | anima 重染色（re-dye）批处理：换 anima 触发，新核心异步重消化 profile 既有记忆长出新染层/喜好；旧实例染层完整保留（无损切换，design/04 §2.2） | P1 |
 | FR-2.12 | 染层/偏好证据边界：更新只消费用户原始输入，永不采纳 agent 渲染输出（防慢漂移自锁，design/02 §5） | P0 |
 | FR-2.13 | De-biasing eval harness：染色样本剥除率指标进 CI，剥除率退化即构建失败（单点故障面防线，design/02 §5） | P1 |
-| FR-2.14 | **LLM 端口与模型路由配置**：定义 `DreamLLM` Protocol（chat 完成 + 用量统计 + 连通性自检），驱动注册表与存储层同构——驱动：`oauth`（复用订阅：Codex/ChatGPT；MiniMax/Kimi 等中国 CLI 服务商可选，选择时明示数据出境提示）/ `openai_compatible`（Fireworks 等自带 key 端点）/ `anthropic` / `ollama`（高级离线轨，**非默认**）；默认推荐顺序 OAuth > API key > 离线；config.toml 按**角色**分别配置：`deep_reflection`（长背景深睡眠反思）/ `short_increment`（≤10k 短增量）/ `local_track` 开关；默认路由按 design/02（深睡眠 → Kimi K3（Fireworks），短增量 → DeepSeek V4 Flash（Fireworks），本地轨 → Ollama + ≤14B 量化模型（如 Llama 3.1 8B，与 FR-2.7 一致））；每角色可独立切换驱动与模型名，改动写审计；连通性自检接口供 console 实测按钮（design/07 §8）调用 | P0 |
+| FR-2.14 | **LLM 端口与模型路由配置**：定义 `DreamLLM` Protocol（chat 完成 + 用量统计 + 连通性自检），驱动注册表与存储层同构——驱动：`oauth`（复用订阅：Codex/ChatGPT；MiniMax/Kimi 等中国 CLI 服务商可选，选择时明示数据出境提示）/ `openai_compatible`（Fireworks 等自带 key 端点）/ `anthropic` / `ollama`（高级离线轨，**非默认**）；默认推荐顺序 OAuth > API key > 离线；config.toml 按**角色**分别配置：`deep_reflection`（长背景深睡眠反思）/ `short_increment`（≤10k 短增量）/ `local_track` 开关；默认路由按 design/02（深睡眠 → Kimi K3（Fireworks），短增量 → DeepSeek V4 Flash 0731（Fireworks），本地轨 → Ollama + ≤14B 量化模型（如 Llama 3.1 8B，与 FR-2.7 一致））；**密钥按角色分离**——各角色默认独立环境变量（`MNEMOSEED_DEEP_REFLECTION_API_KEY` / `MNEMOSEED_SHORT_INCREMENT_API_KEY`），未设置回退共享 `FIREWORKS_API_KEY`，允许两个角色挂不同服务商；每角色可独立切换驱动与模型名，改动写审计；连通性自检接口供 console 实测按钮（design/07 §8）调用 | P0 |
 
 ## 4. 非功能需求
 
 | ID | 需求 |
 |---|---|
 | NFR-2.1 | 中断响应延迟 = 0（架构保证，非调优目标） |
-| NFR-2.2 | 单次梦境 Delta 打包硬上限 10k tokens；云端计费目标 ≤ $0.001/次为**典型值**口径（典型会话增量 Delta ≈ 2–2.5k），打满 10k 上限时按 design/02 §6 短增量轨价格（DeepSeek V4 Flash $0.14/M input）约 $0.002 |
+| NFR-2.2 | 单次梦境 Delta 打包硬上限 10k tokens；云端计费目标 ≤ $0.001/次为**典型值**口径（典型会话增量 Delta ≈ 2–2.5k），打满 10k 上限时按 design/02 §6 短增量轨价格（DeepSeek V4 Flash 0731 $0.14/M input）约 $0.002。10k 为暂定上限，随 overflow 积压观测再调（见 design/02 §6 预算口径） |
 | NFR-2.3 | 快照→写回全程幂等：进程崩溃后重启可从快照落盘恢复，不重复写入 |
 | NFR-2.4 | 离线轨（≤14B 量化模型、普通开发机）单次巩固 < 10 分钟 |
 

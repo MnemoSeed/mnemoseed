@@ -2,8 +2,10 @@
 audit logging, and boot-safe isolation (PRD-02 T6; FR-2.14 / design/02 §6-§7).
 
 Behavior pinned here: route defaults follow design/02 §6 (deep_reflection ->
-Claude Sonnet, short_increment -> OpenAI-compatible class, local_track -> local
-Ollama); API keys are referenced by env-var NAME and never stored as values;
+Kimi K3, short_increment -> DeepSeek V4 Flash, both via Fireworks; local_track
+-> local Ollama); API keys are referenced by env-var NAME and never stored as
+values; each role has its own default key env var with the shared provider
+variable as fallback (role-specific wins when both are set);
 drivers materialize lazily per-role so a misconfigured unused role never breaks
 boot; and RoleRouter.check() (the console 实测 button) never raises.
 """
@@ -56,12 +58,12 @@ def test_defaults_follow_design_02_section_6(monkeypatch) -> None:
     deep = cfg.llm["deep_reflection"]
     assert deep.driver == "openai_compatible"
     assert deep.model == "accounts/fireworks/models/kimi-k3"  # design/02 deep track
-    assert deep.params["api_key_env"] == "FIREWORKS_API_KEY"
+    assert deep.params["api_key_env"] == "MNEMOSEED_DEEP_REFLECTION_API_KEY,FIREWORKS_API_KEY"
     assert deep.params["base_url"] == "https://api.fireworks.ai/inference/v1"
     short = cfg.llm["short_increment"]
     assert short.driver == "openai_compatible"
-    assert short.model == "accounts/fireworks/models/deepseek-v4-flash"
-    assert short.params["api_key_env"] == "FIREWORKS_API_KEY"
+    assert short.model == "accounts/fireworks/models/deepseek-v4-flash-0731"
+    assert short.params["api_key_env"] == "MNEMOSEED_SHORT_INCREMENT_API_KEY,FIREWORKS_API_KEY"
     local = cfg.llm["local_track"]
     assert local.driver == "ollama"
     # FR-2.7: the offline default is a <=14B quantized model, never the PRD 70B line
@@ -228,6 +230,26 @@ def test_router_resolves_local_role_to_ollama_instance() -> None:
     assert llm.model == "llama3.1:8b"
 
 
+def test_router_role_specific_key_wins_over_shared_fallback() -> None:
+    """Per-role key separation (FR-2.14): each role defaults to its own env
+    var with the shared provider var as fallback; the role-specific value
+    wins when both are set, so two roles can use different providers/keys."""
+    env: dict[str, str] = {
+        "MNEMOSEED_DEEP_REFLECTION_API_KEY": "sk-role-specific",
+        "FIREWORKS_API_KEY": "sk-shared",
+    }
+    router = _router(Config().llm, env=env.get)
+    assert router.resolve("deep_reflection").api_key == "sk-role-specific"
+    # short_increment has no role-specific var set -> falls back to shared
+    assert router.resolve("short_increment").api_key == "sk-shared"
+
+
+def test_router_unset_role_key_with_no_fallback_yields_empty_key() -> None:
+    router = _router(Config().llm, env={}.get)
+    llm = router.resolve("deep_reflection")  # constructs; provider 401 surfaces at chat time
+    assert llm.api_key == ""
+
+
 def test_router_resolves_deep_reflection_with_env_key() -> None:
     env: dict[str, str] = {"FIREWORKS_API_KEY": "sk-fw-test"}
     router = _router(Config().llm, env=env.get)
@@ -295,7 +317,7 @@ def test_router_audit_logs_role_configured_once_env_name_never_value() -> None:
     assert entry.detail["role"] == "deep_reflection"
     assert entry.detail["driver"] == "openai_compatible"
     assert entry.detail["model"] == "accounts/fireworks/models/kimi-k3"
-    assert entry.detail["api_key_env"] == "FIREWORKS_API_KEY"
+    assert entry.detail["api_key_env"] == "MNEMOSEED_DEEP_REFLECTION_API_KEY,FIREWORKS_API_KEY"
     assert "sk-super-secret" not in str(entry.detail)  # never the key value
 
 
