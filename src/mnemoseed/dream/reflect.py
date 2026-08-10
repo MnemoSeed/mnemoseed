@@ -57,6 +57,7 @@ from mnemoseed.dream.snapshot import (
     SnapshotPhase,
     write_snapshot_file,
 )
+from mnemoseed.llm.types import ChatResult, LLMUnavailable, Usage
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.storage.ports import TurnRange
 
@@ -113,6 +114,8 @@ class ReflectOutcome:
     error: str | None = None
     skipped: bool = False  # marker gate: reflect had already completed
     report: DeltaReport | None = None  # T5 cost telemetry (NFR-2.2 substrate)
+    llm_unavailable: bool = False  # T6: sticky — set once any attempt raised LLMUnavailable, even if
+    # the final failure was a non-provider error; False when a retry eventually succeeded
 
 
 # ---------------------------------------------------------------- the LLM seam
@@ -123,6 +126,29 @@ class ReflectLLM(Protocol):
     single method; the deterministic StubReflectLLM satisfies it offline."""
 
     def chat(self, *, system: str, user: str) -> str: ...
+
+
+class ChatLLM(Protocol):
+    """The T3 seam widened by T6: a model may return plain text (T3 stub) or a
+    full ChatResult (text + provider-reported usage). Both satisfy this."""
+
+    def chat(self, *, system: str, user: str) -> str | ChatResult: ...
+
+
+def _split_response(response: str | ChatResult) -> tuple[str, Usage | None]:
+    """Normalize a ChatLLM response: (text, provider usage). A plain str is
+    treated as text with no provider-reported usage."""
+    if isinstance(response, ChatResult):
+        return response.text, response.usage
+    return response, None
+
+
+def _with_provider_usage(report: DeltaReport, usage: Usage | None) -> DeltaReport:
+    """Attach provider-reported usage to a report; identity (unchanged) when
+    the provider reported none (T6 additive seam, NFR-2.2)."""
+    if usage is None:
+        return report
+    return report.with_provider_usage(usage)
 
 
 # Stripped personal color: emotional/flavor intensifiers, sentence-final tone
@@ -328,9 +354,10 @@ class ReflectOrchestrator:
     def __init__(
         self,
         *,
-        llm: ReflectLLM,
+        llm: ChatLLM,
         directory: Path | None = None,
         on_done: Callable[[str], None] | None = None,
+        on_unavailable: Callable[[str], None] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         max_retries: int = 3,
         backoff_base: float = 1.0,
@@ -339,6 +366,7 @@ class ReflectOrchestrator:
         self._llm = llm
         self._directory = directory if directory is not None else CONFIG_DIR / "dreams"
         self._on_done = on_done
+        self._on_unavailable = on_unavailable
         self._sleep = sleep
         self._max_retries = max_retries
         self._backoff_base = backoff_base
@@ -372,9 +400,12 @@ class ReflectOrchestrator:
             )
         result: ReflectionResult | None = None
         last_error = ""
+        provider_usage: Usage | None = None
+        unavailable = False
         for attempt in range(self._max_retries + 1):
             try:
-                text = self._llm.chat(system=request.cache_prefix, user=request.delta)
+                response = self._llm.chat(system=request.cache_prefix, user=request.delta)
+                text, provider_usage = _split_response(response)
                 payload = json.loads(text)
                 if not isinstance(payload, list):
                     raise ValueError("reflect output is not a JSON array")
@@ -386,27 +417,45 @@ class ReflectOrchestrator:
                     consumed_chunk_ids=request.packed_chunk_ids,
                 )
                 break
+            except LLMUnavailable as exc:  # FR-2.6: typed provider outage, flagged + retried
+                unavailable = True
+                if self._on_unavailable is not None:
+                    self._on_unavailable(str(exc))
+                last_error = str(exc)
             except Exception as exc:  # noqa: BLE001 - degrade, never raise into the caller
                 last_error = str(exc)
-                if attempt >= self._max_retries:
-                    logger.warning(
-                        "reflect failed for %s after %d retries: %s",
-                        snapshot.profile_id,
-                        self._max_retries,
-                        last_error,
-                    )
-                    return ReflectOutcome(ok=False, result=None, error=last_error, report=report)
-                self._sleep(self._backoff(attempt))
+            if attempt >= self._max_retries:
+                logger.warning(
+                    "reflect failed for %s after %d retries: %s",
+                    snapshot.profile_id,
+                    self._max_retries,
+                    last_error,
+                )
+                return ReflectOutcome(
+                    ok=False,
+                    result=None,
+                    error=last_error,
+                    report=_with_provider_usage(report, provider_usage),
+                    llm_unavailable=unavailable,
+                )
+            self._sleep(self._backoff(attempt))
 
         assert result is not None
+        tracked_report = _with_provider_usage(report, provider_usage)
         try:
             self._finalize(snapshot, result)
         except Exception as exc:  # noqa: BLE001 - marker before progress
             logger.warning(
                 "reflect done but REFLECT_DONE persist failed for %s: %s", snapshot.profile_id, exc
             )
-            return ReflectOutcome(ok=False, result=result, error=f"persist failed: {exc}", report=report)
-        return ReflectOutcome(ok=True, result=result, report=report)
+            return ReflectOutcome(
+                ok=False,
+                result=result,
+                error=f"persist failed: {exc}",
+                report=tracked_report,
+                llm_unavailable=unavailable,
+            )
+        return ReflectOutcome(ok=True, result=result, report=tracked_report)
 
     def _backoff(self, attempt: int) -> float:
         """Exponential schedule: base, 2*base, 4*base across retries 1..3."""

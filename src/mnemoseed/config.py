@@ -89,6 +89,66 @@ class DreamConfig:
     auto_trigger: bool = False
 
 
+# T6 (FR-2.14): the three dream LLM roles. All are cloud/network-backed except
+# local_track, which is the offline role (FR-2.7). Deep_reflection runs the slow
+# full digests; short_increment runs the cheap per-increment passes; local_track
+# runs the privacy/cost-hard-line track offline.
+LLM_ROLES: tuple[str, ...] = ("deep_reflection", "short_increment", "local_track")
+
+
+@dataclass(frozen=True)
+class RoleLLMConfig:
+    """One role's resolved LLM route: driver + model + params.
+
+    Keys are config attestations, never values: an API key is referenced by
+    env-var NAME in ``params["api_key_env"]`` and resolved at materialization
+    time by the RoleRouter (mnemoseed.llm.routing) — a literal key in config is
+    an error.
+    """
+
+    role: str
+    driver: str
+    model: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+# Route defaults per design/02 section 6 (PRD FR-2.14): deep_reflection ->
+# Claude Sonnet; short_increment -> an OpenAI-compatible chat class; local_track
+# -> a local Ollama model. NOTE: design/02 §6 + FR-2.7 pin the offline default to
+# a <=14B quantized model ("70B is not a default assumption"), which conflicts
+# with PRD FR-2.14's Llama-3.3-70B line; the <=14B default wins here (flagged in
+# the T6 report). Provider model ids: claude-sonnet-5 is "Claude Sonnet 5";
+# gpt-5.6-terra is the design doc's placeholder for the short-increment class —
+# both remain unverified against live provider catalogs (documented assumption).
+DEFAULT_LLM_ROUTES: dict[str, RoleLLMConfig] = {
+    "deep_reflection": RoleLLMConfig(
+        role="deep_reflection",
+        driver="anthropic",
+        model="claude-sonnet-5",
+        params={
+            "base_url": "https://api.anthropic.com",
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "max_tokens": 2048,
+        },
+    ),
+    "short_increment": RoleLLMConfig(
+        role="short_increment",
+        driver="openai_compatible",
+        model="gpt-5.6-terra",
+        params={
+            "base_url": "https://api.openai.com/v1",
+            "api_key_env": "OPENAI_API_KEY",
+        },
+    ),
+    "local_track": RoleLLMConfig(
+        role="local_track",
+        driver="ollama",
+        model="llama3.1:8b",
+        params={"base_url": "http://localhost:11434"},
+    ),
+}
+
+
 @dataclass
 class Config:
     """Resolved configuration. layer_instances() materializes per-layer drivers."""
@@ -97,6 +157,7 @@ class Config:
     baseurl: str = "http://localhost:7788"
     storage: dict[str, LayerSpec] = field(default_factory=dict)
     dream: DreamConfig = field(default_factory=DreamConfig)
+    llm: dict[str, RoleLLMConfig] = field(default_factory=lambda: dict(DEFAULT_LLM_ROUTES))
     source: Path | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -211,6 +272,7 @@ def load_config(path: Path | None = None) -> Config:
             )
 
     dream = DreamConfig()
+    llm_routes = {role: cfg for role, cfg in DEFAULT_LLM_ROUTES.items()}
     dream_raw = raw.get("dream")
     if dream_raw is not None:
         dream_table = _require_table(dream_raw, "dream")
@@ -219,11 +281,43 @@ def load_config(path: Path | None = None) -> Config:
             raise ConfigError("dream.auto_trigger", "must be a boolean")
         dream = DreamConfig(auto_trigger=auto_raw)
 
+        # T6 (FR-2.14): [dream.llm.<role>] overrides per role. Only structural
+        # validation happens here (table-ity, known role, non-empty driver/model
+        # strings); semantic failures (unknown driver, bad params) defer to the
+        # RoleRouter when that role is actually resolved — a misconfigured unused
+        # role never breaks boot.
+        llm_raw = dream_table.get("llm")
+        if llm_raw is not None:
+            llm_table = _require_table(llm_raw, "dream.llm")
+            for role in LLM_ROLES:
+                entry = llm_table.get(role)
+                if entry is None:
+                    continue  # unconfigured role keeps its default route
+                role_path = f"dream.llm.{role}"
+                entry_table = _require_table(entry, role_path)
+                driver = _optional_driver(entry_table.get("driver"), f"{role_path}.driver")
+                model = _optional_driver(entry_table.get("model"), f"{role_path}.model")
+                base = DEFAULT_LLM_ROUTES[role]
+                params = {k: v for k, v in entry_table.items() if k not in ("driver", "model")}
+                llm_routes[role] = RoleLLMConfig(
+                    role=role,
+                    driver=driver if driver is not None else base.driver,
+                    model=model if model is not None else base.model,
+                    params={**base.params, **params},
+                )
+            unknown = [str(role) for role in llm_table if str(role) not in LLM_ROLES]
+            if unknown:
+                raise ConfigError(
+                    f"dream.llm.{unknown[0]}",
+                    f"unknown llm role (expected one of {', '.join(LLM_ROLES)})",
+                )
+
     return Config(
         preset=preset_raw,
         baseurl=baseurl_raw,
         storage=storage,
         dream=dream,
+        llm=llm_routes,
         source=path,
         raw=raw,
     )
@@ -252,4 +346,18 @@ baseurl = "http://localhost:7788"
 # [storage.graph.instances.isolated]
 # driver = "sqlite_graph"
 # path = "~/.mnemoseed/isolated.db"
+
+# Dream LLM role routing (T6 / FR-2.14): pick the driver + model per role.
+# API keys are referenced by ENV-VAR NAME only — never a literal key here;
+# the router reads them from the process environment at materialization time.
+# Other params (base_url, max_tokens, ...) override the per-role defaults.
+# [dream.llm.deep_reflection]
+# driver = "anthropic"
+# model = "claude-sonnet-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+#
+# [dream.llm.local_track]
+# driver = "ollama"
+# model = "llama3.1:8b"
+# base_url = "http://localhost:11434"
 """

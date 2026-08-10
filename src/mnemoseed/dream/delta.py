@@ -32,7 +32,7 @@ Pure arithmetic, no network.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from mnemoseed.dream.prompts import (
@@ -42,6 +42,7 @@ from mnemoseed.dream.prompts import (
     render_chunk_block,
 )
 from mnemoseed.dream.snapshot import Snapshot, SnapshotChunk
+from mnemoseed.llm.types import Usage
 
 DEFAULT_DELTA_BUDGET_TOKENS = 5000
 
@@ -155,6 +156,12 @@ class DeltaReport:
     prefix_tokens: int
     overflow_count: int
     estimated_cost_usd: float
+    provider_usage: Usage | None = None  # T6: provider-reported tokens, when the driver reports them
+
+    def with_provider_usage(self, usage: Usage | None) -> DeltaReport:
+        """Return a copy carrying the provider-reported usage (additive: all
+        estimated fields untouched; pass None to carry no usage)."""
+        return replace(self, provider_usage=usage)
 
 
 # ---------------------------------------------------------------- packer
