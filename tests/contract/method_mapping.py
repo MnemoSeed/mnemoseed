@@ -67,6 +67,8 @@ COVERAGE: dict[str, dict[str, str]] = {
         "audit_query": "test_contract_meta.py::test_audit_append_and_query",
         "record_dream_run": "test_contract_meta.py::test_dream_runs_roundtrip",
         "list_dream_runs": "test_contract_meta.py::test_dream_runs_roundtrip",
+        "add_token_usage": "test_contract_meta.py::test_dream_token_ledger_atomic_increment",
+        "token_usage": "test_contract_meta.py::test_dream_token_ledger_atomic_increment",
         "schema_version": "test_contract_meta.py::test_schema_version_and_migrate_forward_only",
         "migrate": "test_contract_meta.py::test_schema_version_and_migrate_forward_only",
     },
@@ -81,6 +83,6 @@ COVERAGE: dict[str, dict[str, str]] = {
 EXPECTED_METHOD_COUNTS: dict[str, int] = {
     "VectorStore": 12,
     "GraphStore": 19,
-    "MetaStore": 21,
+    "MetaStore": 23,
     "Embedder": 3,
 }

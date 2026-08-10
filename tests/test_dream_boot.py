@@ -23,6 +23,7 @@ Covered crash points:
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,10 +41,11 @@ from mnemoseed.dream import (
     write_snapshot_file,
 )
 from mnemoseed.dream import FileSnapshotter as RealSnapshotter
+from mnemoseed.dream.ledger import year_month_for
 from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
 from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_meta
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
-from mnemoseed.storage.ports import NodeFilter, Page, TurnRange
+from mnemoseed.storage.ports import AuditFilter, NodeFilter, Page, TurnRange
 from mnemoseed.storage.registry import (
     EMBED_DRIVERS,
     GRAPH_DRIVERS,
@@ -75,24 +77,31 @@ def _ensure_real_drivers():
     yield
 
 
-def _serving_config_toml(tmp_path: Path) -> Path:
+def _serving_config_toml(tmp_path: Path, token_budget_usd: float | None = None) -> Path:
     # as_posix(): Windows backslashes are invalid escapes in TOML strings
     cfg = tmp_path / "config.toml"
-    cfg.write_text(
+    body = (
         'preset = "embedded"\n'
         f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
         f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
         f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
-        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n',
-        encoding="utf-8",
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
     )
+    if token_budget_usd is not None:
+        body += f"[dream]\ntoken_budget_usd = {token_budget_usd}\n"
+    cfg.write_text(body, encoding="utf-8")
     return cfg
 
 
-def _shim_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _shim_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, token_budget_usd: float | None = None
+) -> None:
     """Point CONFIG_PATH and the snapshot CONFIG_DIR at the throwaway store."""
     monkeypatch.delenv("STORAGE_MODE", raising=False)
-    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _serving_config_toml(tmp_path))
+    monkeypatch.setattr(
+        "mnemoseed.config.CONFIG_PATH",
+        _serving_config_toml(tmp_path, token_budget_usd),
+    )
     monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
 
 
@@ -376,3 +385,80 @@ def test_boot_merge_done_marker_guard_never_repurges_stale_source(
         assert client.app.state.stores.vector.get_chunk("seed-1") is not None
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
     assert len(_graph_rows(tmp_path / "cortex.db")) == 0  # no graph write happened at all
+
+
+# ---------------------------------------------------------------- FR-2.5b wiring
+# The daemon boot must build the REAL TokenLedger from config (not a stub) and
+# inject it into the orchestrator, so the monthly budget gate and the ledger
+# meter apply end-to-end on the production seam.
+
+
+def test_boot_dream_budget_cap_defers_capture_only_and_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config token_budget_usd below the projected spend turns the reflect
+    boundary into capture-only mode at boot: the counting LLM seam never fires,
+    the snapshot stays journaled (nothing purged), no graph write happens, and
+    the refusal lands in the audit trail as a token_budget_cap entry."""
+    store, _embed = _seed_into(
+        tmp_path / "chunks.lance",
+        ("seed-1", "I prefer dark mode", 0, 1),
+    )
+    seed_meta = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
+    seeder = RealSnapshotter(store=store, meta=seed_meta, directory=tmp_path / "dreams")
+    assert seeder.request(_PROFILE, TurnRange(0, 1)).ok
+    asyncio.run(store.close())
+    asyncio.run(seed_meta.close())
+
+    _BootCountingStub.count = 0
+    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    _shim_config(tmp_path, monkeypatch, token_budget_usd=1e-9)
+    with TestClient(create_app()) as client:
+        # capture-only: the budget gate short-circuits BEFORE any cloud call
+        assert _BootCountingStub.count == 0
+        # the trigger still owns the dream, paused at the reflect boundary
+        # (DREAMING, never completed -- on_reflect_complete did not fire)
+        assert client.app.state.dream.status(_PROFILE).state is DreamState.DREAMING
+        # the snapshot stays journaled at the reflect boundary; nothing purged
+        assert client.app.state.stores.vector.get_chunk("seed-1") is not None
+        assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+        # the refusal is on the audit trail
+        page = client.app.state.stores.meta.audit_query(
+            AuditFilter(action="token_budget_cap"), Page(limit=10)
+        )
+        assert len(page.items) == 1
+        entry = page.items[0]
+        assert entry.actor == "dream"
+        assert entry.detail["profile_id"] == _PROFILE
+        assert entry.detail["year_month"] == year_month_for(time.time())
+    assert len(_graph_rows(tmp_path / "cortex.db")) == 0  # capture-only: never reached the merger
+
+
+def test_boot_dream_records_ledger_usage_survives_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under the default budget the daemon-built ledger meters the reflect pass
+    into the meta DB, and a restart boots a FRESH TokenLedger that reads the
+    SAME persisted current-month usage back — proof the ledger writes survive
+    the daemon lifecycle and are keyed by the real UTC month."""
+    store, _embed = _seed_into(
+        tmp_path / "chunks.lance",
+        ("seed-1", "I prefer dark mode", 0, 1),
+    )
+    seed_meta = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
+    seeder = RealSnapshotter(store=store, meta=seed_meta, directory=tmp_path / "dreams")
+    assert seeder.request(_PROFILE, TurnRange(0, 1)).ok
+    asyncio.run(store.close())
+    asyncio.run(seed_meta.close())
+
+    _BootCountingStub.count = 0
+    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    _shim_config(tmp_path, monkeypatch)  # default token_budget_usd = 5.0
+    month = year_month_for(time.time())
+    with TestClient(create_app()) as client:
+        assert _BootCountingStub.count == 1  # within budget: the reflect pass ran
+        used = client.app.state.stores.meta.token_usage(_PROFILE, month)
+        assert used > 0
+    # restart against the same store: a fresh ledger reads the persisted usage
+    with TestClient(create_app()) as client:
+        assert client.app.state.stores.meta.token_usage(_PROFILE, month) == used

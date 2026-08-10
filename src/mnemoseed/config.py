@@ -77,6 +77,14 @@ class LayerSpec:
     instances: dict[str, _InstanceOverride] = field(default_factory=dict)
 
 
+# FR-2.5b: monthly per-profile dream token budget in USD (default $5/month, NFR-2.2).
+# Defined here — AND mirrored as DEFAULT_MONTHLY_BUDGET_USD in dream/ledger.py —
+# because config cannot import the ledger (ledger -> delta -> snapshot -> config
+# would be a cycle); test_ledger_default_budget_matches_config_default pins them
+# equal.
+DEFAULT_DREAM_TOKEN_BUDGET_USD: float = 5.0
+
+
 @dataclass(frozen=True)
 class DreamConfig:
     """Dream-engine runtime flags (PRD-02 FR-2.8 manual-first discipline).
@@ -84,9 +92,13 @@ class DreamConfig:
     ``auto_trigger`` decides whether ScorePool events drive dreams directly
     (True) or are held as pending manual runs for ``mnemoseed dream --once``
     (False, the M1 default until reflection quality passes review).
+    ``token_budget_usd`` is the monthly ledger cap (FR-2.5b): once the projected
+    UTC-month spend exceeds it, dreams degrade to capture-only until the next
+    month rolls over.
     """
 
     auto_trigger: bool = False
+    token_budget_usd: float = DEFAULT_DREAM_TOKEN_BUDGET_USD
 
 
 # T6 (FR-2.14): the three dream LLM roles. All are cloud/network-backed except
@@ -282,7 +294,10 @@ def load_config(path: Path | None = None) -> Config:
         auto_raw = dream_table.get("auto_trigger", False)
         if not isinstance(auto_raw, bool):
             raise ConfigError("dream.auto_trigger", "must be a boolean")
-        dream = DreamConfig(auto_trigger=auto_raw)
+        budget_raw = dream_table.get("token_budget_usd", DEFAULT_DREAM_TOKEN_BUDGET_USD)
+        if not isinstance(budget_raw, (int, float)) or isinstance(budget_raw, bool) or budget_raw <= 0:
+            raise ConfigError("dream.token_budget_usd", "must be a positive number")
+        dream = DreamConfig(auto_trigger=auto_raw, token_budget_usd=float(budget_raw))
 
         # T6 (FR-2.14): [dream.llm.<role>] overrides per role. Only structural
         # validation happens here (table-ity, known role, non-empty driver/model
@@ -337,6 +352,7 @@ baseurl = "http://localhost:7788"
 # until reflection quality passes review, then flip to automatic.
 # [dream]
 # auto_trigger = false
+# token_budget_usd = 5.0   # monthly ledger cap in USD; capture-only once spent (FR-2.5b)
 
 # Per-layer overrides (required under the custom preset):
 # [storage.vector]

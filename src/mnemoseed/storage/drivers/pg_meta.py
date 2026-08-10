@@ -404,6 +404,24 @@ class PgMetaDriver:
         items = [_decode_dream_run(r) for r in rows]
         return PageResult(items=items, total=total, offset=page.offset, limit=page.limit)
 
+    # ------------------------------------------------------------ dream token ledger (FR-2.5b)
+
+    def add_token_usage(self, profile_id: str, year_month: str, tokens: int) -> None:
+        with _transaction(self._conn):
+            self._conn.execute(
+                "INSERT INTO dream_token_ledger (profile_id, year_month, tokens) VALUES (%s, %s, %s) "
+                "ON CONFLICT (profile_id, year_month) DO UPDATE SET "
+                "tokens = dream_token_ledger.tokens + EXCLUDED.tokens",
+                (profile_id, year_month, tokens),
+            )
+
+    def token_usage(self, profile_id: str, year_month: str) -> int:
+        row = self._exec_row(
+            "SELECT tokens FROM dream_token_ledger WHERE profile_id = %s AND year_month = %s",
+            (profile_id, year_month),
+        )
+        return int(row["tokens"]) if row is not None else 0
+
     # ------------------------------------------------------------ migrations
 
     def schema_version(self) -> int:

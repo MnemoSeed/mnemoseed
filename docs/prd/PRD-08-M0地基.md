@@ -124,7 +124,7 @@
 
 ### A.3 MetaStore（SQLite 与 PG 同构）
 
-- **schema_version**（迁移机制自身）、**profiles**、**tokens**（凭证签发/吊销）、**profile_score_pool**（per-profile 积分池：`profile_id` 主键且无外键，`balance / watermark_start / watermark_end / last_event_start / last_event_end`，事务原子更新，事件含 turn_range；迁移 v3 引入并**取代** legacy 单行 `score_pool`，后者保留、无数据迁移）、**config**（版本化 + 可回滚）、**audit_log**（append-only，读写事件流；保留与聚合策略：明细 90 天滚动 + 聚合计数永久——**用量计数不从 audit_log 派生**，走 A.1/A.2 的计数字段）、**dream_runs**（梦境运行历史：turn_range/模型/tokens/成本/分流计数/中断标记，console Dream 面板与幂等恢复依赖）
+- **schema_version**（迁移机制自身）、**profiles**、**tokens**（凭证签发/吊销）、**profile_score_pool**（per-profile 积分池：`profile_id` 主键且无外键，`balance / watermark_start / watermark_end / last_event_start / last_event_end`，事务原子更新，事件含 turn_range；迁移 v3 引入并**取代** legacy 单行 `score_pool`，后者保留、无数据迁移）、**config**（版本化 + 可回滚）、**audit_log**（append-only，读写事件流；保留与聚合策略：明细 90 天滚动 + 聚合计数永久——**用量计数不从 audit_log 派生**，走 A.1/A.2 的计数字段）、**dream_runs**（梦境运行历史：turn_range/模型/tokens/成本/分流计数/中断标记，console Dream 面板与幂等恢复依赖）、**dream_token_ledger**（月度梦境 token 账本：复合 UNIQUE(profile_id, year_month)，原子 upsert 累加；迁移 v4 引入，无数据回填——PRD-02 FR-2.5b）
 
 ### A.4 显式不冻结
 
@@ -183,6 +183,7 @@
 | config get / set（版本化 + rollback） | 配置版本化 | console Settings |
 | audit_append / audit_query(filter, page) | 审计 append-only 写 / 过滤分页读 | 全局 |
 | dream_runs record / list | 梦境运行历史 | 梦境、console |
+| add_token_usage(profile_id, year_month, tokens) / token_usage(profile_id, year_month) | 月度梦境 token 账本：原子累加（upsert）/ 单月读取；year_month 为 UTC 年月键，跨月自动归零（新键新行） | 梦境 FR-2.5b |
 | schema_version get / migrate(up) | 迁移机制 | 安装与升级 |
 | capabilities() | 自报能力集 | 启动校验 |
 

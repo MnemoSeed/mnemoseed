@@ -22,6 +22,12 @@ safe-clear allow-list, so a committed dream purges exactly the rows the model
 saw and overflow rows survive for a later dream. Per-dream cost telemetry rides
 out on ReflectOutcome.report (NFR-2.2 substrate).
 
+An optional monthly ledger (T5b, FR-2.5b) gates the reflect boundary: when the
+projected UTC-month spend exceeds the budget the dream degrades to capture-only
+(a typed no, no cloud call, snapshot retained, refusal recorded). Metering
+(delta + provider-reported output tokens) is recorded after a successful call,
+before the marker persist.
+
 Negation rule (g2, engine invariant): each mention carries a polarity
 ("positive" / "negative") derived from negation markers on the matched span
 (e.g. "I never use vim"). AC-3 folding groups mentions by (subject, predicate,
@@ -47,6 +53,7 @@ from typing import Any, Protocol
 
 from mnemoseed.config import CONFIG_DIR
 from mnemoseed.dream.delta import DeltaPacker, DeltaReport
+from mnemoseed.dream.ledger import TokenLedger
 from mnemoseed.dream.prompts import (
     ChunkBlock,
     origin_of,
@@ -362,6 +369,7 @@ class ReflectOrchestrator:
         max_retries: int = 3,
         backoff_base: float = 1.0,
         packer: DeltaPacker | None = None,
+        ledger: TokenLedger | None = None,
     ) -> None:
         self._llm = llm
         self._directory = directory if directory is not None else CONFIG_DIR / "dreams"
@@ -371,6 +379,7 @@ class ReflectOrchestrator:
         self._max_retries = max_retries
         self._backoff_base = backoff_base
         self._packer = packer if packer is not None else DeltaPacker()
+        self._ledger = ledger
 
     def reflect(self, snapshot: Snapshot) -> ReflectOutcome:
         """Run one reflect pass. The marker gate makes a completed reflect a
@@ -396,6 +405,32 @@ class ReflectOrchestrator:
                 ok=False,
                 result=None,
                 error="all chunks exceed the delta budget; snapshot retained for a later dream",
+                report=report,
+            )
+        if self._ledger is not None and not self._ledger.within_budget(
+            snapshot.profile_id,
+            delta_tokens=request.delta_tokens,
+            prefix_tokens=request.prefix_tokens,
+        ):
+            # FR-2.5b capture-only mode: the projected UTC-month spend already
+            # exceeds the budget, so the dream defers — no cloud call, the
+            # snapshot stays journaled at the reflect boundary (a new month, or
+            # a manual run with a raised budget, replays it), and the refusal is
+            # recorded in the audit trail.
+            logger.warning(
+                "reflect deferred for %s: projected month spend exceeds the token "
+                "budget; capture-only mode, snapshot retained",
+                snapshot.profile_id,
+            )
+            self._ledger.record_refusal(
+                snapshot.profile_id,
+                delta_tokens=request.delta_tokens,
+                prefix_tokens=request.prefix_tokens,
+            )
+            return ReflectOutcome(
+                ok=False,
+                result=None,
+                error="monthly token budget exceeded; capture-only mode, snapshot retained",
                 report=report,
             )
         result: ReflectionResult | None = None
@@ -442,6 +477,18 @@ class ReflectOrchestrator:
 
         assert result is not None
         tracked_report = _with_provider_usage(report, provider_usage)
+        if self._ledger is not None:
+            # FR-2.5b metering: the dream consumed the packed delta plus the
+            # provider-reported output tokens; record them into the current UTC
+            # month before the marker persist (the call happened, the cost is
+            # attributable even if the marker write fails).
+            completion = provider_usage.completion_tokens if provider_usage is not None else None
+            self._ledger.record(
+                snapshot.profile_id,
+                delta_tokens=tracked_report.delta_tokens,
+                prefix_tokens=tracked_report.prefix_tokens,
+                output_tokens=completion or 0,
+            )
         try:
             self._finalize(snapshot, result)
         except Exception as exc:  # noqa: BLE001 - marker before progress

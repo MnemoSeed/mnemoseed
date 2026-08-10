@@ -36,6 +36,7 @@ from mnemoseed.dream import (
     Merger,
     ReflectOrchestrator,
     StubReflectLLM,
+    TokenLedger,
     resume_boundary,
 )
 from mnemoseed.schema.stamp import CognitiveTier
@@ -172,6 +173,10 @@ def _build_capture(
         llm=StubReflectLLM(),
         directory=snapshotter.directory,
         on_done=trigger.on_reflect_complete,
+        # FR-2.5b: the monthly token ledger binds the real meta store and the
+        # config's USD cap, so the budget gate and the meter run on the serving
+        # path (capture-only once the projected month spend exceeds the cap).
+        ledger=TokenLedger(meta=stores.meta, budget_usd=config.dream.token_budget_usd),
     )
     merger = Merger(
         graph_main=stores.graph,

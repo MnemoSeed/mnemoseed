@@ -4,6 +4,7 @@ STORAGE_MODE shortcut, and validation errors that name the offending key."""
 import pytest
 
 from mnemoseed.config import (
+    DEFAULT_DREAM_TOKEN_BUDGET_USD,
     DEFAULT_PRESET,
     Config,
     ConfigError,
@@ -207,4 +208,33 @@ def test_dream_auto_trigger_must_be_boolean(tmp_path, monkeypatch):
     p = tmp_path / "config.toml"
     _write(p, '[dream]\nauto_trigger = "yes"\n')
     with pytest.raises(ConfigError, match=r"config\[dream.auto_trigger\]"):
+        load_config(p)
+
+
+def test_dream_token_budget_usd_defaults_to_five(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    cfg = load_config(tmp_path / "missing.toml")
+    assert cfg.dream.token_budget_usd == DEFAULT_DREAM_TOKEN_BUDGET_USD == 5.0
+
+
+def test_dream_token_budget_usd_parses(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    p = tmp_path / "config.toml"
+    _write(p, 'preset = "embedded"\n[dream]\ntoken_budget_usd = 12.5\n')
+    assert load_config(p).dream.token_budget_usd == 12.5
+
+
+def test_dream_token_budget_usd_negative_names_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    p = tmp_path / "config.toml"
+    _write(p, "[dream]\ntoken_budget_usd = -1\n")
+    with pytest.raises(ConfigError, match=r"config\[dream.token_budget_usd\]"):
+        load_config(p)
+
+
+def test_dream_token_budget_usd_must_be_number(tmp_path, monkeypatch):
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    p = tmp_path / "config.toml"
+    _write(p, '[dream]\ntoken_budget_usd = "five"\n')
+    with pytest.raises(ConfigError, match=r"config\[dream.token_budget_usd\]"):
         load_config(p)

@@ -3,8 +3,10 @@
 The cost-deadlock layer (design/02 section 6): a cloud dream call sends only
 the per-dream increment (the delta), never the whole snapshot. Chunks are
 packed whole (never split mid-text) in deterministic order until the delta
-token budget (default 10000); chunks that do not fit are reported as overflow so
-a later dream can pick them up — overflow is reported, never an error. The
+token budget (a dynamic budget by default, FR-2.5: the backlog itself clamped
+to the 5k..32k band; an explicit budget still binds); chunks that do not fit
+are reported as overflow so a later dream can pick them up — overflow is
+reported, never an error. The
 stable part of the request (system instruction + user header + optional graph
 digest) is the cache-resident prefix a provider prompt cache keys on and never
 counts against the delta budget.
@@ -20,7 +22,7 @@ Deterministic across runs and platforms (code point counts, never code units).
 Worst-case bias is on entropy-dense ASCII (hex, base64, URL-dense paths), where
 a byte-level BPE can emit up to ~4x the estimator's count (~0.25x the true token
 count); T6 must calibrate the budget against provider-reported usage before
-relying on the 10k cap as a hard cost bound.
+relying on the 32k cap as a hard cost bound.
 
 Cost telemetry is the NFR-2.2 substrate: DeltaReport carries per-dream token
 counts and an estimated USD cost from a configurable per-role price table
@@ -41,11 +43,30 @@ from mnemoseed.dream.prompts import (
     build_cache_prefix,
     ordered_chunks,
     render_chunk_block,
+    render_chunk_blocks,
 )
 from mnemoseed.dream.snapshot import Snapshot, SnapshotChunk
 from mnemoseed.llm.types import Usage
 
+# The no-arg packer resolves its budget from the pending backlog (FR-2.5):
+# budget = clamp(backlog tokens, 5k, 32k) — measured before every dream, no
+# feedback loop, no persisted state (design/02 section 6). DEFAULT_DELTA_BUDGET
+# _TOKENS survives as the legacy fixed default for callers that pass an explicit
+# budget (the regression fence: explicit > dynamic resolution).
 DEFAULT_DELTA_BUDGET_TOKENS = 10000
+DELTA_BUDGET_FLOOR_TOKENS = 5000
+DELTA_BUDGET_CEILING_TOKENS = 32000
+
+
+def resolve_delta_budget(backlog_tokens: int) -> int:
+    """FR-2.5: clamp the pending backlog into the 5k..32k delta budget band.
+
+    The floor keeps micro-backlogs above the pathological empty-delta edge; the
+    ceiling bounds the single-dream cloud cost to ~$0.0045 at short-increment
+    pricing (NFR-2.2). Pure local arithmetic over a directly-observable backlog.
+    """
+    return max(DELTA_BUDGET_FLOOR_TOKENS, min(DELTA_BUDGET_CEILING_TOKENS, backlog_tokens))
+
 
 _CJK_RANGES: tuple[tuple[int, int], ...] = (
     (0x3400, 0x4DBF),  # CJK Extension A
@@ -146,6 +167,7 @@ class DeltaRequest:
     overflow_chunk_ids: tuple[str, ...]
     delta_tokens: int
     prefix_tokens: int
+    budget_tokens: int = 0  # FR-2.5: the budget this pack ran under; 0 for hand-built requests
 
 
 @dataclass(frozen=True)
@@ -156,6 +178,7 @@ class DeltaReport:
     prefix_tokens: int
     overflow_count: int
     estimated_cost_usd: float
+    budget_tokens: int = 0  # FR-2.5: the resolved budget that produced this report
     provider_usage: Usage | None = None  # T6: provider-reported tokens, when the driver reports them
 
     def with_provider_usage(self, usage: Usage | None) -> DeltaReport:
@@ -174,15 +197,21 @@ class DeltaPacker:
     prompt render uses). The cache prefix never counts against the delta budget.
     Under no budget pressure the packed delta IS the full snapshot render, so a
     default packer preserves the pre-delta reflect behavior.
+
+    FR-2.5: the no-arg packer resolves its budget dynamically from the pending
+    backlog (``budget = clamp(backlog, 5k, 32k)``) before packing; an explicit
+    ``budget_tokens`` still binds exactly as before (regression fence).
     """
 
     def __init__(
         self,
         *,
-        budget_tokens: int = DEFAULT_DELTA_BUDGET_TOKENS,
+        budget_tokens: int | None = None,
         price: PriceTable | None = None,
         graph_digest: GraphDigest | None = None,
     ) -> None:
+        # None means "dynamic FR-2.5 resolution at pack time"; an explicit int
+        # keeps the legacy fixed-budget contract of every historic caller.
         self._budget = budget_tokens
         self._price = price if price is not None else PriceTable()
         self._digest = graph_digest if graph_digest is not None else NullGraphDigest()
@@ -192,9 +221,17 @@ class DeltaPacker:
         """The active price table (for report / telemetry consumers)."""
         return self._price
 
+    def _resolve_budget(self, snapshot: Snapshot) -> int:
+        """Explicit budget wins; otherwise measure the backlog and clamp it."""
+        if self._budget is not None:
+            return self._budget
+        backlog = estimate_tokens(render_chunk_blocks(snapshot.chunks))
+        return resolve_delta_budget(backlog)
+
     def pack(self, snapshot: Snapshot) -> DeltaRequest:
         """Assemble the delta request: pack whole chunks up to the budget,
         report the rest as overflow (never dropped, never split mid-text)."""
+        budget = self._resolve_budget(snapshot)
         prefix = build_cache_prefix(self._digest.digest(snapshot.profile_id))
         packed: list[tuple[SnapshotChunk, str]] = []
         overflow: list[SnapshotChunk] = []
@@ -204,7 +241,7 @@ class DeltaPacker:
             block = render_chunk_block(chunk)
             candidate = acc_text + block
             candidate_tokens = estimate_tokens(candidate)
-            if candidate_tokens <= self._budget:
+            if candidate_tokens <= budget:
                 packed.append((chunk, block))
                 acc_text = candidate
                 acc_tokens = candidate_tokens
@@ -219,6 +256,7 @@ class DeltaPacker:
             overflow_chunk_ids=tuple(c.chunk_id for c in overflow),
             delta_tokens=acc_tokens,
             prefix_tokens=estimate_tokens(prefix),
+            budget_tokens=budget,
         )
 
     def report(self, request: DeltaRequest) -> DeltaReport:
@@ -232,4 +270,5 @@ class DeltaPacker:
                 prefix_tokens=request.prefix_tokens,
                 price=self._price,
             ),
+            budget_tokens=request.budget_tokens,
         )

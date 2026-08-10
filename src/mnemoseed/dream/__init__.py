@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from mnemoseed.dream.delta import (
     DEFAULT_DELTA_BUDGET_TOKENS,
+    DELTA_BUDGET_CEILING_TOKENS,
+    DELTA_BUDGET_FLOOR_TOKENS,
     DeltaPacker,
     DeltaReport,
     DeltaRequest,
@@ -23,7 +25,9 @@ from mnemoseed.dream.delta import (
     PriceTable,
     estimate_cost_usd,
     estimate_tokens,
+    resolve_delta_budget,
 )
+from mnemoseed.dream.ledger import LedgerStatus, TokenLedger
 from mnemoseed.dream.merge import (
     MergeOutcome,
     Merger,
@@ -71,6 +75,8 @@ from mnemoseed.dream.trigger import (
 )
 
 __all__ = [
+    "DELTA_BUDGET_CEILING_TOKENS",
+    "DELTA_BUDGET_FLOOR_TOKENS",
     "DEFAULT_DELTA_BUDGET_TOKENS",
     "PROMPT_VERSION",
     "ChunkBlock",
@@ -82,6 +88,7 @@ __all__ = [
     "DreamTrigger",
     "FileSnapshotter",
     "GraphDigest",
+    "LedgerStatus",
     "MergeOutcome",
     "MergeSummary",
     "Merger",
@@ -102,6 +109,7 @@ __all__ = [
     "SnapshotResult",
     "Snapshotter",
     "StubReflectLLM",
+    "TokenLedger",
     "TriggerStatus",
     "build_cache_prefix",
     "build_reflect_prompt",
@@ -112,6 +120,7 @@ __all__ = [
     "recover_snapshots",
     "render_chunk_block",
     "render_chunk_blocks",
+    "resolve_delta_budget",
     "resume_boundary",
     "result_from_payload",
     "write_snapshot_file",

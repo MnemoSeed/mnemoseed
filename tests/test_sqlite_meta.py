@@ -332,14 +332,14 @@ def test_meta_migration_preserves_data_and_is_forward_only(tmp_path):
     driver = SqliteMetaDriver(path=path)
     try:
         # graph-tagged v2 is not applied to a meta-only file; v3 adds the
-        # per-profile score pool, so meta lands at 3 (the legacy singleton
-        # score_pool is neither dropped nor migrated).
-        assert driver.schema_version() == 3
+        # per-profile score pool and v4 the dream token ledger, so meta lands at
+        # 4 (the legacy singleton score_pool is neither dropped nor migrated).
+        assert driver.schema_version() == 4
         got = driver.get_profile("u1")
         assert got is not None
         assert got.display_name == "survivor"
         driver.migrate()  # idempotent re-run
-        assert driver.schema_version() == 3
+        assert driver.schema_version() == 4
     finally:
         asyncio.run(driver.close())
 
@@ -348,7 +348,7 @@ def test_schema_version_equals_latest_new_install(tmp_path):
     db = SqliteMetaDriver(path=tmp_path / "fresh.db")
     try:
         assert db.schema_version() == db.migrate()
-        assert db.schema_version() == 3
+        assert db.schema_version() == 4
         # a profile row written after init survives a migrate() no-op
         db.upsert_profile(StoredProfile(profile_id="u1", display_name="Uma"))
         db.migrate()

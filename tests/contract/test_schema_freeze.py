@@ -196,6 +196,7 @@ _FROZEN_META_TABLES = (
     "config",
     "audit_log",
     "dream_runs",
+    "dream_token_ledger",
 )
 _FROZEN_META_INDEXES = ("idx_tokens_profile", "idx_audit_at", "idx_dream_session")
 _FROZEN_TRIGGERS = (("trg_audit_no_update", "UPDATE"), ("trg_audit_no_delete", "DELETE"))

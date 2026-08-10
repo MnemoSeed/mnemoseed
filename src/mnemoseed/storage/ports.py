@@ -615,6 +615,14 @@ class MetaStore(Protocol):
     def list_dream_runs(self, filter: DreamRunFilter, page: Page) -> PageResult[DreamRun]:
         raise NotImplementedError
 
+    def add_token_usage(self, profile_id: str, year_month: str, tokens: int) -> None:
+        """FR-2.5b: atomically increment a profile's monthly dream-token counter."""
+        raise NotImplementedError
+
+    def token_usage(self, profile_id: str, year_month: str) -> int:
+        """FR-2.5b: read a profile's monthly dream-token counter (0 when none)."""
+        raise NotImplementedError
+
     def schema_version(self) -> int:
         raise NotImplementedError
 

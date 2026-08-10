@@ -534,6 +534,21 @@ _PROFILE_SCORE_POOL_TABLE = CreateTable(
     ),
 )
 
+# v4: per-profile monthly dream-token ledger (M1-T5b, FR-2.5b). One row per
+# (profile_id, UTC year_month); the composite UNIQUE is the auto-recovery key and
+# the ON CONFLICT increment target on both dialects. Born empty — no backfill:
+# existing installs simply start metering from day one of the upgrade.
+_DREAM_TOKEN_LEDGER_TABLE = CreateTable(
+    store="meta",
+    name="dream_token_ledger",
+    columns=(
+        Column("profile_id", "TEXT", not_null=True),
+        Column("year_month", "TEXT", not_null=True),
+        Column("tokens", "INTEGER", not_null=True, default=0),
+    ),
+    unique=(("profile_id", "year_month"),),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -583,6 +598,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         description="per-profile score pool: profile_id-keyed balances and watermarks",
         ops=(_PROFILE_SCORE_POOL_TABLE,),
+    ),
+    Migration(
+        version=4,
+        description="monthly dream token ledger: per-profile (profile_id, year_month) counters",
+        ops=(_DREAM_TOKEN_LEDGER_TABLE,),
     ),
 )
 

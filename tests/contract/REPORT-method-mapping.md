@@ -51,10 +51,11 @@ Driver families covered by the `stack` fixture:
 | upsert_node | `test_contract_graph.py::test_upsert_get_roundtrip` |
 | versions | `test_contract_graph.py::test_versions_chain` |
 
-## MetaStore (21 methods)
+## MetaStore (23 methods)
 
 | Method | Contract test |
 |---|---|
+| add_token_usage | `test_contract_meta.py::test_dream_token_ledger_atomic_increment` |
 | advance_watermark | `test_contract_meta.py::test_pool_watermark_gap_raises` |
 | audit_append | `test_contract_meta.py::test_audit_append_and_query` |
 | audit_query | `test_contract_meta.py::test_audit_append_and_query` |
@@ -75,6 +76,7 @@ Driver families covered by the `stack` fixture:
 | rollback_config | `test_contract_meta.py::test_config_versioned_get_set_rollback` |
 | schema_version | `test_contract_meta.py::test_schema_version_and_migrate_forward_only` |
 | set_config | `test_contract_meta.py::test_config_versioned_get_set_rollback` |
+| token_usage | `test_contract_meta.py::test_dream_token_ledger_atomic_increment` |
 | upsert_profile | `test_contract_meta.py::test_profile_crud_and_token_cascade` |
 
 ## Embedder (3 methods)

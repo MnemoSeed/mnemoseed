@@ -29,6 +29,8 @@ import pytest
 from mnemoseed.capture.pool import PoolEvent, PoolEventKind
 from mnemoseed.dream import (
     DEFAULT_DELTA_BUDGET_TOKENS,
+    DELTA_BUDGET_CEILING_TOKENS,
+    DELTA_BUDGET_FLOOR_TOKENS,
     DeltaPacker,
     DeltaReport,
     DeltaRequest,
@@ -42,17 +44,20 @@ from mnemoseed.dream import (
     ReflectOrchestrator,
     ReflectOutcome,
     StubReflectLLM,
+    TokenLedger,
     build_cache_prefix,
     estimate_cost_usd,
     estimate_tokens,
     render_chunk_blocks,
+    resolve_delta_budget,
     resume_boundary,
 )
 from mnemoseed.dream.merge import MergeOutcome, Merger
 from mnemoseed.dream.pipeline import DreamPipeline
 from mnemoseed.dream.snapshot import FileSnapshotter, Snapshot, SnapshotChunk
+from mnemoseed.llm.types import ChatResult, Usage
 from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
-from mnemoseed.storage.ports import TurnRange
+from mnemoseed.storage.ports import AuditEntry, TurnRange
 
 _RANGE = TurnRange(0, 10)
 _DEFAULT_INPUT = PriceTable().input_usd_per_m
@@ -209,6 +214,71 @@ def test_delta_never_splits_a_chunk() -> None:
     assert request.delta_tokens == 0
 
 
+# ---------------------------------------------------------------- dynamic budget (FR-2.5)
+
+
+def test_resolve_delta_budget_floor_midpoint_ceiling() -> None:
+    """budget = clamp(backlog_tokens, 5k, 32k) exactly as designed (design/02 §6):
+
+    the floor keeps micro-backlogs above the pathological empty-delta edge, and
+    the ceiling bounds the single-dream cloud cost to ~$0.0045 (NFR-2.2)."""
+    assert resolve_delta_budget(0) == DELTA_BUDGET_FLOOR_TOKENS
+    assert resolve_delta_budget(100) == DELTA_BUDGET_FLOOR_TOKENS
+    assert resolve_delta_budget(4999) == DELTA_BUDGET_FLOOR_TOKENS
+    assert resolve_delta_budget(5000) == 5000
+    assert resolve_delta_budget(20000) == 20000
+    assert resolve_delta_budget(32000) == 32000
+    assert resolve_delta_budget(50000) == DELTA_BUDGET_CEILING_TOKENS
+
+
+def test_delta_pack_dynamic_resolves_to_backlog_inside_the_band() -> None:
+    """Inside the band the no-arg packer spends exactly the measured backlog:
+    no feedback loop, no persisted state, deterministic per input."""
+    snap = _snap(
+        *(_stamp(f"c{i}", "z" * 500, turn_start=i, turn_end=i) for i in range(40)),
+    )
+    render = render_chunk_blocks(snap.chunks)
+    backlog = estimate_tokens(render)
+    assert backlog > DELTA_BUDGET_FLOOR_TOKENS  # ~5.7k, just inside the band
+    request = DeltaPacker().pack(snap)
+    assert request.budget_tokens == backlog
+    assert request.overflow_chunk_ids == ()
+    assert request.delta_tokens == backlog
+
+
+def test_delta_pack_dynamic_below_floor_uses_floor_budget() -> None:
+    snap = _snap(_stamp("c1", "I prefer dark mode", turn_start=0, turn_end=1))
+    request = DeltaPacker().pack(snap)
+    assert request.budget_tokens == DELTA_BUDGET_FLOOR_TOKENS
+    assert request.overflow_chunk_ids == ()
+    assert request.delta_tokens > 0
+
+
+def test_delta_report_carries_resolved_budget() -> None:
+    """The resolved budget rides on the report (and the request): the budget
+    value is observable per dream, not a silent internal (design/02 §6)."""
+    snap = _snap(_stamp("c1", "I prefer dark mode", turn_start=0, turn_end=1))
+    packer = DeltaPacker()
+    request = packer.pack(snap)
+    report = packer.report(request)
+    assert report.budget_tokens == request.budget_tokens == DELTA_BUDGET_FLOOR_TOKENS
+
+
+def test_delta_pack_explicit_budget_arg_still_wins() -> None:
+    """A caller-supplied budget still binds (regression fence): the dynamic
+    resolution applies ONLY to the no-arg default; every historic caller that
+    passed an explicit budget keeps today's exact behavior."""
+    snap = _snap(
+        *(_stamp(f"c{i}", "z" * 100, turn_start=i, turn_end=i) for i in range(20)),
+    )
+    dynamic = DeltaPacker().pack(snap)
+    assert dynamic.budget_tokens == resolve_delta_budget(estimate_tokens(render_chunk_blocks(snap.chunks)))
+    assert dynamic.overflow_chunk_ids == ()  # ~2.3k tokens pack fully
+    explicit = DeltaPacker(budget_tokens=300).pack(snap)
+    assert explicit.budget_tokens == 300
+    assert explicit.overflow_chunk_ids  # explicit cap binds, the backlog truncates
+
+
 def test_delta_prefix_excluded_from_budget() -> None:
     """System instruction + stable context never count against the delta budget:
     a very large cache prefix must not push chunks into overflow (FR-2.5)."""
@@ -220,18 +290,28 @@ def test_delta_prefix_excluded_from_budget() -> None:
     assert request.packed_chunk_ids == ("c0", "c1", "c2")
 
 
-def test_delta_budget_default_is_10000_and_caps_delta() -> None:
-    """NFR-2.2 cap proof: forty-four 1000-char chunks would render to ~11000
-    tokens uncapped; the default packing always lands at or below 10000 and the
-    excess is reported as overflow."""
+def test_delta_budget_dynamic_resolves_from_backlog_and_caps_at_ceiling() -> None:
+    """FR-2.5 / NFR-2.2: the no-arg packer resolves its budget from the pending
+    backlog — 44 chunks rendering to ~11k tokens land inside the 5k..32k band,
+    so the resolved budget EQUALS the measured backlog and nothing overflows."""
     snap = _snap(
         *(_stamp(f"c{i}", "z" * 1000, turn_start=i, turn_end=i) for i in range(44)),
     )
     assert _packed_tokens(render_chunk_blocks(snap.chunks)) > 11000
     request = DeltaPacker().pack(snap)
-    assert request.delta_tokens <= 10000
-    assert request.overflow_chunk_ids  # a later dream picks these up
-    assert len(request.packed_chunk_ids) + len(request.overflow_chunk_ids) == 44
+    assert request.budget_tokens == request.delta_tokens  # resolved budget == backlog
+    assert request.overflow_chunk_ids == ()
+    # NFR-2.2 cap proof: a ~38k-token backlog is clamped to the 32k ceiling and
+    # the excess is reported as overflow, never sent to the cloud.
+    oversized = _snap(
+        *(_stamp(f"c{i}", "z" * 5000, turn_start=i, turn_end=i) for i in range(30)),
+    )
+    assert _packed_tokens(render_chunk_blocks(oversized.chunks)) > 32000
+    capped = DeltaPacker().pack(oversized)
+    assert capped.budget_tokens == DELTA_BUDGET_CEILING_TOKENS
+    assert capped.delta_tokens <= DELTA_BUDGET_CEILING_TOKENS
+    assert capped.overflow_chunk_ids  # a later dream picks these up
+    assert len(capped.packed_chunk_ids) + len(capped.overflow_chunk_ids) == 30
 
 
 # ---------------------------------------------------------------- cache prefix
@@ -318,21 +398,23 @@ def test_delta_report_tracks_delta_prefix_overflow() -> None:
 
 
 def test_nfr22_budget_arithmetic_delta_cost_projection() -> None:
-    """NFR-2.2 substrate: report the cost projection for a 5k delta sample."""
+    """NFR-2.2 substrate: report the cost projection at the 32k single-dream
+    hard cap — about $0.0045 at DeepSeek V4 Flash short-increment pricing
+    ($0.14/M input), the ceiling the dynamic budget can never cross."""
     request = DeltaRequest(
         version="v1",
         profile_id="alice",
         cache_prefix=build_cache_prefix(""),
-        delta="z" * 20000,  # 5000 estimated delta tokens
+        delta="z" * 128000,  # 32000 estimated delta tokens (the 32k hard cap)
         packed_chunk_ids=("c1",),
         overflow_chunk_ids=(),
-        delta_tokens=5000,
+        delta_tokens=32000,
         prefix_tokens=estimate_tokens(build_cache_prefix("")),
     )
     report = DeltaPacker().report(request)
-    assert report.delta_tokens == 5000
+    assert report.delta_tokens == 32000
     assert report.estimated_cost_usd == pytest.approx(
-        5000 * _DEFAULT_INPUT / 1e6 + report.prefix_tokens * _DEFAULT_CACHE / 1e6
+        32000 * _DEFAULT_INPUT / 1e6 + report.prefix_tokens * _DEFAULT_CACHE / 1e6
     )
 
 
@@ -552,8 +634,8 @@ def test_d1_full_overflow_reflect_defers_and_never_calls_cloud(tmp_path: Path) -
     """Defense line 1 (orchestrator): a snapshot whose every chunk is over the
     delta budget is deferred, not reflected. Nothing hits the LLM, no REFLECT_DONE
     is persisted, and the report still carries the overflow count."""
-    snap = _snap(_stamp("huge", "I prefer dark mode. " * 2200))
-    packer = DeltaPacker()  # default 10000-token budget: the single chunk overflows
+    snap = _snap(_stamp("huge", "I prefer dark mode. " * 7000))
+    packer = DeltaPacker()  # dynamic budget: the ~35k-token chunk exceeds the 32k ceiling
     assert packer.pack(snap).overflow_chunk_ids == ("huge",)
     llm = _RecordingLLM()
     done: list[str] = []
@@ -652,7 +734,7 @@ def test_d1_merge_boundary_recovery_respects_persisted_overflow(tmp_path: Path) 
     boundary with the guard active -- reflect is never re-run and the deferred
     merge cannot purge the overflow chunk."""
     noise = _stamp("noise", "lorem ipsum dolor sit amet", turn_start=0, turn_end=1)
-    huge = _stamp("huge", "z" * 44000, turn_start=0, turn_end=1)
+    huge = _stamp("huge", "z" * 140000, turn_start=0, turn_end=1)  # ~35k tokens: over the 32k ceiling
     store = _VectorFake([noise, huge])
     fs1 = FileSnapshotter(store=store, meta=_MetaFake(), directory=tmp_path / "dreams")
     snap = fs1.request("alice", _RANGE).snapshot
@@ -778,7 +860,7 @@ def test_d1_recovery_partial_overflow_with_triples_purges_only_consumed(tmp_path
     (verifier ask: packed ids read back from the journal at resume)."""
     chunks = [
         _stamp(f"c{i}", "I prefer dark mode", turn_start=i * 2, turn_end=i * 2 + 1) for i in range(5)
-    ] + [_stamp("huge", "z" * 44000, turn_start=50, turn_end=51)]
+    ] + [_stamp("huge", "z" * 140000, turn_start=50, turn_end=51)]  # ~35k tokens: over the 32k ceiling
     store = _VectorFake(chunks)
     fs1 = FileSnapshotter(store=store, meta=_MetaFake(), directory=tmp_path / "dreams")
     snap = fs1.request("alice", TurnRange(0, 60)).snapshot
@@ -821,3 +903,148 @@ def test_d1_recovery_partial_overflow_with_triples_purges_only_consumed(tmp_path
     assert sorted(store.deleted) == ["c0", "c1", "c2", "c3", "c4"]  # consumed rows only
     assert store.purged == []
     assert [c.chunk_id for c in store.chunks] == ["huge"]  # the overflow chunk survives
+
+
+# ---------------------------------------------------------------- FR-2.5b monthly ledger gate
+#
+# The monthly token ledger (FR-2.5b / NFR-2.2) guards the reflect boundary: when
+# the projected month spend (prior usage + this dream) exceeds the budget, the
+# dream degrades to capture-only — a typed no, no cloud call, snapshot retained,
+# refusal recorded. Auto-recovery falls out of UTC year-month keying: a fresh
+# month reads a zero counter, so no rollover job exists.
+
+
+class _LedgerMetaFake:
+    """MetaStore-shaped double for the ledger's two port calls + the audit seam."""
+
+    def __init__(self) -> None:
+        self.counters: dict[tuple[str, str], int] = {}
+        self.audit: list[AuditEntry] = []
+
+    def add_token_usage(self, profile_id: str, year_month: str, tokens: int) -> None:
+        key = (profile_id, year_month)
+        self.counters[key] = self.counters.get(key, 0) + tokens
+
+    def token_usage(self, profile_id: str, year_month: str) -> int:
+        return self.counters.get((profile_id, year_month), 0)
+
+    def audit_append(self, entry: AuditEntry) -> None:
+        self.audit.append(entry)
+
+
+class _UsageLLM:
+    """ChatLLM double: returns an empty reflection with provider-reported usage."""
+
+    def __init__(self, usage: Usage) -> None:
+        self._usage = usage
+        self.calls = 0
+
+    def chat(self, *, system: str, user: str) -> ChatResult:
+        del system, user
+        self.calls += 1
+        return ChatResult(text="[]", usage=self._usage, model="test-model", driver="stub")
+
+
+class _LedgerClock:
+    def __init__(self, ts: float) -> None:
+        self.ts = ts
+
+    def __call__(self) -> float:
+        return self.ts
+
+
+_AUG = 1785542400.0  # 2026-08-01T00:00:00Z
+_SEP = 1788220800.0  # 2026-09-01T00:00:00Z
+
+
+def test_reflect_budget_gate_defers_without_cloud_call_and_keeps_snapshot(
+    tmp_path: Path,
+) -> None:
+    """FR-2.5b capture-only mode at the reflect boundary: the projected month
+    spend already exceeds the budget, so reflect returns a typed failure, the
+    LLM is never called, on_done never fires (the snapshot stays journaled for
+    the next month / manual run), and the refusal lands in the audit trail."""
+    meta = _LedgerMetaFake()
+    ledger = TokenLedger(meta, budget_usd=1e-9, clock=_LedgerClock(_AUG))
+    snap = _snap(_stamp("c1", "I prefer dark mode", turn_start=0, turn_end=1))
+    llm = _UsageLLM(
+        Usage(
+            prompt_tokens=10,
+            completion_tokens=50,
+            cache_read_input_tokens=5,
+            cache_creation_input_tokens=0,
+        )
+    )
+    done: list[str] = []
+    outcome = ReflectOrchestrator(
+        llm=llm,
+        directory=tmp_path / "dreams",
+        ledger=ledger,
+        on_done=lambda p: done.append(p),
+    ).reflect(snap)
+    assert outcome.ok is False
+    assert outcome.result is None
+    assert "budget" in (outcome.error or "")
+    assert outcome.report is not None  # cost telemetry stays observable
+    assert llm.calls == 0  # capture-only: no model call
+    assert done == []  # the snapshot stays at the reflect boundary
+    assert list((tmp_path / "dreams").glob("*.json")) == []  # nothing journaled
+    assert len(meta.audit) == 1
+    assert meta.audit[0].action == "token_budget_cap"
+
+
+def test_reflect_budget_gate_reopens_on_new_utc_month(tmp_path: Path) -> None:
+    """FR-2.5b auto-recovery: an overspent month renders the gate closed; on the
+    first of the next UTC month the counter is fresh and the same dream reflects
+    normally — no rollover job, the year-month key does the work."""
+    meta = _LedgerMetaFake()
+    clock = _LedgerClock(_AUG)
+    ledger = TokenLedger(meta, budget_usd=0.5, clock=clock)
+    ledger.record("alice", delta_tokens=4_000_000)  # August already spent ~$0.56 at $0.14/M
+    assert ledger.within_budget("alice", delta_tokens=100) is False
+    snap = _snap(_stamp("c1", "I prefer dark mode", turn_start=0, turn_end=1))
+    llm = _UsageLLM(
+        Usage(prompt_tokens=1, completion_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    )
+    outcome = ReflectOrchestrator(
+        llm=llm,
+        directory=tmp_path / "dreams",
+        ledger=ledger,
+    ).reflect(snap)
+    assert outcome.ok is False
+    assert llm.calls == 0
+    clock.ts = _SEP  # September 1 rolls the year-month key over
+    fresh = ReflectOrchestrator(
+        llm=llm,
+        directory=tmp_path / "dreams",
+        ledger=ledger,
+    ).reflect(snap)
+    assert fresh.ok
+    assert llm.calls == 1
+    assert ledger.usage("alice") == fresh.report.delta_tokens
+
+
+def test_reflect_success_records_delta_and_output_to_ledger(tmp_path: Path) -> None:
+    """A successful reflect meters the packed delta plus the provider-reported
+    output tokens into the current UTC month (NFR-2.2 substrate)."""
+    meta = _LedgerMetaFake()
+    ledger = TokenLedger(meta, budget_usd=5.0, clock=_LedgerClock(_AUG))
+    snap = _snap(_stamp("c1", "I prefer dark mode", turn_start=0, turn_end=1))
+    llm = _UsageLLM(
+        Usage(
+            prompt_tokens=10,
+            completion_tokens=50,
+            cache_read_input_tokens=5,
+            cache_creation_input_tokens=0,
+        )
+    )
+    outcome = ReflectOrchestrator(
+        llm=llm,
+        directory=tmp_path / "dreams",
+        ledger=ledger,
+    ).reflect(snap)
+    assert outcome.ok
+    assert outcome.report is not None
+    assert outcome.report.provider_usage is not None
+    assert outcome.report.provider_usage.completion_tokens == 50
+    assert ledger.usage("alice") == outcome.report.delta_tokens + 50

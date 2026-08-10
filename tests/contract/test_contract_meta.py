@@ -195,12 +195,31 @@ def test_dream_runs_roundtrip(stack) -> None:
 
 
 def test_schema_version_and_migrate_forward_only(stack) -> None:
-    """meta's head is v3 (frozen v1 schema + v3 profile_score_pool); migrate is
-    idempotent and forward-only."""
-    assert stack.meta.schema_version() == 3
-    assert stack.meta.migrate() == 3
-    assert stack.meta.migrate(target=1) == 3  # back-targeting is a no-op at head
-    assert stack.meta.schema_version() == 3
+    """meta's head is v4 (frozen v1 schema + v3 profile_score_pool + v4
+    dream_token_ledger); migrate is idempotent and forward-only."""
+    assert stack.meta.schema_version() == 4
+    assert stack.meta.migrate() == 4
+    assert stack.meta.migrate(target=1) == 4  # back-targeting is a no-op at head
+    assert stack.meta.schema_version() == 4
+
+
+def test_dream_token_ledger_atomic_increment(stack) -> None:
+    """FR-2.5b port: add_token_usage is an atomic upsert-increment on the
+    (profile_id, year_month) key; unknown keys read as zero and never span."""
+    stack.meta.add_token_usage("u1", "2026-08", 100)
+    stack.meta.add_token_usage("u1", "2026-08", 50)
+    assert stack.meta.token_usage("u1", "2026-08") == 150
+    assert stack.meta.token_usage("u1", "2026-07") == 0  # other month stays zero
+    assert stack.meta.token_usage("ghost", "2026-08") == 0  # unknown profile stays zero
+
+
+def test_dream_token_ledger_per_profile_isolation(stack) -> None:
+    stack.meta.add_token_usage("a", "2026-08", 10)
+    stack.meta.add_token_usage("b", "2026-08", 3)
+    stack.meta.add_token_usage("a", "2026-09", 7)
+    assert stack.meta.token_usage("a", "2026-08") == 10
+    assert stack.meta.token_usage("b", "2026-08") == 3
+    assert stack.meta.token_usage("a", "2026-09") == 7
 
 
 def test_meta_stamp_helpers_used(stack) -> None:
