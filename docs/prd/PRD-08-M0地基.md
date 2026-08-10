@@ -14,7 +14,7 @@
 ## 2. 范围
 
 - **In**：core repo 骨架与 CI；VectorStore / GraphStore / MetaStore / Embedder 四接口 + 驱动注册表（支持按层命名多实例）；embedded 默认栈四驱动（LanceDB / SQLite-Graph / SQLite-Meta / bge-m3 ONNX）；Postgres 系三驱动（pgvector / pg-graph / pg-meta）+ OpenAI 兼容 Embedder；capability flags 校验与降级行为表；schema 迁移机制；docker-compose 骨架；embedded 单进程**骨架**（daemon 起停 + `/healthz`，无任何业务逻辑——daemon 业务面归 PRD-06 FR-6.2，两处不重复建设）
-- **Out**：任何五阶段管线逻辑（捕获/梦境/检索/调和/衰减——PRD-01~04）；MCP 网关实现（mcp repo）；宿主接入（PRD-06）；console（PRD-07）；驱动性能调优（性能验收归 PRD-03 NFR，M0 契约绿灯 ≠ 性能绿灯）
+- **Out**：任何五阶段管线逻辑（捕获/梦境/检索/调和/衰减——PRD-01~04）；MCP 网关实现（core 内 Python 模块，stdio 瘦壳，见 PRD-03）；宿主接入（PRD-06）；console（PRD-07）；驱动性能调优（性能验收归 PRD-03 NFR，M0 契约绿灯 ≠ 性能绿灯）
 
 ## 3. 已拍板决策
 

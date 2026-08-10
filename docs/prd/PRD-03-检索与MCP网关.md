@@ -52,7 +52,7 @@
 
 ## 6. 任务拆分
 
-1. `mcp/tools` —— 四个 MCP 工具定义与协议适配（2d）
+1. `core/mcp` —— FR-3.1 六个 MCP 工具的 Python 实现（官方 MCP SDK，stdio 瘦壳，转调 daemon localhost HTTP；含 daemon 侧检索/写入 HTTP 端点）（2d）
 2. `core/retrieve/cues` —— 线索提取器（2d）
 3. `core/retrieve/hybrid` —— 双路并发 + 重排（3d）
 4. `core/retrieve/budget` —— 预算闸与装配器（2d）
