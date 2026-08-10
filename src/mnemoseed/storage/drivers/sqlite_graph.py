@@ -28,6 +28,7 @@ from mnemoseed.schema.graph import (
     validate_node_payload,
 )
 from mnemoseed.storage.drivers._migrations import apply_migrations
+from mnemoseed.storage.drivers._threadlocal import ThreadLocalConnections
 from mnemoseed.storage.drivers._time import epoch_from_iso, iso8601_utc
 from mnemoseed.storage.ports import (
     Capability,
@@ -99,20 +100,24 @@ class SqliteGraphDriver:
             if extra is not None and path is None:
                 self._path = Path(os.path.expanduser(str(extra)))
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._path, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        apply_migrations(self._conn, "graph")
+        self._pool = ThreadLocalConnections(self._path)
+        # The main-thread connection is opened eagerly here so migrations and
+        # any direct ``driver._conn`` access (internals, tests) run on a live
+        # handle; worker threads get their own handle on first use.
+        apply_migrations(self._pool.get(), "graph")
 
     # ------------------------------------------------------------ capabilities
 
     def capabilities(self) -> frozenset[Capability]:
         return self.info.capabilities
 
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """The calling thread's connection (one handle per thread)."""
+        return self._pool.get()
+
     async def close(self) -> None:
-        self._conn.close()
+        self._pool.close_all()
 
     # ------------------------------------------------------------ helpers
 

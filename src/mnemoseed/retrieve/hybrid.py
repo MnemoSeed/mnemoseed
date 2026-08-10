@@ -20,9 +20,14 @@ breakdown field stays 0.0, and ``HybridRecall.cooccurrence_term`` reports the
 omission.
 
 The two tracks read independent stores and merge through an order-insensitive
-stable sort, so their evaluation order cannot affect the result; this runnable
-issues them sequentially. Deterministic: no clocks, no randomness, no network;
-ties break by (kind, id).
+stable sort, so their evaluation order cannot affect the result: ``recall``
+issues them concurrently on a two-worker executor and the output is
+byte-identical to the sequential reference ``_recall_sequential``. The embedded
+sqlite drivers keep one connection per thread, so parallel track reads never
+share a handle. The executor is cached per retriever (threads spawn lazily on
+the first recall) and the interpreter joins its idle workers at exit, so no
+thread outlives the process. Deterministic: no clocks, no randomness, no
+network; ties break by (kind, id).
 
 Situational weak cues (FR-3.14): extracted host/project/time_bucket never
 filter candidates; they feed the beta term as a low-weight blended component
@@ -37,6 +42,7 @@ case-differing may be cut before scoring.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from mnemoseed.retrieve.cues import ExtractedCues
@@ -129,6 +135,10 @@ class HybridRetriever:
 
     def __init__(self, config: HybridConfig | None = None) -> None:
         self._config = config if config is not None else HybridConfig()
+        # Cached two-worker executor: threads spawn lazily on the first recall
+        # and stay for the retriever's lifetime (bounded sqlite handles), and
+        # the interpreter's atexit hook joins idle workers at exit.
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mnemoseed-track")
 
     @property
     def config(self) -> HybridConfig:
@@ -144,20 +154,47 @@ class HybridRetriever:
         graph_store: GraphStore,
         embedder: Embedder,
     ) -> HybridRecall:
-        """Rank the merged vector+graph candidate pool for one profile."""
+        """Rank the merged vector+graph pool; the two tracks run concurrently."""
+        config = self._config
+        query = cues.cues
+        vector_future = self._executor.submit(
+            self._vector_track,
+            query_text,
+            query,
+            profile_id,
+            vector_store,
+            embedder,
+            config,
+        )
+        graph_future = self._executor.submit(
+            self._graph_track,
+            query,
+            profile_id,
+            graph_store,
+            config,
+        )
+        return _merge(vector_future.result(), graph_future.result())
+
+    def _recall_sequential(
+        self,
+        query_text: str,
+        cues: ExtractedCues,
+        *,
+        profile_id: str,
+        vector_store: VectorStore,
+        graph_store: GraphStore,
+        embedder: Embedder,
+    ) -> HybridRecall:
+        """Reference path: both tracks on the calling thread (T2 semantics).
+
+        Kept for the byte-equivalence tests and as a deterministic fallback;
+        ``recall`` runs exactly the same tracks on worker threads.
+        """
         config = self._config
         query = cues.cues
         vector_candidates = self._vector_track(query_text, query, profile_id, vector_store, embedder, config)
         graph_candidates = self._graph_track(query, profile_id, graph_store, config)
-        merged = sorted(
-            [*vector_candidates, *graph_candidates],
-            key=_sort_key,
-        )
-        return HybridRecall(
-            candidates=merged,
-            vector_hits=len(vector_candidates),
-            graph_hits=len(graph_candidates),
-        )
+        return _merge(vector_candidates, graph_candidates)
 
     # ----------------------------------------------------------- vector track
 
@@ -276,6 +313,19 @@ class HybridRetriever:
 def _sort_key(candidate: Candidate) -> tuple[float, str, str]:
     """Rank order: score descending, then a stable (kind, id) tie-break."""
     return (-candidate.score, candidate.kind, candidate.id)
+
+
+def _merge(
+    vector_candidates: Sequence[Candidate],
+    graph_candidates: Sequence[Candidate],
+) -> HybridRecall:
+    """Fuse both track pools into one order-insensitive ranked recall."""
+    merged = sorted([*vector_candidates, *graph_candidates], key=_sort_key)
+    return HybridRecall(
+        candidates=merged,
+        vector_hits=len(vector_candidates),
+        graph_hits=len(graph_candidates),
+    )
 
 
 def _breakdown(
