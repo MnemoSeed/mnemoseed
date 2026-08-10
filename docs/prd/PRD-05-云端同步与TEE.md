@@ -1,6 +1,6 @@
 # PRD-05 · 云端同步、TEE 梦境与计费网关（MnemoSeed Cloud）
 
-> 对应设计文档：[04-隔离解耦与隐私](../design/04-隔离解耦与隐私.md)
+> 对应设计文档：[04-隔离解耦与隐私](../design/04-隔离解耦与隐私.md)、[08-多端同步与冲突合并](../design/08-多端同步与冲突合并.md)（同步协议与冲突合并语义以 08 为准）
 > 里程碑：M4（商业化）· 预估 30 天
 
 ## 1. 目标
@@ -34,7 +34,7 @@
 | NFR-5.1 | 仅使用官方企业渠道（AWS Bedrock / Vertex AI）+ ZDR 端点；禁止 OpenRouter 类中介 |
 | NFR-5.2 | 单台 TEE 物理成本 ≤ $80/月，支撑 ≥ 200 付费用户（毛利率 ≥ 60%） |
 | NFR-5.3 | 合规：GDPR / CCPA / PDPA 数据处理协议就绪 |
-| NFR-5.4 | 同步冲突解决遵循 provenance 时间序，后写不覆盖、走 Reconcile |
+| NFR-5.4 | 同步冲突合并语义以 design/08 为准：append-only 数据 CRDT 收敛（chunks=G-Set、积分池=PN-Counter、图谱=content-hash），真矛盾不选边、走 Reconcile flag_conflict 显性化；删除走 Tombstone OR-Set |
 
 ## 5. 验收标准
 

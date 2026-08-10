@@ -18,6 +18,7 @@
 | [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
 | [06-接入与安装体验](design/06-接入与安装体验.md) | 三层适配架构（daemon/MCP/plugin）、profile 凭证身份模型（login/link）、宿主能力矩阵、3 分钟安装流程、断开卸载语义 |
 | [07-管理控制台](design/07-管理控制台.md) | MnemoSeed Console：profiles 管理、记忆浏览、图谱可视化、单条记忆全档案、梦境面板与 token 用量、模型路由设置 |
+| [08-多端同步与冲突合并](design/08-多端同步与冲突合并.md) | CRDT/CALM/HLC 理论基座：四类数据的合并机制盘点、反熵同步协议、巩固租约、Tombstone 删除 |
 
 ### 开发任务 PRD（prd/）
 
