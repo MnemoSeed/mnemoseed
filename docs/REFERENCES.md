@@ -97,6 +97,14 @@
 | R46 | Pearce, J. M., & Hall, G. (1980). A model for Pavlovian learning. *Psychological Review*, 87(6), 532–552. | 学习率 ∝ 不确定性（偏好 Kalman 式更新） | ⚠️ 高置信经典，待抽查 |
 | R47 | Quoidbach, J., Gilbert, D. T., & Wilson, T. D. (2013). The end of history illusion. *Science*, 339(6115), 96–98. | 偏好漂移叙事（人低估自己未来的变化） | ⚠️ 待抽查 |
 
+## 梦境预算与系统动力学（动态 Delta 预算新增）
+
+| # | 引用 | 用于 | 状态 |
+|---|---|---|---|
+| R48 | Borbély, A. A. (1982). A two process model of sleep regulation. *Human Neurobiology*, 1(3), 195–204. | 动态预算动机：积分池 = Process S 睡眠压力，梦长随睡眠债伸缩而非固定 | ⚠️ 高置信经典；原刊 Human Neurobiology 未被 Crossref 收录（已停刊），PubMed PMID 7185792 可查 |
+| R49 | Little, J. D. C. (1961). A proof for the queuing formula: L = λW. *Operations Research*, 9(3), 383–387. DOI: 10.1287/opre.9.3.383 | 稳态校验：长期到达率 ≤ 清算能力，否则任何有限预算都积压 | ✅ Crossref 命中（DOI 验证 2026-08-10） |
+| R50 | Dement, W. (1960). The effect of dream deprivation. *Science*, 131(3415), 1705–1707. | REM rebound：剥夺后超量补偿——积压期预算扩张的生理学对应 | ⚠️ 高置信经典，DOI 10.1126/science.131.3415.1705 待抽查 |
+
 ---
 
 *维护规则：任何文档新增理论引用时必须同步登记本表并标注核实状态；标注 ⚠️ 的条目在后续迭代中逐条抽查转正或替换。*
