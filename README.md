@@ -66,8 +66,8 @@ To spin up the core computation server locally:
 
 ```bash
 # Clone the Core Engine
-git clone https://github.com/MnemoSeed/core.git
-cd core
+git clone https://github.com/MnemoSeed/mnemoseed.git
+cd mnemoseed
 
 # Install dependencies (uv manages the locked environment)
 uv sync
