@@ -13,13 +13,33 @@ the reflect -> merge -> commit chain off the ingest hot path.
 
 from __future__ import annotations
 
+from mnemoseed.dream.delta import (
+    DEFAULT_DELTA_BUDGET_TOKENS,
+    DeltaPacker,
+    DeltaReport,
+    DeltaRequest,
+    GraphDigest,
+    NullGraphDigest,
+    PriceTable,
+    estimate_cost_usd,
+    estimate_tokens,
+)
 from mnemoseed.dream.merge import (
     MergeOutcome,
     Merger,
     MergeSummary,
 )
 from mnemoseed.dream.pipeline import DreamPipeline
-from mnemoseed.dream.prompts import PROMPT_VERSION, ChunkBlock, ReflectPrompt, build_reflect_prompt
+from mnemoseed.dream.prompts import (
+    PROMPT_VERSION,
+    ChunkBlock,
+    ReflectPrompt,
+    build_cache_prefix,
+    build_reflect_prompt,
+    ordered_chunks,
+    render_chunk_block,
+    render_chunk_blocks,
+)
 from mnemoseed.dream.reflect import (
     STRIP_TOKENS,
     ReflectedTriple,
@@ -51,16 +71,23 @@ from mnemoseed.dream.trigger import (
 )
 
 __all__ = [
+    "DEFAULT_DELTA_BUDGET_TOKENS",
     "PROMPT_VERSION",
     "ChunkBlock",
+    "DeltaPacker",
+    "DeltaReport",
+    "DeltaRequest",
     "DreamPipeline",
     "DreamState",
     "DreamTrigger",
     "FileSnapshotter",
+    "GraphDigest",
     "MergeOutcome",
     "MergeSummary",
     "Merger",
+    "NullGraphDigest",
     "NullSnapshotter",
+    "PriceTable",
     "ReflectLLM",
     "ReflectOrchestrator",
     "ReflectOutcome",
@@ -76,9 +103,15 @@ __all__ = [
     "Snapshotter",
     "StubReflectLLM",
     "TriggerStatus",
+    "build_cache_prefix",
     "build_reflect_prompt",
+    "estimate_cost_usd",
+    "estimate_tokens",
     "load_snapshot_file",
+    "ordered_chunks",
     "recover_snapshots",
+    "render_chunk_block",
+    "render_chunk_blocks",
     "resume_boundary",
     "result_from_payload",
     "write_snapshot_file",

@@ -14,6 +14,14 @@ rules. The deterministic StubReflectLLM implements the same de-biasing contract
 offline, so the whole pipeline is exercisable without any network (the M1
 manual-first phase and tests). No graph writes happen here (T4 owns them).
 
+The reflect call goes through a DeltaPacker (T5, FR-2.5): the stable cache
+prefix goes to the system segment, the per-dream delta goes to the user
+segment, and overflow chunks are deferred (reported, never an error). The ids
+the delta packed (``consumed_chunk_ids``) ride on the journaled result as the
+safe-clear allow-list, so a committed dream purges exactly the rows the model
+saw and overflow rows survive for a later dream. Per-dream cost telemetry rides
+out on ReflectOutcome.report (NFR-2.2 substrate).
+
 Negation rule (g2, engine invariant): each mention carries a polarity
 ("positive" / "negative") derived from negation markers on the matched span
 (e.g. "I never use vim"). AC-3 folding groups mentions by (subject, predicate,
@@ -38,9 +46,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from mnemoseed.config import CONFIG_DIR
+from mnemoseed.dream.delta import DeltaPacker, DeltaReport
 from mnemoseed.dream.prompts import (
     ChunkBlock,
-    build_reflect_prompt,
     origin_of,
     parse_chunk_blocks,
 )
@@ -92,6 +100,8 @@ class ReflectionResult:
     prompt_version: str
     triples: tuple[ReflectedTriple, ...]
     conflicts: tuple[tuple[str, str, str], ...] = ()  # dropped contradictory-polarity keys
+    overflow_chunk_ids: tuple[str, ...] = ()  # T5: chunks deferred beyond the delta budget.
+    consumed_chunk_ids: tuple[str, ...] = ()  # T5: delta ids the model saw; the safe-clear allow-list.
 
 
 @dataclass(frozen=True)
@@ -102,6 +112,7 @@ class ReflectOutcome:
     result: ReflectionResult | None = None
     error: str | None = None
     skipped: bool = False  # marker gate: reflect had already completed
+    report: DeltaReport | None = None  # T5 cost telemetry (NFR-2.2 substrate)
 
 
 # ---------------------------------------------------------------- the LLM seam
@@ -323,6 +334,7 @@ class ReflectOrchestrator:
         sleep: Callable[[float], None] = time.sleep,
         max_retries: int = 3,
         backoff_base: float = 1.0,
+        packer: DeltaPacker | None = None,
     ) -> None:
         self._llm = llm
         self._directory = directory if directory is not None else CONFIG_DIR / "dreams"
@@ -330,6 +342,7 @@ class ReflectOrchestrator:
         self._sleep = sleep
         self._max_retries = max_retries
         self._backoff_base = backoff_base
+        self._packer = packer if packer is not None else DeltaPacker()
 
     def reflect(self, snapshot: Snapshot) -> ReflectOutcome:
         """Run one reflect pass. The marker gate makes a completed reflect a
@@ -337,16 +350,41 @@ class ReflectOrchestrator:
         if SnapshotPhase.REFLECT_DONE.value in snapshot.phases:
             return ReflectOutcome(ok=True, result=None, skipped=True)
 
-        prompt = build_reflect_prompt(snapshot)
+        request = self._packer.pack(snapshot)
+        report = self._packer.report(request)
+        if not request.delta and request.overflow_chunk_ids:
+            # D1 (FR-2.5, never-drop invariant): every chunk is over the delta
+            # budget, so there is nothing worth a cloud call. Defer instead of
+            # reflecting an empty delta: keep the snapshot journaled at the
+            # reflect boundary so a later dream (larger budget / manual run) can
+            # pick the overflow chunks up before any commit can purge them.
+            logger.warning(
+                "reflect deferred for %s: all %d chunks exceed the delta budget; "
+                "snapshot retained at the reflect boundary",
+                snapshot.profile_id,
+                len(request.overflow_chunk_ids),
+            )
+            return ReflectOutcome(
+                ok=False,
+                result=None,
+                error="all chunks exceed the delta budget; snapshot retained for a later dream",
+                report=report,
+            )
         result: ReflectionResult | None = None
         last_error = ""
         for attempt in range(self._max_retries + 1):
             try:
-                text = self._llm.chat(system=prompt.system, user=prompt.user)
+                text = self._llm.chat(system=request.cache_prefix, user=request.delta)
                 payload = json.loads(text)
                 if not isinstance(payload, list):
                     raise ValueError("reflect output is not a JSON array")
-                result = self._assemble(snapshot, prompt.version, payload)
+                result = self._assemble(
+                    snapshot,
+                    request.version,
+                    payload,
+                    overflow_chunk_ids=request.overflow_chunk_ids,
+                    consumed_chunk_ids=request.packed_chunk_ids,
+                )
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise into the caller
                 last_error = str(exc)
@@ -357,7 +395,7 @@ class ReflectOrchestrator:
                         self._max_retries,
                         last_error,
                     )
-                    return ReflectOutcome(ok=False, result=None, error=last_error)
+                    return ReflectOutcome(ok=False, result=None, error=last_error, report=report)
                 self._sleep(self._backoff(attempt))
 
         assert result is not None
@@ -367,8 +405,8 @@ class ReflectOrchestrator:
             logger.warning(
                 "reflect done but REFLECT_DONE persist failed for %s: %s", snapshot.profile_id, exc
             )
-            return ReflectOutcome(ok=False, result=result, error=f"persist failed: {exc}")
-        return ReflectOutcome(ok=True, result=result)
+            return ReflectOutcome(ok=False, result=result, error=f"persist failed: {exc}", report=report)
+        return ReflectOutcome(ok=True, result=result, report=report)
 
     def _backoff(self, attempt: int) -> float:
         """Exponential schedule: base, 2*base, 4*base across retries 1..3."""
@@ -387,14 +425,28 @@ class ReflectOrchestrator:
 
     # ------------------------------------------------------------ contract assembly
 
-    def _assemble(self, snapshot: Snapshot, version: str, payload: list[dict[str, Any]]) -> ReflectionResult:
+    def _assemble(
+        self,
+        snapshot: Snapshot,
+        version: str,
+        payload: list[dict[str, Any]],
+        *,
+        overflow_chunk_ids: tuple[str, ...],
+        consumed_chunk_ids: tuple[str, ...],
+    ) -> ReflectionResult:
         origin_by_chunk = {c.chunk_id: origin_of(c) for c in snapshot.chunks}
         mentions: list[ReflectedTriple] = []
         for item in payload:
             triple = _parse_triple(snapshot, item, origin_by_chunk)
             if triple is not None:
                 mentions.append(triple)
-        return _fold_triples(snapshot, version, mentions)
+        return _fold_triples(
+            snapshot,
+            version,
+            mentions,
+            overflow_chunk_ids=overflow_chunk_ids,
+            consumed_chunk_ids=consumed_chunk_ids,
+        )
 
 
 def _parse_triple(
@@ -438,7 +490,14 @@ def _parse_triple(
     )
 
 
-def _fold_triples(snapshot: Snapshot, version: str, mentions: list[ReflectedTriple]) -> ReflectionResult:
+def _fold_triples(
+    snapshot: Snapshot,
+    version: str,
+    mentions: list[ReflectedTriple],
+    *,
+    overflow_chunk_ids: tuple[str, ...] = (),
+    consumed_chunk_ids: tuple[str, ...] = (),
+) -> ReflectionResult:
     """AC-3 dedup fold: repeated mentions of the same canonical triple collapse
     into one entry with reinforced confidence, merged provenance, and the most
     restrictive route (tier-3 evidence always dominates).
@@ -505,6 +564,8 @@ def _fold_triples(snapshot: Snapshot, version: str, mentions: list[ReflectedTrip
         prompt_version=version,
         triples=tuple(folded),
         conflicts=tuple(conflicts),
+        overflow_chunk_ids=overflow_chunk_ids,
+        consumed_chunk_ids=consumed_chunk_ids,
     )
 
 
@@ -527,6 +588,8 @@ def _result_to_payload(result: ReflectionResult) -> dict[str, Any]:
         "turn_range": _range(result.turn_range),
         "prompt_version": result.prompt_version,
         "conflicts": [[s, p, o] for s, p, o in result.conflicts],
+        "delta_overflow": list(result.overflow_chunk_ids),
+        "consumed_chunk_ids": list(result.consumed_chunk_ids),
         "triples": [
             {
                 "subject": t.subject,
@@ -558,6 +621,10 @@ def result_from_payload(payload: dict[str, Any] | None) -> ReflectionResult | No
         conflicts = tuple(
             (str(c[0]), str(c[1]), str(c[2])) for c in conflicts_raw if isinstance(c, list) and len(c) == 3
         )
+        overflow_raw = payload.get("delta_overflow") or []
+        overflow_chunk_ids = tuple(str(c) for c in overflow_raw if isinstance(c, str))
+        consumed_raw = payload.get("consumed_chunk_ids") or []
+        consumed_chunk_ids = tuple(str(c) for c in consumed_raw if isinstance(c, str))
         return ReflectionResult(
             snapshot_id=str(payload["snapshot_id"]),
             profile_id=str(payload["profile_id"]),
@@ -565,6 +632,8 @@ def result_from_payload(payload: dict[str, Any] | None) -> ReflectionResult | No
             prompt_version=str(payload.get("prompt_version", "")),
             triples=triples,
             conflicts=conflicts,
+            overflow_chunk_ids=overflow_chunk_ids,
+            consumed_chunk_ids=consumed_chunk_ids,
         )
     except (KeyError, TypeError, ValueError):
         logger.warning("ignoring unrecoverable reflect_result payload")

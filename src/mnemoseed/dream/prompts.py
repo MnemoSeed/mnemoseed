@@ -14,6 +14,7 @@ StubReflectLLM parses, so the prompt and the harness stub can never drift apart.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from mnemoseed.dream.snapshot import Snapshot, SnapshotChunk
@@ -94,15 +95,47 @@ def build_reflect_prompt(snapshot: Snapshot) -> ReflectPrompt:
 
 
 def _render_chunk_blocks(snapshot: Snapshot) -> str:
-    ordered = sorted(
-        snapshot.chunks,
-        key=lambda c: (
-            c.turn_start if c.turn_start is not None else -1,
-            c.turn_end if c.turn_end is not None else -1,
-            c.chunk_id,
-        ),
+    return render_chunk_blocks(snapshot.chunks)
+
+
+def ordered_chunks(chunks: Iterable[SnapshotChunk]) -> list[SnapshotChunk]:
+    """Deterministic chunk order shared by the full render and delta packing:
+    (turn_start, turn_end, chunk_id), never capture order."""
+    return sorted(chunks, key=_chunk_sort_key)
+
+
+def render_chunk_block(chunk: SnapshotChunk) -> str:
+    """Render the chunk-block grammar for one chunk. The delta packer needs the
+    per-chunk text to count its tokens before deciding whether it fits."""
+    return _render_block(chunk)
+
+
+def render_chunk_blocks(chunks: Iterable[SnapshotChunk]) -> str:
+    """Render the deterministic chunk-block grammar for a subset of chunks."""
+    return "".join(_render_block(c) for c in ordered_chunks(chunks))
+
+
+def build_cache_prefix(graph_digest: str = "") -> str:
+    """The byte-stable prompt-cache prefix: system template plus the user header.
+
+    ``graph_digest`` (a profile-stable string supplied by the delta packer's
+    optional digest provider) renders as a labeled section; an empty digest
+    renders no section, so the prefix is a fixed constant across dreams of a
+    profile. Per-dream data (timestamps, snapshot ids, chunk ids) must never
+    appear here — it lives in the delta segment.
+    """
+    prefix = _SYSTEM_TEMPLATE + "\n\n" + _USER_HEADER
+    if graph_digest:
+        prefix += f"\nKnown graph digest:\n{graph_digest}\n"
+    return prefix
+
+
+def _chunk_sort_key(chunk: SnapshotChunk) -> tuple[int, int, str]:
+    return (
+        chunk.turn_start if chunk.turn_start is not None else -1,
+        chunk.turn_end if chunk.turn_end is not None else -1,
+        chunk.chunk_id,
     )
-    return "".join(_render_block(c) for c in ordered)
 
 
 def _render_block(chunk: SnapshotChunk) -> str:

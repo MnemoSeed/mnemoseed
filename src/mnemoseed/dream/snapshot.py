@@ -21,7 +21,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -149,9 +149,13 @@ class FileSnapshotter:
 
     The constructor stores a live VectorStore/MetaStore reference so later
     phases can write back; recovery/adopt call only read-side paths. The purge
-    seam is session-scoped (VectorStore.purge_range), so a profile snapshot
-    spanning several sessions clears exactly those sessions, only inside the
-    snapshot's turn range, and only after its merge committed.
+    seam is consumed-ids-scoped: only the chunk rows the reflect pass actually
+    handed the model (the journaled ``consumed_chunk_ids``) are cleared via the
+    per-id ``VectorStore.delete_chunk``, so delta-overflow rows survive for a
+    later dream. A snapshot whose journal carries no allow-list (pre-delta
+    journals, direct/test calls) falls back to the legacy per-session turn-range
+    purge, which is equivalent for those dreams (no truncation meant every range
+    row was consumed). The seam still only fires after its merge committed.
     """
 
     def __init__(
@@ -245,8 +249,26 @@ class FileSnapshotter:
 
     # ------------------------------------------------------------ safe clear
 
-    def purge_snapshot(self, profile_id: str, turn_range: TurnRange) -> int:
-        """Safe-clear: remove exactly the snapshot's range from its sessions.
+    def purge_snapshot(
+        self,
+        profile_id: str,
+        turn_range: TurnRange,
+        *,
+        consumed_chunk_ids: Sequence[str] | None = None,
+    ) -> int:
+        """Safe-clear: remove exactly the rows the model consumed this dream.
+
+        Granularity is consumed-ids-scoped, not turn-range-scoped (T5 / verifier
+        residual): the reflect pass journaled the ids of the delta the model
+        actually saw (``consumed_chunk_ids``), and only those rows are deleted.
+        Chunks the model never saw (delta overflow) stay in the store for a
+        later dream. ``consumed_chunk_ids`` may be passed explicitly (the caller
+        owns the allow-list); otherwise the allow-list is read back from the
+        snapshot's journal on disk, which is the authoritative copy the reflect
+        pass persisted. A snapshot with no journaled allow-list (pre-delta
+        journals, direct/test calls) falls back to the legacy full-range purge
+        per session, which for those dreams is equivalent: no truncation means
+        every in-range row was consumed.
 
         Guarded so it only advances after merge-commit: the snapshot must be
         the one adopted in this process for ``profile_id``, with a matching
@@ -254,17 +276,53 @@ class FileSnapshotter:
         merge-done on disk *before* the store purge, so a crash mid-purge can
         never re-execute a committed merge (NFR-2.3 idempotency); leftover
         source rows are stale but never re-written. Returns the number of rows
-        purged across sessions.
+        purged.
         """
         snap = self._active.get(profile_id)
         if snap is None or snap.turn_range != turn_range:
             return 0
         if SnapshotPhase.MERGE_DONE.value in snap.phases:
             return 0
+        consumed = self._consumed_ids(snap) if consumed_chunk_ids is None else tuple(consumed_chunk_ids)
         merged = snap.with_phase(SnapshotPhase.MERGE_DONE.value)
         write_snapshot_file(self._directory, merged)
         self._active[profile_id] = merged
-        sessions = sorted({c.session_id for c in snap.chunks if c.session_id is not None})
+        if consumed is not None:
+            return self._purge_consumed(merged, consumed)
+        return self._purge_range_legacy(merged, turn_range)
+
+    def _consumed_ids(self, snap: Snapshot) -> tuple[str, ...] | None:
+        """The safe-clear allow-list from the journal.
+
+        A valid ``consumed_chunk_ids`` list means a delta layer ran, so only
+        those packed rows may be purged; None means pre-delta / no reflection
+        (fall back to the legacy full-range purge). The on-disk journal is the
+        authoritative source because a *fresh* snapshot keeps ``reflect_result``
+        as None in ``_active`` while the reflect pass persists the real payload
+        to disk; the recovered snapshot carries the same payload already.
+        """
+        payload: dict[str, Any] | None = snap.reflect_result
+        on_disk = load_snapshot_file(self._directory / f"{snap.snapshot_id}.json")
+        if on_disk is not None:
+            payload = on_disk.reflect_result or payload
+        raw = payload.get("consumed_chunk_ids") if payload else None
+        if isinstance(raw, list) and all(isinstance(c, str) and c for c in raw):
+            return tuple(str(c) for c in raw)
+        return None
+
+    def _purge_consumed(self, snapshot: Snapshot, consumed_chunk_ids: Sequence[str]) -> int:
+        """Per-id delete of exactly the consumed rows (overflow rows survive)."""
+        allowed = frozenset(consumed_chunk_ids)
+        removed = 0
+        for chunk in snapshot.chunks:
+            if chunk.chunk_id in allowed:
+                self._store.delete_chunk(chunk.chunk_id)
+                removed += 1
+        return removed
+
+    def _purge_range_legacy(self, snapshot: Snapshot, turn_range: TurnRange) -> int:
+        """Legacy full-range purge for snapshots with no journaled allow-list."""
+        sessions = sorted({c.session_id for c in snapshot.chunks if c.session_id is not None})
         removed = 0
         for session in sessions:
             removed += self._store.purge_range(session, turn_range.start, turn_range.end)

@@ -111,6 +111,22 @@ class DreamPipeline:
         self._merge(snapshot, result)
 
     def _merge(self, snapshot: Snapshot, result: ReflectionResult) -> None:
+        if not result.triples and result.overflow_chunk_ids:
+            # Engine-side insurance (D1, FR-2.5 never-drop invariant): the
+            # result is empty BECAUSE the delta was truncated, so committing it
+            # would fire the safe-clear and purge source chunks the model never
+            # saw. Defer instead: the snapshot stays journaled and a later dream
+            # (larger budget / manual run) can pick the overflow up. A genuinely
+            # empty result with NO overflow (all-noise session) still merges and
+            # purges normally.
+            logger.warning(
+                "merge deferred for %s: reflect covered a truncated delta with %d "
+                "overflow chunks and produced no triples; snapshot stays journaled "
+                "so a later dream can pick the overflow up",
+                snapshot.profile_id,
+                len(result.overflow_chunk_ids),
+            )
+            return
         outcome = self._merger.merge(snapshot, result)
         if not outcome.ok:
             logger.warning(
