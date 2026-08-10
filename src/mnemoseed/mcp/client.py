@@ -4,22 +4,25 @@ The MCP server is a thin transport: each tool resolves configuration, forwards
 its JSON-schema-validated arguments to the matching daemon /memory endpoint,
 and maps transport-level failure (connect refused, timeout, DNS, non-2xx) into
 typed errors that surface to the MCP client as tool errors instead of hangs.
-Configuration: ``MNEMOSEED_BASE_URL`` (default http://localhost:7788) and
-``MNEMOSEED_PROFILE_ID`` (required per call or via env).
+Configuration: ``MNEMOSEED_BASE_URL`` (default http://localhost:7788),
+``MNEMOSEED_PROFILE_ID`` (required per call or via env) and
+``MNEMOSEED_MCP_TIMEOUT_SECONDS`` (default 30.0) for the per-request timeout.
 """
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any, cast
 
 import httpx
 
 DEFAULT_BASE_URL = "http://localhost:7788"
-REQUEST_TIMEOUT_SECONDS = 3.0
+REQUEST_TIMEOUT_SECONDS = 30.0
 
 ENV_BASE_URL = "MNEMOSEED_BASE_URL"
 ENV_PROFILE_ID = "MNEMOSEED_PROFILE_ID"
+ENV_TIMEOUT_SECONDS = "MNEMOSEED_MCP_TIMEOUT_SECONDS"
 
 
 class MemoryDaemonError(Exception):
@@ -53,12 +56,30 @@ def resolve_profile_id(explicit: str | None) -> str:
     raise ProfileRequiredError(f"no profile_id given and {ENV_PROFILE_ID} is not set")
 
 
+def resolve_timeout_seconds(explicit: float | None = None) -> float:
+    """Request timeout resolution: explicit arg, env, built-in default.
+
+    Only a positive finite timeout is honored; a missing/blank/non-numeric/
+    non-positive value falls back to ``REQUEST_TIMEOUT_SECONDS``.
+    """
+    if explicit is None:
+        raw = os.environ.get(ENV_TIMEOUT_SECONDS)
+        if raw is not None:
+            try:
+                explicit = float(raw)
+            except ValueError:
+                explicit = None
+    if explicit is not None and explicit > 0 and math.isfinite(explicit):
+        return explicit
+    return REQUEST_TIMEOUT_SECONDS
+
+
 class MemoryDaemonClient:
     """Thin JSON client for the daemon /memory endpoints (bounded timeouts)."""
 
-    def __init__(self, base_url: str, timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
+    def __init__(self, base_url: str, timeout: float | None = None) -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        self.timeout = resolve_timeout_seconds(timeout)
 
     def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:

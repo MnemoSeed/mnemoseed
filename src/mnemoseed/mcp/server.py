@@ -109,7 +109,9 @@ def build_server() -> MCPServer:
         name="memory.audit",
         description="Read the provenance and version history of one chunk or node.",
     )
-    async def memory_audit(node_id: str = "", chunk_id: str = "", profile_id: str = "") -> str:
+    async def memory_audit(
+        node_id: str | None = None, chunk_id: str | None = None, profile_id: str = ""
+    ) -> str:
         """Audit a target's provenance, version chain, and relevant audit rows."""
         return await _dispatch(
             "/memory/audit",
@@ -120,7 +122,7 @@ def build_server() -> MCPServer:
         name="memory.timeline",
         description="Replay a node's version timeline, or list the profile's recent activity.",
     )
-    async def memory_timeline(node_id: str = "", profile_id: str = "") -> str:
+    async def memory_timeline(node_id: str | None = None, profile_id: str = "") -> str:
         """Return one node's versions, or the profile-wide recent-first events."""
         return await _dispatch("/memory/timeline", {"node_id": node_id, "profile_id": profile_id})
 
@@ -143,7 +145,10 @@ def build_server() -> MCPServer:
         ),
     )
     async def memory_forget_this(
-        chunk_id: str = "", node_id: str = "", entity: str = "", profile_id: str = ""
+        chunk_id: str | None = None,
+        node_id: str | None = None,
+        entity: str | None = None,
+        profile_id: str = "",
     ) -> str:
         """Remove memory by chunk_id, node_id, or entity; audit exactly what went."""
         return await _dispatch(

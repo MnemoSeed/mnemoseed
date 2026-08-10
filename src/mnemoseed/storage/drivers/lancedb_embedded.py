@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -95,6 +96,12 @@ class LanceDbEmbeddedStore:
         self.table_name = table_name
         self._uri = str(os.path.expanduser(str(uri))) if uri is not None else str(_DEFAULT_URI)
         self._db = connect(self._uri)
+        # One store-level lock serializes every mutation. LanceDB serializes
+        # writers internally but concurrent commits still collide on the
+        # latest_version_hint.json file (Windows: os error 5) and drain lance's
+        # single background loop; a single write lock turns that collision storm
+        # into an ordered queue. Reads are snapshot-based and safe lock-free.
+        self._write_lock = threading.Lock()
         self._ensure_table()
 
     def capabilities(self) -> frozenset[Capability]:
@@ -108,19 +115,24 @@ class LanceDbEmbeddedStore:
         dense: Sequence[float],
         sparse: SparseVector | None = None,
     ) -> None:
-        self._table.merge_insert("chunk_id").when_matched_update_all().when_not_matched_insert_all().execute(
-            [self._to_row(chunk, dense, sparse)]
-        )
+        with self._write_lock:
+            self._table.merge_insert(
+                "chunk_id"
+            ).when_matched_update_all().when_not_matched_insert_all().execute(
+                [self._to_row(chunk, dense, sparse)]
+            )
 
     def delete_chunk(self, chunk_id: str) -> None:
-        self._table.delete(f"chunk_id = {_escape(chunk_id)}")
+        with self._write_lock:
+            self._table.delete(f"chunk_id = {_escape(chunk_id)}")
 
     def mark_consolidated(self, chunk_ids: Sequence[str]) -> None:
         ids = list(chunk_ids)
         if not ids:
             return
         clause = ", ".join(_escape(cid) for cid in ids)
-        self._table.update(where=f"chunk_id IN ({clause})", values={"consolidated": True})
+        with self._write_lock:
+            self._table.update(where=f"chunk_id IN ({clause})", values={"consolidated": True})
 
     def purge_range(self, session_id: str, turn_start: int, turn_end: int) -> int:
         where = (
@@ -128,8 +140,9 @@ class LanceDbEmbeddedStore:
             "AND turn_start IS NOT NULL AND turn_end IS NOT NULL "
             f"AND turn_start <= {_escape(turn_end)} AND turn_end >= {_escape(turn_start)}"
         )
-        count = int(self._table.count_rows(filter=where))
-        self._table.delete(where)
+        with self._write_lock:
+            count = int(self._table.count_rows(filter=where))
+            self._table.delete(where)
         return count
 
     def update_weights(self, updates: Sequence[WeightUpdate]) -> None:
@@ -142,7 +155,8 @@ class LanceDbEmbeddedStore:
             if update.reinforce_count is not None:
                 values["reinforce_count"] = int(update.reinforce_count)
             if values:
-                self._table.update(where=f"chunk_id = {_escape(update.chunk_id)}", values=values)
+                with self._write_lock:
+                    self._table.update(where=f"chunk_id = {_escape(update.chunk_id)}", values=values)
 
     def update_chunk_state(
         self,
@@ -169,7 +183,8 @@ class LanceDbEmbeddedStore:
         if needs_reconcile is not None:
             updates_sql["needs_reconcile"] = "true" if needs_reconcile else "false"
         if updates_sql:
-            self._table.update(where=where, values_sql=updates_sql)
+            with self._write_lock:
+                self._table.update(where=where, values_sql=updates_sql)
 
     # ------------------------------------------------------------- reads
 

@@ -6,6 +6,8 @@ frozen-commit snapshots, consolidation, purge, weight updates, pagination.
 
 import asyncio
 import math
+import threading
+import time
 
 import pytest
 
@@ -557,3 +559,84 @@ def test_list_chunks_respects_filter_and_profile_isolation(store, embedder):
 
     bob_only = store.list_chunks(ChunkFilter(profile_id="bob"), Page(limit=10))
     assert [chunk.chunk_id for chunk in bob_only.items] == ["b1"]
+
+
+# ---------------------------------------------------------------- concurrent writes
+
+
+_CONCURRENT_WORKERS = 8
+_CONCURRENT_OPS = 10
+_OP_LATENCY_BUDGET_SECONDS = 4.0
+_WRITE_STORM_BUDGET_SECONDS = 30.0
+
+
+def test_concurrent_mixed_writes_exact_counts_no_errors(tmp_path):
+    """One shared store, 8 threads x 10 mixed ops (upsert + read + weight/state
+    updates) must hold exact final counts, zero exceptions, and no multi-second
+    per-op stall. Count/exception assertions alone cannot trip the defect:
+    LanceDB falls back to directory listing when concurrent commits collide on
+    latest_version_hint.json, so the data stays exact -- but the collisions
+    drain lance's single background loop and turn individual ops into
+    multi-second stalls, so asserting the tail per-op latency is what catches
+    the un-serialized write path."""
+    store = LanceDbEmbeddedStore(uri=tmp_path / "chunks.lance", dimensions=_DIM)
+    embedder = SyntheticEmbedder(dimension=_DIM)
+    errors: list[Exception] = []
+    finished: list[int] = []
+    max_op: list[float] = []
+    guard = threading.Lock()
+
+    def worker(w: int) -> None:
+        local_max = 0.0
+        try:
+            for i in range(_CONCURRENT_OPS):
+                chunk_id = f"cw{w:02d}-{i:03d}"
+                text = f"concurrent worker {w} op {i}"
+                start = time.monotonic()
+                result = embedder.embed(text)
+                store.upsert_chunk(_make(chunk_id, text), result.dense, result.sparse)
+                if i % 4 == 0:
+                    seen = store.get_chunk(chunk_id)
+                    if seen is None:
+                        raise AssertionError(f"worker {w} did not read back its own write {chunk_id}")
+                store.update_chunk_state([chunk_id], hit_increment=1)
+                store.update_weights([WeightUpdate(chunk_id=chunk_id, decay_weight=0.5)])
+                local_max = max(local_max, time.monotonic() - start)
+            with guard:
+                max_op.append(local_max)
+                finished.append(w)
+        except Exception as exc:  # pragma: no cover - failure path
+            with guard:
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(w,), daemon=True, name=f"lance-write-{w}")
+        for w in range(_CONCURRENT_WORKERS)
+    ]
+    # One shared deadline across every join guards against a wedged store; the
+    # discriminating assert below is the per-op tail latency, not the total.
+    started = time.monotonic()
+    deadline = started + _WRITE_STORM_BUDGET_SECONDS
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    elapsed = time.monotonic() - started
+    stragglers = [w for w, thread in enumerate(threads) if thread.is_alive()]
+
+    assert errors == []
+    assert stragglers == [], (
+        f"workers {stragglers} still writing after {elapsed:.1f}s (budget {_WRITE_STORM_BUDGET_SECONDS}s)"
+    )
+    assert sorted(finished) == list(range(_CONCURRENT_WORKERS))
+    slowest = max(max_op)
+    assert slowest <= _OP_LATENCY_BUDGET_SECONDS, (
+        f"slowest mixed op took {slowest * 1000:.0f}ms (budget {_OP_LATENCY_BUDGET_SECONDS}s)"
+    )
+    total = store.list_chunks(ChunkFilter(profile_id="alice"), Page(limit=1_000)).total
+    assert total == _CONCURRENT_WORKERS * _CONCURRENT_OPS
+    for w in range(_CONCURRENT_WORKERS):
+        row = _raw_row(store, f"cw{w:02d}-000")
+        assert row["hit_count"] == 1
+        assert row["decay_weight"] == pytest.approx(0.5)
+    asyncio.run(store.close())

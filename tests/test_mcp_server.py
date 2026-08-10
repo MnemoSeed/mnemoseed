@@ -21,11 +21,14 @@ from pathlib import Path
 import pytest
 
 from mnemoseed.mcp.client import (
+    ENV_TIMEOUT_SECONDS,
+    REQUEST_TIMEOUT_SECONDS,
     MemoryDaemonClient,
     MemoryDaemonUnreachableError,
     ProfileRequiredError,
     resolve_base_url,
     resolve_profile_id,
+    resolve_timeout_seconds,
 )
 from mnemoseed.mcp.server import INSTRUCTIONS, build_server
 
@@ -224,6 +227,36 @@ def test_resolve_base_url_default_then_env(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("MNEMOSEED_BASE_URL", "http://example.test:9999")
     assert resolve_base_url(None) == "http://example.test:9999"
     assert resolve_base_url("http://override:1") == "http://override:1"
+
+
+def test_resolve_timeout_default_is_30_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENV_TIMEOUT_SECONDS, raising=False)
+    assert REQUEST_TIMEOUT_SECONDS == 30.0
+    assert resolve_timeout_seconds() == 30.0
+    assert resolve_timeout_seconds(None) == 30.0
+
+
+def test_resolve_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_TIMEOUT_SECONDS, "12.5")
+    assert resolve_timeout_seconds() == pytest.approx(12.5)
+    monkeypatch.setenv(ENV_TIMEOUT_SECONDS, "0.25")
+    assert resolve_timeout_seconds() == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["abc", "3,0", "12s", "-5", "0", "   ", "", "nan", "inf"],
+)
+def test_resolve_timeout_invalid_env_falls_back(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv(ENV_TIMEOUT_SECONDS, value)
+    assert resolve_timeout_seconds() == 30.0
+
+
+def test_resolve_timeout_explicit_arg_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_TIMEOUT_SECONDS, "12.5")
+    assert resolve_timeout_seconds(5.0) == 5.0
+    assert resolve_timeout_seconds(0.0) == 30.0
+    assert resolve_timeout_seconds(-1.0) == 30.0
 
 
 def test_client_unreachable_maps_connection_error() -> None:
