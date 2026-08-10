@@ -101,7 +101,7 @@
 | profile_id | string | profile 命名空间（D5），检索强制过滤 |
 | session_id / turn_start / turn_end | string / int / int | 结构化 turn 边界（快照界定、安全清空、积分池事件都依赖，可空不可缺席）；provenance.source_ref 只作人类可读串 |
 | cognitive_tier | int | 1 / 3 |
-| model_id / anima_id | string | 写入时模型与在任灵魂 |
+| model_id / anima_id | string | 写入时模型与在任灵魂（anima_id 为进阶模块字段，可空不可缺席） |
 | cues | struct | `project / host* / task* / tools_used[] / time_bucket / emotion_valence / entities[]`（* = 编码情境预留，可空不可缺席） |
 | provenance | struct | `asserted_by / source / source_ref / confidence / asserted_at / history[]`（append-only） |
 | score | struct | `emotion / novelty / causal / total` |
