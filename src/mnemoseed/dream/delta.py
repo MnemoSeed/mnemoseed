@@ -3,7 +3,7 @@
 The cost-deadlock layer (design/02 section 6): a cloud dream call sends only
 the per-dream increment (the delta), never the whole snapshot. Chunks are
 packed whole (never split mid-text) in deterministic order until the delta
-token budget (default 5000); chunks that do not fit are reported as overflow so
+token budget (default 10000); chunks that do not fit are reported as overflow so
 a later dream can pick them up — overflow is reported, never an error. The
 stable part of the request (system instruction + user header + optional graph
 digest) is the cache-resident prefix a provider prompt cache keys on and never
@@ -20,13 +20,14 @@ Deterministic across runs and platforms (code point counts, never code units).
 Worst-case bias is on entropy-dense ASCII (hex, base64, URL-dense paths), where
 a byte-level BPE can emit up to ~4x the estimator's count (~0.25x the true token
 count); T6 must calibrate the budget against provider-reported usage before
-relying on the 5k cap as a hard cost bound.
+relying on the 10k cap as a hard cost bound.
 
 Cost telemetry is the NFR-2.2 substrate: DeltaReport carries per-dream token
 counts and an estimated USD cost from a configurable per-role price table
 (input / cache-read / output USD per million tokens). Defaults follow design/02
-section 6's short-increment class ($2.00/M input; cache reads billed at a 90%
-discount; the output rate is a placeholder T6 refines with real pricing).
+section 6's short-increment track: DeepSeek V4 Flash via Fireworks at
+$0.14/M input, $0.028/M cache read, $0.28/M output (verified against the
+provider catalog).
 Pure arithmetic, no network.
 """
 
@@ -44,7 +45,7 @@ from mnemoseed.dream.prompts import (
 from mnemoseed.dream.snapshot import Snapshot, SnapshotChunk
 from mnemoseed.llm.types import Usage
 
-DEFAULT_DELTA_BUDGET_TOKENS = 5000
+DEFAULT_DELTA_BUDGET_TOKENS = 10000
 
 _CJK_RANGES: tuple[tuple[int, int], ...] = (
     (0x3400, 0x4DBF),  # CJK Extension A
@@ -78,14 +79,13 @@ def estimate_tokens(text: str) -> int:
 class PriceTable:
     """Per-role cloud pricing for the delta cost model (USD per million tokens).
 
-    Defaults follow design/02 section 6 short-increment class: $2.00/M input;
-    cache reads at a 90% discount ($0.20/M); the output rate is a placeholder
-    T6 refines with real per-role pricing.
+    Defaults follow design/02 section 6's short-increment track: DeepSeek V4
+    Flash via Fireworks — $0.14/M input, $0.028/M cache read, $0.28/M output.
     """
 
-    input_usd_per_m: float = 2.00
-    cache_read_usd_per_m: float = 0.20
-    output_usd_per_m: float = 5.00
+    input_usd_per_m: float = 0.14
+    cache_read_usd_per_m: float = 0.028
+    output_usd_per_m: float = 0.28
 
 
 def estimate_cost_usd(

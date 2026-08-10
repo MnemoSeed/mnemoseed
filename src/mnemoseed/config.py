@@ -113,31 +113,31 @@ class RoleLLMConfig:
 
 
 # Route defaults per design/02 section 6 (PRD FR-2.14): deep_reflection ->
-# Claude Sonnet; short_increment -> an OpenAI-compatible chat class; local_track
-# -> a local Ollama model. NOTE: design/02 §6 + FR-2.7 pin the offline default to
-# a <=14B quantized model ("70B is not a default assumption"), which conflicts
-# with PRD FR-2.14's Llama-3.3-70B line; the <=14B default wins here (flagged in
-# the T6 report). Provider model ids: claude-sonnet-5 is "Claude Sonnet 5";
-# gpt-5.6-terra is the design doc's placeholder for the short-increment class —
-# both remain unverified against live provider catalogs (documented assumption).
+# Kimi K3 via Fireworks (OpenAI-compatible); short_increment -> DeepSeek V4
+# Flash via Fireworks; local_track -> a local Ollama model. NOTE: design/02 §6
+# + FR-2.7 pin the offline default to a <=14B quantized model ("70B is not a
+# default assumption"), which conflicts with PRD FR-2.14's Llama-3.3-70B line;
+# the <=14B default wins here (flagged in the T6 report). Provider model ids
+# verified against the Fireworks catalog: kimi-k3 ($3.00/$0.30/$15.00 per M
+# input/cached/output) and deepseek-v4-flash ($0.14/$0.028/$0.28).
 DEFAULT_LLM_ROUTES: dict[str, RoleLLMConfig] = {
     "deep_reflection": RoleLLMConfig(
         role="deep_reflection",
-        driver="anthropic",
-        model="claude-sonnet-5",
+        driver="openai_compatible",
+        model="accounts/fireworks/models/kimi-k3",
         params={
-            "base_url": "https://api.anthropic.com",
-            "api_key_env": "ANTHROPIC_API_KEY",
+            "base_url": "https://api.fireworks.ai/inference/v1",
+            "api_key_env": "FIREWORKS_API_KEY",
             "max_tokens": 2048,
         },
     ),
     "short_increment": RoleLLMConfig(
         role="short_increment",
         driver="openai_compatible",
-        model="gpt-5.6-terra",
+        model="accounts/fireworks/models/deepseek-v4-flash",
         params={
-            "base_url": "https://api.openai.com/v1",
-            "api_key_env": "OPENAI_API_KEY",
+            "base_url": "https://api.fireworks.ai/inference/v1",
+            "api_key_env": "FIREWORKS_API_KEY",
         },
     ),
     "local_track": RoleLLMConfig(

@@ -5,7 +5,7 @@ Testable behaviors asserted through the public surface:
 - ``estimate_tokens`` is a deterministic local token estimator (chars/4 for
   non-CJK + one token per CJK char), pinned on known strings.
 - Delta packing: chunks are packed whole (never split mid-text) in deterministic
-  order under a token budget (default 5000); chunks that do not fit are reported
+  order under a token budget (default 10000); chunks that do not fit are reported
   as overflow, never silently dropped; the cache prefix never counts against the
   delta budget.
 - Cache prefix: byte-stable across dreams of the same profile; per-dream data
@@ -220,18 +220,18 @@ def test_delta_prefix_excluded_from_budget() -> None:
     assert request.packed_chunk_ids == ("c0", "c1", "c2")
 
 
-def test_delta_budget_default_is_5000_and_caps_delta() -> None:
-    """NFR-2.2 cap proof: twenty-two 1000-char chunks would render to ~5500
-    tokens uncapped; the default packing always lands at or below 5000 and the
+def test_delta_budget_default_is_10000_and_caps_delta() -> None:
+    """NFR-2.2 cap proof: forty-four 1000-char chunks would render to ~11000
+    tokens uncapped; the default packing always lands at or below 10000 and the
     excess is reported as overflow."""
     snap = _snap(
-        *(_stamp(f"c{i}", "z" * 1000, turn_start=i, turn_end=i) for i in range(22)),
+        *(_stamp(f"c{i}", "z" * 1000, turn_start=i, turn_end=i) for i in range(44)),
     )
-    assert _packed_tokens(render_chunk_blocks(snap.chunks)) > 5500
+    assert _packed_tokens(render_chunk_blocks(snap.chunks)) > 11000
     request = DeltaPacker().pack(snap)
-    assert request.delta_tokens <= 5000
+    assert request.delta_tokens <= 10000
     assert request.overflow_chunk_ids  # a later dream picks these up
-    assert len(request.packed_chunk_ids) + len(request.overflow_chunk_ids) == 22
+    assert len(request.packed_chunk_ids) + len(request.overflow_chunk_ids) == 44
 
 
 # ---------------------------------------------------------------- cache prefix
@@ -317,8 +317,8 @@ def test_delta_report_tracks_delta_prefix_overflow() -> None:
     assert report.prefix_tokens == estimate_tokens(request.cache_prefix)
 
 
-def test_nfr22_budget_arithmetic_five_thousand_delta_cap() -> None:
-    """NFR-2.2 substrate: report the cost projection for the 5k delta budget."""
+def test_nfr22_budget_arithmetic_delta_cost_projection() -> None:
+    """NFR-2.2 substrate: report the cost projection for a 5k delta sample."""
     request = DeltaRequest(
         version="v1",
         profile_id="alice",
@@ -552,8 +552,8 @@ def test_d1_full_overflow_reflect_defers_and_never_calls_cloud(tmp_path: Path) -
     """Defense line 1 (orchestrator): a snapshot whose every chunk is over the
     delta budget is deferred, not reflected. Nothing hits the LLM, no REFLECT_DONE
     is persisted, and the report still carries the overflow count."""
-    snap = _snap(_stamp("huge", "I prefer dark mode. " * 1000))
-    packer = DeltaPacker()  # default 5000-token budget: the single chunk overflows
+    snap = _snap(_stamp("huge", "I prefer dark mode. " * 2200))
+    packer = DeltaPacker()  # default 10000-token budget: the single chunk overflows
     assert packer.pack(snap).overflow_chunk_ids == ("huge",)
     llm = _RecordingLLM()
     done: list[str] = []
@@ -582,7 +582,7 @@ def test_d1_verifier_repro_over_budget_chunk_survives_then_later_dream_completes
     commit -> safe-clear chain untouched, stays journaled at the reflect
     boundary, and a later dream with a bigger budget picks it up and completes
     the commit + purge normally."""
-    store = _VectorFake([_stamp("huge", "I prefer dark mode. " * 1000)])
+    store = _VectorFake([_stamp("huge", "I prefer dark mode. " * 2200)])
     fs, trigger, llm, merger = _chain(tmp_path, store)
     trigger.handle_event(_event())
 
@@ -608,7 +608,7 @@ def test_d1_verifier_repro_over_budget_chunk_survives_then_later_dream_completes
         reflector=ReflectOrchestrator(
             llm=llm2,
             directory=tmp_path / "dreams",
-            packer=DeltaPacker(budget_tokens=6000),
+            packer=DeltaPacker(budget_tokens=12000),
             on_done=trigger.on_reflect_complete,
         ),
         merger=_RecordingMerger(
@@ -633,7 +633,7 @@ def test_d1_partial_overflow_with_empty_triples_defers_merge(tmp_path: Path) -> 
     overflow chunk flagged and ZERO triples extracted, the snapshot is NOT handed
     to the merger -- committing would purge source chunks the model never saw."""
     noise = _stamp("noise", "lorem ipsum dolor sit amet", turn_start=0, turn_end=1)
-    huge = _stamp("huge", "z" * 20000, turn_start=0, turn_end=1)
+    huge = _stamp("huge", "z" * 44000, turn_start=0, turn_end=1)
     store = _VectorFake([noise, huge])
     fs, trigger, llm, merger = _chain(tmp_path, store)
     trigger.handle_event(_event())
@@ -652,7 +652,7 @@ def test_d1_merge_boundary_recovery_respects_persisted_overflow(tmp_path: Path) 
     boundary with the guard active -- reflect is never re-run and the deferred
     merge cannot purge the overflow chunk."""
     noise = _stamp("noise", "lorem ipsum dolor sit amet", turn_start=0, turn_end=1)
-    huge = _stamp("huge", "z" * 20000, turn_start=0, turn_end=1)
+    huge = _stamp("huge", "z" * 44000, turn_start=0, turn_end=1)
     store = _VectorFake([noise, huge])
     fs1 = FileSnapshotter(store=store, meta=_MetaFake(), directory=tmp_path / "dreams")
     snap = fs1.request("alice", _RANGE).snapshot
@@ -746,10 +746,10 @@ def test_d1_verifier_probe_partial_overflow_with_triples_keeps_overflow_chunks(
     tmp_path: Path,
 ) -> None:
     """Verifier probe (the HIGH data-loss residual, fixed end-to-end): 22 chunks
-    over a 60-turn window at the default 5000-token budget pack 9 (c0-c8) and
-    overflow 13 (c9-c21, ~59% of the window). One triple is extracted so the
+    over a 60-turn window at the default 10000-token budget pack 19 (c0-c18) and
+    overflow 3 (c19-c21). One triple is extracted so the
     merge commits -- but the safe-clear now deletes ONLY the consumed rows, so
-    the 13 chunks the model never saw stay in the store for a later dream
+    the 3 chunks the model never saw stay in the store for a later dream
     instead of being silently purged."""
     store = _VectorFake(
         [
@@ -761,13 +761,13 @@ def test_d1_verifier_probe_partial_overflow_with_triples_keeps_overflow_chunks(
     trigger.handle_event(_event(rng=TurnRange(0, 60)))
 
     assert len(llm.calls) == 1
-    assert llm.calls[0][1].count("<chunk>") == 9  # exactly the packed window reached the model
-    assert "c0" in llm.calls[0][1] and "c8" in llm.calls[0][1]
-    assert "c9" not in llm.calls[0][1] and "c21" not in llm.calls[0][1]
+    assert llm.calls[0][1].count("<chunk>") == 19  # exactly the packed window reached the model
+    assert "c0" in llm.calls[0][1] and "c18" in llm.calls[0][1]
+    assert "c19" not in llm.calls[0][1] and "c21" not in llm.calls[0][1]
     assert merger.call_count == 1  # one triple extracted -> the commit goes through
-    assert sorted(store.deleted) == [f"c{i}" for i in range(9)]  # consumed rows only
+    assert set(store.deleted) == {f"c{i}" for i in range(19)}  # consumed rows only
     assert store.purged == []  # id-scoped, never range-scoped
-    assert {c.chunk_id for c in store.chunks} == {f"c{i}" for i in range(9, 22)}  # 13 overflow chunks survive
+    assert {c.chunk_id for c in store.chunks} == {f"c{i}" for i in range(19, 22)}  # 3 overflow chunks survive
     assert trigger.status("alice").state is DreamState.IDLE
 
 
@@ -778,7 +778,7 @@ def test_d1_recovery_partial_overflow_with_triples_purges_only_consumed(tmp_path
     (verifier ask: packed ids read back from the journal at resume)."""
     chunks = [
         _stamp(f"c{i}", "I prefer dark mode", turn_start=i * 2, turn_end=i * 2 + 1) for i in range(5)
-    ] + [_stamp("huge", "z" * 20000, turn_start=50, turn_end=51)]
+    ] + [_stamp("huge", "z" * 44000, turn_start=50, turn_end=51)]
     store = _VectorFake(chunks)
     fs1 = FileSnapshotter(store=store, meta=_MetaFake(), directory=tmp_path / "dreams")
     snap = fs1.request("alice", TurnRange(0, 60)).snapshot

@@ -54,13 +54,14 @@ def test_defaults_follow_design_02_section_6(monkeypatch) -> None:
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     cfg = load_config(Path("/nonexistent/config.toml"))
     deep = cfg.llm["deep_reflection"]
-    assert deep.driver == "anthropic"
-    assert deep.model == "claude-sonnet-5"  # design/02 "Claude 5 Sonnet" maps here
-    assert deep.params["api_key_env"] == "ANTHROPIC_API_KEY"
-    assert deep.params["base_url"] == "https://api.anthropic.com"
+    assert deep.driver == "openai_compatible"
+    assert deep.model == "accounts/fireworks/models/kimi-k3"  # design/02 deep track
+    assert deep.params["api_key_env"] == "FIREWORKS_API_KEY"
+    assert deep.params["base_url"] == "https://api.fireworks.ai/inference/v1"
     short = cfg.llm["short_increment"]
     assert short.driver == "openai_compatible"
-    assert short.params["api_key_env"] == "OPENAI_API_KEY"
+    assert short.model == "accounts/fireworks/models/deepseek-v4-flash"
+    assert short.params["api_key_env"] == "FIREWORKS_API_KEY"
     local = cfg.llm["local_track"]
     assert local.driver == "ollama"
     # FR-2.7: the offline default is a <=14B quantized model, never the PRD 70B line
@@ -118,8 +119,8 @@ def test_dream_llm_partial_override_inherits_driver_and_model(tmp_path, monkeypa
     _write(p, 'preset = "embedded"\n[dream.llm.deep_reflection]\napi_key_env = "MY_ALT_KEY"\n')
     cfg = load_config(p)
     deep = cfg.llm["deep_reflection"]
-    assert deep.driver == "anthropic"  # inherited
-    assert deep.model == "claude-sonnet-5"  # inherited
+    assert deep.driver == "openai_compatible"  # inherited
+    assert deep.model == "accounts/fireworks/models/kimi-k3"  # inherited
     assert deep.params["api_key_env"] == "MY_ALT_KEY"
 
 
@@ -228,11 +229,11 @@ def test_router_resolves_local_role_to_ollama_instance() -> None:
 
 
 def test_router_resolves_deep_reflection_with_env_key() -> None:
-    env: dict[str, str] = {"ANTHROPIC_API_KEY": "sk-ant-test"}
+    env: dict[str, str] = {"FIREWORKS_API_KEY": "sk-fw-test"}
     router = _router(Config().llm, env=env.get)
     llm = router.resolve("deep_reflection")
-    assert llm.model == "claude-sonnet-5"
-    assert llm.api_key == "sk-ant-test"
+    assert llm.model == "accounts/fireworks/models/kimi-k3"
+    assert llm.api_key == "sk-fw-test"
 
 
 def test_router_missing_env_yet_constructs_no_auth() -> None:
@@ -282,7 +283,7 @@ def test_router_unused_broken_role_never_breaks_boot() -> None:
 
 def test_router_audit_logs_role_configured_once_env_name_never_value() -> None:
     sink = _AuditSink()
-    env: dict[str, str] = {"ANTHROPIC_API_KEY": "sk-super-secret"}
+    env: dict[str, str] = {"FIREWORKS_API_KEY": "sk-super-secret"}
     router = _router(Config().llm, audit=sink, env=env.get)
     router.resolve("deep_reflection")
     router.resolve("deep_reflection")  # cached: no second audit entry
@@ -292,9 +293,9 @@ def test_router_audit_logs_role_configured_once_env_name_never_value() -> None:
     assert entry.action == "llm_role_configured"
     assert entry.at == 42.0
     assert entry.detail["role"] == "deep_reflection"
-    assert entry.detail["driver"] == "anthropic"
-    assert entry.detail["model"] == "claude-sonnet-5"
-    assert entry.detail["api_key_env"] == "ANTHROPIC_API_KEY"
+    assert entry.detail["driver"] == "openai_compatible"
+    assert entry.detail["model"] == "accounts/fireworks/models/kimi-k3"
+    assert entry.detail["api_key_env"] == "FIREWORKS_API_KEY"
     assert "sk-super-secret" not in str(entry.detail)  # never the key value
 
 

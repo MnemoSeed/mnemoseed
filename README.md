@@ -77,7 +77,7 @@ uv run mnemoseed up
 
 Or bring up the full stack (Postgres + pgvector + daemon) with `docker compose up`. Every service exposes a `/healthz` probe.
 
-*Note: To attach this engine layer directly to your front-end IDEs (Cursor/Cline), verify you have mounted the official orchestration connector repository at: [mnemoseed/mcp](https://github.com).*
+The MCP server ships inside this package as a thin stdio adapter (`uv run mnemoseed mcp`) — any MCP host (Cursor/Cline/Claude Code) attaches to it directly; host hooks talk to the daemon's localhost HTTP API.
 
 ---
 
