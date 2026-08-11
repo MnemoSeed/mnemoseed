@@ -32,7 +32,7 @@ gantt
 | M1 | One-command install (TTFM < 3 min) wired into Tier 1 hosts: Claude Code + Cursor (P0) / Codex CLI + Gemini CLI (P1); per-turn deterministic capture and injection active on hook-based hosts (PRD-06 AC-6/7); profile credential model active (login/link/whoami); after switching models, a new session can recall last week's preferences; dreaming at zero incremental cost (OAuth reuses an existing subscription or bring-your-own API key; no local hardware barrier); read-only console core shipped to support dream --once review |
 | M2 | After a fact changes, retrieval returns the current version; unused memories automatically sink after 30 days; any memory can answer "who, when, where from" |
 | M3 | GitHub ≥ 1000 stars (week-one target) |
-| M4 | $9/month Cloud launches, with 3 Profiles + E2EE sync + 500k dream allowance |
+| M4 | Cloud launches, with 3 Profiles + E2EE sync + dream allowance |
 
 ## Priority Principles
 

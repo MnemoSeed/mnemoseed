@@ -43,4 +43,4 @@
 1. **wast3《Memory Engineering》**（X, 2026-08-04, 182.8K views）—— 五阶段记忆管线框架（Capture/Consolidate/Retrieve/Reconcile/Decay）及评论区 Provenance 补充。本文档不是照抄，而是将其映射到互补学习系统（CLS）、再巩固（Reconsolidation）、突触稳态（SHY）等脑神经科学机制上重新推导。
 2. **N01ennn《How to be a Memory Engineer》**（X, 2026-08-03）—— Stanford/Microsoft/Anthropic/Nvidia 四透镜，15 步工程纪律。拆解与取舍见 design/05。
 3. **Claude-Mem / MemPalace** —— 两个实际运行中的记忆系统的概念拆解与取舍（design/05）。
-4. **MnemoSeed 白皮书 v3.1 / PRD v3.0 / 创世白皮书**（前期讨论产物）—— 双库架构、梦境引擎、认知分级、脱水节流阀、定价与 PLG 战略。
+4. **MnemoSeed 白皮书 v3.1 / PRD v3.0 / 创世白皮书**（前期讨论产物，内部归档）—— 双库架构、梦境引擎、认知分级、脱水节流阀。

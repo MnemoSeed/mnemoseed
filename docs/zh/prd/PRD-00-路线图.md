@@ -32,7 +32,7 @@ gantt
 | M1 | 单命令安装（TTFM < 3min）接入 Tier 1 宿主：Claude Code + Cursor（P0）/ Codex CLI + Gemini CLI（P1）；逐轮确定性捕获与注入在 hook 宿主生效（PRD-06 AC-6/7）；profile 凭证模型生效（login/link/whoami）；换模型后新 session 能召回上周偏好；做梦零增量成本（OAuth 复用已有订阅或自带 API key，无本地硬件门槛）；console 只读核心上线支撑 dream --once 审查 |
 | M2 | 事实变更后检索返回当前版本；30 天未用记忆自动沉底；任意记忆可回答"谁、何时、从哪来" |
 | M3 | GitHub ≥ 1000 star（首周目标） |
-| M4 | $9/月 Cloud 上线，3 Profile + E2EE 同步 + 500k 梦境额度 |
+| M4 | Cloud 上线，3 Profile + E2EE 同步 + 梦境额度 |
 
 ## 优先级原则
 

@@ -137,9 +137,9 @@ The official cloud adds one more layer, the **system administrator** (the operat
 flowchart TB
     subgraph Admin["Admin Plane (visible to admins)"]
         H["① service operations<br/>per-service liveness/latency/error rate<br/>Enclave status & attestation records"]
-        G["② growth & sales<br/>registration/conversion funnel/MRR/churn<br/>license activation count/compute-coin sales"]
+        G["② growth & operations<br/>registration/conversion funnel/churn<br/>license activation count"]
         U["③ user operations<br/>account list/seats/quota adjustments<br/>anomalous-usage alerts/bans"]
-        B["④ billing & cost<br/>model API cost broken down by route<br/>per-user gross margin/TEE utilization"]
+        B["④ billing & cost<br/>model API cost broken down by route<br/>TEE utilization"]
         AL["⑤ admin audit<br/>the admin's own operations also go into the log"]
     end
     subgraph Blind["Physical blind zone (ciphertext)"]
