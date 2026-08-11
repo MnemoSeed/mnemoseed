@@ -34,7 +34,7 @@
 | FR-6.6 | `mnemoseed doctor`：daemon 存活 / 端口 / embedding 加载 / round-trip 存取实测 / 宿主注册生效，单项失败给单行修复命令 | P0 |
 | FR-6.7 | `mnemoseed uninstall`：逐宿主注销（备份恢复或精确摘除）、停 daemon、数据默认保留并明示路径、--purge 才删 | P1 |
 | FR-6.8 | 配置单一事实源 `~/.mnemoseed/config.toml`；宿主侧仅瘦注册 | P0 |
-| FR-6.9 | 首次设置 LLM 向导（setup 流程内）：引导梦境模型配置，推荐顺序 ① OAuth 复用订阅（Codex/ChatGPT；中国用户可选 MiniMax/Kimi 等 CLI 服务商，选择时明示数据出境提示）② 自带 API key（任意 OpenAI 兼容端点，如 Fireworks）③ 高级离线轨（Ollama，≤14B 量化模型，附提炼质量警告）；连通性实测通过才写入 config.toml；落地 PRD-02 FR-2.14 的角色路由 | P0 |
+| FR-6.9 | 首次设置 LLM 向导（setup 流程内）：引导梦境模型配置，推荐顺序 ① OAuth 复用订阅（Codex / Grok 本地登录态，条款允许；Anthropic 订阅不复用；中国用户可选 MiniMax/Kimi 等 CLI 服务商，选择时明示数据出境提示）② 自带 API key（任意 OpenAI 兼容端点，如 Fireworks）③ 高级离线轨（Ollama，≤14B 量化模型，附提炼质量警告）；连通性实测通过才写入 config.toml；落地 PRD-02 FR-2.14 的角色路由 | P0 |
 
 ## 4. 非功能需求
 
