@@ -7,9 +7,15 @@ proven working under the local environment (see the M0 delivery report).
 """
 
 import math
+import re
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 import pytest
 
+from mnemoseed.storage.drivers import bge_m3_onnx
 from mnemoseed.storage.drivers.bge_m3_onnx import BgeM3OnnxEmbedder
 from mnemoseed.storage.ports import Capability, EmbeddingResult
 from mnemoseed.storage.registry import EMBED_DRIVERS, register
@@ -101,3 +107,175 @@ def test_embed_batch_matches_single_embeds():
         for batch_value, solo_value in zip(result.sparse.values, solo.sparse.values, strict=True):
             scale = max(abs(batch_value), abs(solo_value))
             assert abs(batch_value - solo_value) <= max(3e-2, 0.4 * scale)
+
+
+# ------------------------------------------------------------ model bootstrap (PRD-06 FR-6.2)
+#
+# First-run model bootstrap is pinned against a local HTTP server with RFC 7233
+# Range support. No test here ever touches the real Hugging Face endpoint.
+
+
+class _ArtifactHandler(BaseHTTPRequestHandler):
+    """Minimal artifact server: in-memory payloads with RFC 7233 Range support
+    (206 with Content-Range, 416 when the range starts at the full size)."""
+
+    artifacts: dict[str, bytes] = {}
+    requests: list[str] = []
+    ranges: list[tuple[str, str | None]] = []
+
+    def do_GET(self) -> None:
+        name = urlparse(self.path).path.lstrip("/")
+        _ArtifactHandler.requests.append(name)
+        _ArtifactHandler.ranges.append((name, self.headers.get("Range")))
+        data = _ArtifactHandler.artifacts.get(name)
+        if data is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        range_header = self.headers.get("Range")
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header)
+            if match:
+                start = int(match.group(1))
+                end = int(match.group(2)) if match.group(2) else len(data) - 1
+                if start >= len(data):
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{len(data)}")
+                    self.end_headers()
+                    return
+                end = min(end, len(data) - 1)
+                body = data[start : end + 1]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def artifact_server():
+    _ArtifactHandler.artifacts = {}
+    _ArtifactHandler.requests = []
+    _ArtifactHandler.ranges = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ArtifactHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+
+def _local_url(server: ThreadingHTTPServer, monkeypatch) -> None:
+    base = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setattr(bge_m3_onnx, "_model_url", lambda repo, filename: f"{base}/{filename}")
+
+
+def _closed_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def test_bootstrap_fresh_download_from_local_server(artifact_server, tmp_path, monkeypatch) -> None:
+    artifacts = {
+        "tokenizer.json": b'{"tokenizer": true}',
+        "model_quantized.onnx": b"model-bytes-" * 4096,
+        "sparse_linear.pt": b"sparse-state",
+    }
+    _ArtifactHandler.artifacts = artifacts
+    _local_url(artifact_server, monkeypatch)
+    progress: list[tuple[int, int]] = []
+    embedder = BgeM3OnnxEmbedder(model_dir=tmp_path / "models", progress=lambda d, t: progress.append((d, t)))
+
+    embedder.ensure_downloaded()
+
+    for name, payload in artifacts.items():
+        path = tmp_path / "models" / name
+        assert path.read_bytes() == payload
+        assert (tmp_path / "models" / (name + ".complete")).exists()
+        assert (tmp_path / "models" / (name + ".partial")).exists() is False
+    model = artifacts["model_quantized.onnx"]
+    assert (len(model), len(model)) in progress, "progress callback must report the full model size"
+
+    # complete artifacts skip any re-request on the next boot
+    requests_seen = len(_ArtifactHandler.requests)
+    embedder.ensure_downloaded()
+    assert len(_ArtifactHandler.requests) == requests_seen
+
+
+def test_bootstrap_resumes_interrupted_download(artifact_server, tmp_path, monkeypatch) -> None:
+    """A partial file left by a killed first run (interrupted after 64 bytes,
+    carrying the ``.partial`` sidecar the driver records while a download is in
+    flight) is completed over a Range request on the retry."""
+    payload = b"model-bytes-" * 8192
+    _ArtifactHandler.artifacts = {
+        "tokenizer.json": b'{"tokenizer": true}',
+        "model_quantized.onnx": payload,
+        "sparse_linear.pt": b"sparse-state",
+    }
+    _local_url(artifact_server, monkeypatch)
+    parts = tmp_path / "models"
+    parts.mkdir(parents=True)
+    partial = parts / "model_quantized.onnx"
+    partial.write_bytes(payload[:64])
+    (parts / "model_quantized.onnx.partial").write_text("64", encoding="utf-8")
+
+    embedder = BgeM3OnnxEmbedder(model_dir=tmp_path / "models")
+    embedder.ensure_downloaded()
+
+    assert partial.read_bytes() == payload
+    assert (parts / "model_quantized.onnx.complete").exists()
+    assert ("model_quantized.onnx", "bytes=64-") in _ArtifactHandler.ranges
+
+
+def test_bootstrap_complete_file_without_marker_is_not_redownloaded(
+    artifact_server, tmp_path, monkeypatch
+) -> None:
+    """A pre-marker (legacy) complete file is honored offline as-is: the boot
+    never re-requests it, so a machine with the model cached boots with zero
+    network traffic."""
+    payload = b"model-bytes-" * 4096
+    (tmp_path / "models").mkdir(parents=True)
+    (tmp_path / "models" / "model_quantized.onnx").write_bytes(payload)
+    _ArtifactHandler.artifacts = {
+        "tokenizer.json": b'{"tokenizer": true}',
+        "model_quantized.onnx": payload,
+        "sparse_linear.pt": b"sparse-state",
+    }
+    _local_url(artifact_server, monkeypatch)
+    embedder = BgeM3OnnxEmbedder(model_dir=tmp_path / "models")
+
+    embedder.ensure_downloaded()
+
+    assert (tmp_path / "models" / "model_quantized.onnx").read_bytes() == payload
+    assert "model_quantized.onnx" not in _ArtifactHandler.requests
+
+
+def test_bootstrap_offline_error_is_typed_and_actionable(tmp_path, monkeypatch) -> None:
+    """Model missing + no network: the driver raises a typed, actionable error
+    naming the exact local path and the retry command — never a bare transport
+    traceback."""
+    closed = _closed_port()
+    monkeypatch.setattr(
+        bge_m3_onnx, "_model_url", lambda repo, filename: f"http://127.0.0.1:{closed}/{filename}"
+    )
+    embedder = BgeM3OnnxEmbedder(model_dir=tmp_path / "models")
+
+    with pytest.raises(bge_m3_onnx.ModelDownloadError) as excinfo:
+        embedder.ensure_downloaded()
+
+    message = str(excinfo.value)
+    assert "tokenizer.json" in message  # first artifact being fetched
+    assert str(tmp_path / "models") in message  # exact local path
+    assert "mnemoseed up" in message  # retry command

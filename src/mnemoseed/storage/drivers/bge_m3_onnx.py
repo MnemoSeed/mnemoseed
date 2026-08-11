@@ -56,6 +56,21 @@ _CHUNK_BYTES = 1 << 20
 
 ProgressCallback = Callable[[int, int], None]
 
+
+class ModelDownloadError(RuntimeError):
+    """A bge-m3 artifact could not be downloaded.
+
+    Raised exactly where a bare httpx transport error would otherwise surface;
+    the message names the exact local path and the retry action so a failing
+    first boot is actionable instead of a traceback.
+    """
+
+
+def _model_url(repo: str, filename: str) -> str:
+    """Hugging Face resolve URL for one model-file artifact."""
+    return f"https://huggingface.co/{repo}/resolve/main/{filename}"
+
+
 # torch storage classes -> numpy dtypes (torch-free state-dict reading)
 _STORAGE_DTYPES: dict[str, np.dtype] = {
     "FloatStorage": np.dtype("float32"),
@@ -119,36 +134,85 @@ class BgeM3OnnxEmbedder:
         return self._model_file
 
     def ensure_downloaded(self) -> None:
-        """Download encoder, tokenizer, and sparse projection (idempotent, resumable)."""
+        """Download encoder, tokenizer, and sparse projection (idempotent, resumable).
+
+        A file counts as complete only when its ``.complete`` sidecar records
+        its byte size. Anything else — absent, empty, or an interrupted partial
+        file carrying a ``.partial`` sidecar — is (re)downloaded over HTTP
+        Range, resuming from the bytes already on disk. A pre-marker file with
+        no sidecar is honored as a legacy complete download, so an offline
+        machine with the model cached never needs the network.
+        """
         downloads = (
             (self._tokenizer_file.name, self._tokenizer_file, self._encoder_repo),
             (self._model_file.name, self._model_file, self._encoder_repo),
             (self._sparse_file.name, self._sparse_file, self._sparse_repo),
         )
         for filename, dest, repo in downloads:
-            if not dest.exists() or dest.stat().st_size == 0:
+            if not self._is_complete(dest):
                 self._download(repo, filename, dest)
 
     def _download(self, repo: str, filename: str, dest: Path) -> None:
-        url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+        url = _model_url(repo, filename)
         existing = dest.stat().st_size if dest.exists() else 0
         headers = {"Range": f"bytes={existing}-"} if existing else {}
-        with httpx.stream(
-            "GET", url, headers=headers, follow_redirects=True, timeout=httpx.Timeout(60.0)
-        ) as response:
-            if response.status_code == 416:
-                return
-            response.raise_for_status()
-            resume = response.status_code == 206 and existing > 0
-            total = existing + _content_length(response)
-            mode = "ab" if resume else "wb"
-            written = existing
-            with open(dest, mode) as handle:
-                for chunk in response.iter_bytes(_CHUNK_BYTES):
-                    handle.write(chunk)
-                    written += len(chunk)
-                    self._progress(written, total)
+        self._partial_marker(dest).write_text(str(existing), encoding="utf-8")
+        try:
+            with httpx.stream(
+                "GET", url, headers=headers, follow_redirects=True, timeout=httpx.Timeout(60.0)
+            ) as response:
+                if response.status_code == 416:
+                    self._mark_complete(dest)
+                    return
+                response.raise_for_status()
+                resume = response.status_code == 206 and existing > 0
+                total = existing + _content_length(response)
+                mode = "ab" if resume else "wb"
+                written = existing
+                with open(dest, mode) as handle:
+                    for chunk in response.iter_bytes(_CHUNK_BYTES):
+                        handle.write(chunk)
+                        written += len(chunk)
+                        self._progress(written, total)
+        except httpx.HTTPError as exc:
+            raise ModelDownloadError(
+                f"could not download {filename} (from {url}) into {dest}. "
+                "Check your network connection, then re-run `mnemoseed up` to "
+                "resume; the partial file is kept."
+            ) from exc
+        self._mark_complete(dest)
         logger.info("downloaded %s (%.1f MB)", dest.name, dest.stat().st_size / (1 << 20))
+
+    # ------------------------------------------------------ download bookkeeping
+
+    @staticmethod
+    def _partial_marker(dest: Path) -> Path:
+        """Sidecar recorded while a download is in flight."""
+        return dest.with_name(dest.name + ".partial")
+
+    @staticmethod
+    def _complete_marker(dest: Path) -> Path:
+        """Sidecar recording a finished file's byte size."""
+        return dest.with_name(dest.name + ".complete")
+
+    def _is_complete(self, dest: Path) -> bool:
+        """True when the file may be used without re-downloading it."""
+        if not dest.exists() or dest.stat().st_size == 0:
+            return False
+        complete = self._complete_marker(dest)
+        if complete.exists():
+            try:
+                return complete.read_text(encoding="utf-8").strip() == str(dest.stat().st_size)
+            except OSError:
+                return False
+        # a legacy pre-marker file counts as complete so an offline boot with
+        # the model already cached never touches the network
+        return not self._partial_marker(dest).exists()
+
+    def _mark_complete(self, dest: Path) -> None:
+        """Close a download: drop the in-flight sidecar, record the final size."""
+        self._partial_marker(dest).unlink(missing_ok=True)
+        self._complete_marker(dest).write_text(str(dest.stat().st_size), encoding="utf-8")
 
     def _load(self) -> None:
         if self._session is not None:
