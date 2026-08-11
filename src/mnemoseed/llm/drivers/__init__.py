@@ -2,8 +2,9 @@
 
 Importing this package registers every driver into ``mnemoseed.llm.registry``
 (import side effect, as the storage package does): openai_compatible
-(short-increment cloud class), anthropic (deep-reflection Claude), ollama
-(local offline track), oauth (stub seam — the OAuth flow is not yet built).
+(short-increment cloud class), anthropic (deep-reflection Claude, API-key
+only), ollama (local offline track), oauth (reuses the host's Codex / Grok
+OAuth login state with OIDC auto-refresh).
 """
 
 from __future__ import annotations

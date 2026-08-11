@@ -3,10 +3,11 @@
 T6 rounds out the dream engine's cost layer: the DreamLLM port (narrow chat +
 typed health probe + provider-reported usage), an LLM driver registry mirroring
 the storage idiom, four payload drivers (openai_compatible / anthropic /
-ollama / oauth-stub), the [dream.llm] role router, and the ReflectLLM adapter
-that makes any DreamLLM usable where T3 types strictly against str-returning
-chat. Importing this package registers the built-in drivers (import side
-effect), as the storage package does.
+ollama / oauth — the last one reuses the host's Codex / Grok login state), the
+[dream.llm] role router, and the ReflectLLM adapter that makes any DreamLLM
+usable where T3 types strictly against str-returning chat. Importing this
+package registers the built-in drivers (import side effect), as the storage
+package does.
 
 FR-2.14 route defaults follow design/02 §6: deep_reflection -> Claude Sonnet
 (anthropic), short_increment -> an OpenAI-compatible chat class, local_track ->

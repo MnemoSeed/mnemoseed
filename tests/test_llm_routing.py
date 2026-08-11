@@ -371,3 +371,34 @@ def test_router_can_resolve_oauth_stub() -> None:
     assert isinstance(llm, OAuthLLM)
     with pytest.raises(LLMUnavailable):
         llm.chat(system="s", user="u")
+
+
+def test_router_oauth_role_from_config(tmp_path, monkeypatch) -> None:
+    """FR-2.14: a [dream.llm.<role>] table selects driver='oauth' + provider, and
+    the router hands the provider/model through to the driver."""
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    p = tmp_path / "config.toml"
+    _write(
+        p,
+        'preset = "embedded"\n'
+        "[dream.llm.deep_reflection]\n"
+        'driver = "oauth"\n'
+        'provider = "codex"\n'
+        'model = "gpt-5.6-codex"\n',
+    )
+    deep = load_config(p).llm["deep_reflection"]
+    assert deep.driver == "oauth"
+    assert deep.model == "gpt-5.6-codex"
+    assert deep.params["provider"] == "codex"
+    router = RoleRouter(
+        routes=dict(load_config(p).llm),
+        env=lambda name: "",
+        clock=lambda: 0.0,
+    )
+    llm = router.resolve("deep_reflection")
+    assert isinstance(llm, OAuthLLM)
+    assert llm.provider == "codex"
+    assert llm.model == "gpt-5.6-codex"
+    # the other roles keep their defaults — oauth is opt-in per role
+    short = router.resolve("short_increment")
+    assert short.model == "accounts/fireworks/models/deepseek-v4-flash-0731"
