@@ -50,6 +50,20 @@ class RelType(StrEnum):
     CO_OCCURRED = "co_occurred"  # co-activation edge for spreading activation
 
 
+class PromotionStatus(StrEnum):
+    """Promotion-gate lifecycle on a cortical node (design/02 §11, prd-08 A.2).
+
+    ``promoted`` is the default so every pre-v5 node and every un-gated write is
+    back-compatible. The gate itself (quarantine on failed checks, TTL scrap,
+    revocation-by-versioning) is a later task; this field only carries the value.
+    """
+
+    PENDING = "pending"
+    PROMOTED = "promoted"
+    QUARANTINED = "quarantined"
+    SCRAPPED = "scrapped"
+
+
 class GraphNode(BaseModel):
     """Cortical node. props carries per-type fields (statement/tool_chain/...)."""
 
@@ -72,6 +86,10 @@ class GraphNode(BaseModel):
     peripheral_gaps: bool = False
     conflict_flag: bool = False
     conflict_group: str | None = None  # shared group id pairs both parties
+
+    # promotion gate (design/02 §11, prd-08 A.2 v5): carrier only — the gate
+    # logic and retrieval filtering land in a later task.
+    promotion_status: PromotionStatus = PromotionStatus.PROMOTED
 
     # usage counters (console Detail; never derived from audit_log)
     hit_count: int = 0

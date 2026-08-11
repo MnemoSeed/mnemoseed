@@ -12,8 +12,9 @@ import time
 
 import pytest
 from _support import PROFILE, make_edge, make_intention, make_pref, make_prov
+from pydantic import ValidationError
 
-from mnemoseed.schema.graph import GraphNode, NodeType, RelType
+from mnemoseed.schema.graph import GraphNode, NodeType, PromotionStatus, RelType
 from mnemoseed.storage.ports import (
     Capability,
     GraphFlag,
@@ -70,6 +71,70 @@ def test_upsert_get_roundtrip(stack) -> None:
     assert got.confidence == pytest.approx(0.9, abs=1e-9)
     assert got.is_current
     assert stack.graph.get_node("missing") is None
+
+
+# ------------------------------------------------- promotion_status (schema v5)
+
+
+def test_promotion_status_defaults_to_promoted(stack) -> None:
+    """v5 back-compat: an un-gated write is promoted without the caller saying so."""
+    node = make_pref(node_id="ps-default")
+    stack.graph.upsert_node(node)
+    assert stack.graph.get_node("ps-default").promotion_status is PromotionStatus.PROMOTED
+
+
+def test_promotion_status_roundtrips(stack) -> None:
+    """The carrier field survives every read surface: current reads, traversal,
+    the version chain, and as_of replay (gate filtering is a later task)."""
+    v1 = make_pref(
+        node_id="ps-rt",
+        valid_from=time.time() - 200.0,
+        promotion_status=PromotionStatus.QUARANTINED,
+    )
+    stack.graph.upsert_node(v1)
+    assert stack.graph.get_node("ps-rt").promotion_status is PromotionStatus.QUARANTINED
+
+    leaf = make_pref(node_id="ps-leaf", promotion_status=PromotionStatus.PENDING)
+    stack.graph.upsert_node(leaf)
+    stack.graph.add_edge(make_edge("ps-rt", "ps-leaf"))
+    reached = stack.graph.traverse("ps-rt", depth=1, filter=NodeFilter(profile_id=PROFILE))
+    statuses = {n.node_id: n.promotion_status for n in reached}
+    assert statuses["ps-rt"] is PromotionStatus.QUARANTINED
+    assert statuses["ps-leaf"] is PromotionStatus.PENDING
+
+    listed = {
+        n.node_id: n.promotion_status
+        for n in stack.graph.list_nodes(NodeFilter(profile_id=PROFILE), Page(0, 50)).items
+    }
+    assert listed["ps-rt"] is PromotionStatus.QUARANTINED
+
+    take_over = time.time()
+    v2 = make_pref(
+        node_id="ps-rt",
+        version=2,
+        valid_from=take_over,
+        promotion_status=PromotionStatus.SCRAPPED,
+        props={**v1.props, "statement": "rolled back"},
+    )
+    stack.graph.invalidate("ps-rt", take_over)
+    stack.graph.append_version(v2)
+    versions = stack.graph.versions("ps-rt")
+    assert [v.promotion_status for v in versions] == [
+        PromotionStatus.QUARANTINED,
+        PromotionStatus.SCRAPPED,
+    ]
+
+    by_status = {
+        n.node_id: n.promotion_status
+        for n in stack.graph.as_of(take_over + 1.0, NodeFilter(profile_id=PROFILE))
+    }
+    assert by_status["ps-rt"] is PromotionStatus.SCRAPPED
+
+
+def test_invalid_promotion_status_rejected(stack) -> None:
+    """Free text never lands in the column: the enum is the write boundary."""
+    with pytest.raises(ValidationError, match="promotion_status"):
+        make_pref(promotion_status="bogus")
 
 
 def test_list_nodes_filter_pagination(stack) -> None:

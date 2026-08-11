@@ -180,9 +180,12 @@ def test_graph_schema_freeze_walk() -> None:
     names = {column.name for column in tables["nodes"].columns}
     assert "node_id" in names and "payload" in names and "entities" in names
     assert set(_NODES_LIFECYCLE_COLUMNS) <= names
-    # v2 freeze item: the pinned column enters the head schema via an AddColumn
+    # v2/v5 freeze items: the pinned and promotion_status columns enter the head
+    # schema via AddColumn deltas, never as v1 base columns
     assert "pinned" in added_columns
     assert "pinned" not in names, "pinned is a migration delta, not a v1 base column"
+    assert "promotion_status" in added_columns
+    assert "promotion_status" not in names, "promotion_status is a migration delta, not a v1 base column"
 
 
 # ---------------------------------------------------------------- A.3 meta
@@ -232,8 +235,8 @@ def test_named_graph_instances_build_on_both_backends(tmp_path) -> None:
     main = SqliteGraphDriver(path=tmp_path / "graph-main.db")
     isolated = SqliteGraphDriver(path=tmp_path / "graph-isolated.db")
     assert main.info.name == isolated.info.name == "sqlite_graph"
-    assert current_schema_version(main._conn, "graph") == 2
-    assert current_schema_version(isolated._conn, "graph") == 2
+    assert current_schema_version(main._conn, "graph") == 5
+    assert current_schema_version(isolated._conn, "graph") == 5
     asyncio.run(main.close())
     asyncio.run(isolated.close())
 
@@ -243,7 +246,7 @@ def test_named_graph_instances_build_on_both_backends(tmp_path) -> None:
     pg_main = PgGraphDriver(dsn=dsn, schema=schema_main)
     pg_isolated = PgGraphDriver(dsn=dsn, schema=schema_isolated)
     assert pg_main.info.name == pg_isolated.info.name == "pg_graph"
-    assert current_postgres_schema_version(pg_main._conn, "graph", schema=schema_main) == 2
-    assert current_postgres_schema_version(pg_isolated._conn, "graph", schema=schema_isolated) == 2
+    assert current_postgres_schema_version(pg_main._conn, "graph", schema=schema_main) == 5
+    assert current_postgres_schema_version(pg_isolated._conn, "graph", schema=schema_isolated) == 5
     asyncio.run(pg_main.close())
     asyncio.run(pg_isolated.close())

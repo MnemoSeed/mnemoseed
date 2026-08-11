@@ -114,10 +114,12 @@ def test_traverse_neighbor_sql_profile_scoping():
 def test_node_row_matches_column_order():
     node = _pref()
     row = PgGraphDriver._node_row(None, node)
-    assert len(row) == 25
+    assert len(row) == 26
     assert row[0] == node.node_id
     # payload goes in as a plain dict for JSONB (never a serialized string)
     assert isinstance(row[3], dict)
+    # v5 carrier column: defaulted to promoted when the caller does not say so
+    assert row[-1] == "promoted"
 
 
 def test_decode_version_roundtrip():

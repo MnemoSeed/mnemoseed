@@ -549,6 +549,15 @@ _DREAM_TOKEN_LEDGER_TABLE = CreateTable(
     unique=(("profile_id", "year_month"),),
 )
 
+# v5: promotion-gate status carrier on graph.nodes (prd-08 A.2 "promotion-status field
+# (v5)"). No data rewrite: NOT NULL DEFAULT 'promoted' back-fills every existing
+# row as promoted (back-compat), and the gate logic itself is a later task.
+_V5_ADD_PROMOTION_STATUS = AddColumn(
+    store="graph",
+    table="nodes",
+    column=Column("promotion_status", "TEXT", not_null=True, default="promoted"),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -603,6 +612,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=4,
         description="monthly dream token ledger: per-profile (profile_id, year_month) counters",
         ops=(_DREAM_TOKEN_LEDGER_TABLE,),
+    ),
+    Migration(
+        version=5,
+        description="promotion-gate status carrier on graph.nodes (default promoted, back-compat)",
+        ops=(_V5_ADD_PROMOTION_STATUS,),
     ),
 )
 

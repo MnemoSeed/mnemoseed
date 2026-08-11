@@ -89,6 +89,7 @@ class SqliteGraphDriver:
         "updated_at",
         "version",
         "prev_version_id",
+        "promotion_status",
     )
 
     def __init__(self, path: str | os.PathLike[str] | None = None, **kwargs: Any) -> None:
@@ -148,6 +149,7 @@ class SqliteGraphDriver:
             "updated_at": iso8601_utc(node.updated_at),
             "version": node.version,
             "prev_version_id": node.prev_version_id,
+            "promotion_status": node.promotion_status.value,
         }
         return tuple(row[column] for column in self._NODE_COLUMNS)
 
@@ -178,6 +180,7 @@ class SqliteGraphDriver:
             "updated_at": epoch_from_iso(str(row["updated_at"])),
             "version": int(row["version"]),
             "prev_version_id": row["prev_version_id"],
+            "promotion_status": str(row["promotion_status"]),
         }
         return GraphNode.model_validate(data)
 

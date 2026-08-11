@@ -83,6 +83,7 @@ _NODE_COLUMNS = (
     "updated_at",
     "version",
     "prev_version_id",
+    "promotion_status",
 )
 
 _NODE_VERSIONS_COLUMNS = (
@@ -266,6 +267,7 @@ class PgGraphDriver:
             "updated_at": iso8601_utc(node.updated_at),
             "version": node.version,
             "prev_version_id": node.prev_version_id,
+            "promotion_status": node.promotion_status.value,
         }
         return tuple(row[column] for column in _NODE_COLUMNS)
 
@@ -296,6 +298,7 @@ class PgGraphDriver:
             "updated_at": epoch_from_iso(str(row["updated_at"])),
             "version": int(row["version"]),
             "prev_version_id": row["prev_version_id"],
+            "promotion_status": str(row["promotion_status"]),
         }
         return GraphNode.model_validate(data)
 

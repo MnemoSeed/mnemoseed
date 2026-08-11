@@ -130,11 +130,11 @@ def _expected_pg_kind(kind: str) -> str:
 
 
 def test_version_sequences_identical_on_both_dialects() -> None:
-    """The dialect-agnostic sequence IS the parity baseline (graph 1->2, meta 1->4)."""
-    assert latest_version() == 4
+    """The dialect-agnostic sequence IS the parity baseline (graph 1,2,5; meta 1,3,4)."""
+    assert latest_version() == 5
     graph_versions = sorted(m.version for m in MIGRATIONS if m.applies_to("graph"))
     meta_versions = sorted(m.version for m in MIGRATIONS if m.applies_to("meta"))
-    assert graph_versions == [1, 2]
+    assert graph_versions == [1, 2, 5]
     assert meta_versions == [1, 3, 4]
     assert len(MIGRATIONS) == latest_version()
 
@@ -387,20 +387,24 @@ def test_sqlite_v1_to_head_forward_migration_preserves_data() -> None:
     assert current_schema_version(graph, "graph") == 1
     assert current_schema_version(meta, "meta") == 1
 
-    # forward migration: graph advances to 2, meta to 4 (v2 is graph-only)
-    assert apply_migrations(graph, "graph") == 2
+    # forward migration: graph advances to 5, meta to 4 (v2/v5 are graph-only)
+    assert apply_migrations(graph, "graph") == 5
     assert apply_migrations(meta, "meta") == 4
-    assert current_schema_version(graph, "graph") == 2
+    assert current_schema_version(graph, "graph") == 5
     assert current_schema_version(meta, "meta") == 4
 
     assert "pinned" in _column_names(graph, "nodes")
-    row = dict(graph.execute("SELECT pinned, payload FROM nodes WHERE node_id = 'mv1'").fetchone())
+    assert "promotion_status" in _column_names(graph, "nodes")
+    row = dict(
+        graph.execute("SELECT pinned, promotion_status, payload FROM nodes WHERE node_id = 'mv1'").fetchone()
+    )
     assert row["pinned"] == 0  # NOT NULL DEFAULT 0 backfills the existing row
+    assert row["promotion_status"] == "promoted"  # v5 default back-compat on the same row
     assert json.loads(row["payload"]) == make_pref(node_id="mv1").props  # byte-identical payload
 
     graph_after = _snapshot(graph, _GRAPH_TABLES)
     meta_after = _snapshot(meta, _META_TABLES)
-    assert _project_without_pinned(graph_after["nodes"]) == graph_before["nodes"]
+    assert _project_without_deltas(graph_after["nodes"]) == graph_before["nodes"]
     for table in ("node_versions", "edges"):
         assert graph_after[table] == graph_before[table], f"row drift in {table} across v1->v3"
     for table in _META_TABLES:
@@ -429,15 +433,17 @@ def test_sqlite_v1_to_head_forward_migration_preserves_data() -> None:
     ).fetchone()
     assert "UNIQUE (profile_id, year_month)" in unique_constraint[0]
 
-    # tracker advanced exactly one step per store (v2 graph, v4 meta)
+    # tracker advanced one step per graph/meta delta (v2/v5 graph, v4 meta)
     graph_versions = [int(r[0]) for r in graph.execute(f"SELECT version FROM {SCHEMA_VERSION_TABLE}")]
     meta_versions = [int(r[0]) for r in meta.execute(f"SELECT version FROM {SCHEMA_VERSION_TABLE}")]
-    assert sorted(graph_versions) == [1, 2]
+    assert sorted(graph_versions) == [1, 2, 5]
     assert sorted(meta_versions) == [1, 3, 4]
 
 
-def _project_without_pinned(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    return [{k: v for k, v in row.items() if k != "pinned"} for row in rows]
+def _project_without_deltas(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Drop the post-v1 migration delta columns (pinned v2, promotion_status v5)."""
+    deltas = {"pinned", "promotion_status"}
+    return [{k: v for k, v in row.items() if k not in deltas} for row in rows]
 
 
 # -------------------------------------------------------------- postgres arm (live)
@@ -493,9 +499,9 @@ def test_postgres_v1_to_head_forward_migration_preserves_data() -> None:
         )
         before_nodes = _pg_snapshot(conn, graph_schema, "nodes")
 
-        assert apply_postgres_migrations(conn, "graph", schema=graph_schema) == 2
+        assert apply_postgres_migrations(conn, "graph", schema=graph_schema) == 5
         assert apply_postgres_migrations(conn, "meta", schema=meta_schema) == 4
-        assert current_postgres_schema_version(conn, "graph", schema=graph_schema) == 2
+        assert current_postgres_schema_version(conn, "graph", schema=graph_schema) == 5
         assert current_postgres_schema_version(conn, "meta", schema=meta_schema) == 4
         pool_columns = [c["column_name"] for c in _pg_columns(conn, meta_schema, "profile_score_pool")]
         assert pool_columns == [
@@ -513,10 +519,14 @@ def test_postgres_v1_to_head_forward_migration_preserves_data() -> None:
 
         columns = [c["column_name"] for c in _pg_columns(conn, graph_schema, "nodes")]
         assert "pinned" in columns
+        assert "promotion_status" in columns
         after_nodes = _pg_snapshot(conn, graph_schema, "nodes")
-        assert [{k: v for k, v in r.items() if k != "pinned"} for r in after_nodes] == before_nodes
+        assert [
+            {k: v for k, v in r.items() if k not in ("pinned", "promotion_status")} for r in after_nodes
+        ] == before_nodes
         preserved = after_nodes[0]
         assert preserved["pinned"] == 0
+        assert preserved["promotion_status"] == "promoted"
         clean_payload = preserved["payload"]
         if isinstance(clean_payload, str):  # sqlite TEXT arm
             clean_payload = json.loads(clean_payload)
@@ -525,7 +535,8 @@ def test_postgres_v1_to_head_forward_migration_preserves_data() -> None:
 
 def _neutral_head_columns() -> dict[str, list[Column]]:
     """Neutral columns each table must have at head: CreateTable base plus the
-    AddColumn deltas that later migrations apply (v2's pinned on graph.nodes)."""
+    AddColumn deltas that later migrations apply (pinned v2 and
+    promotion_status v5 on graph.nodes)."""
     columns_by_table: dict[str, list[Column]] = {}
     for migration in MIGRATIONS:
         for op in migration.ops:

@@ -1,5 +1,5 @@
 """SqliteGraphDriver behavior: CRUD, version chain, flags, co-occurrence,
-weights, intentions, and the migration 1->2 data-preservation simulation."""
+weights, intentions, and the migration 1->head data-preservation simulation."""
 
 import asyncio
 import sqlite3
@@ -440,21 +440,26 @@ def test_query_intentions_status_and_due(driver):
 
 
 def _insert_node_row_at_v1(conn, driver_scratch, node) -> None:
-    columns = ", ".join(driver_scratch._NODE_COLUMNS)
-    placeholders = ", ".join(["?"] * len(driver_scratch._NODE_COLUMNS))
-    conn.execute(
-        f"INSERT INTO nodes ({columns}) VALUES ({placeholders})",
-        driver_scratch._node_row(node),
-    )
+    # The scratch driver is at head (schema v5); the target is a v1 file whose
+    # nodes table predates the delta columns, so the head-added columns
+    # (promotion_status v5; pinned v2, already absent from _NODE_COLUMNS) are
+    # excluded and backfilled by the migration's NOT NULL DEFAULTs instead.
+    row = driver_scratch._node_row(node)
+    dropped = {"promotion_status"}
+    columns = [c for c in driver_scratch._NODE_COLUMNS if c not in dropped]
+    values = [v for c, v in zip(driver_scratch._NODE_COLUMNS, row, strict=True) if c not in dropped]
+    placeholders = ", ".join(["?"] * len(columns))
+    conn.execute(f"INSERT INTO nodes ({', '.join(columns)}) VALUES ({placeholders})", values)
 
 
-def test_migration_1_to_2_data_preserved(tmp_path):
-    """AC-5 SQLite half: data written under v1 survives the 1->2 upgrade."""
+def test_migration_1_to_head_data_preserved(tmp_path):
+    """AC-5 SQLite half: data written under v1 survives the 1->head upgrade."""
     path = tmp_path / "migrate.db"
     conn = sqlite3.connect(path, isolation_level=None)
     apply_migrations(conn, "graph", target=1)
     assert current_schema_version(conn, "graph") == 1
     assert "pinned" not in _column_names(conn, "nodes")
+    assert "promotion_status" not in _column_names(conn, "nodes")
 
     node = make_pref(
         node_id="survivor",
@@ -480,15 +485,18 @@ def test_migration_1_to_2_data_preserved(tmp_path):
     finally:
         asyncio.run(scratch.close())
 
-    # a driver opening the v1 file auto-migrates it to v2 and preserves rows
+    # a driver opening the v1 file auto-migrates it to head and preserves rows
     driver = SqliteGraphDriver(path=path)
     try:
-        assert current_schema_version(driver._conn, "graph") == 2
+        assert current_schema_version(driver._conn, "graph") == 5
         assert "pinned" in _column_names(driver._conn, "nodes")
+        assert "promotion_status" in _column_names(driver._conn, "nodes")
         got = driver.get_node("survivor")
         assert got is not None
         assert got.props["statement"] == "keep me"
         assert got.profile_id == "p1"
+        # v5 back-compat: the migrated row reads back as promoted
+        assert got.promotion_status.value == "promoted"
     finally:
         asyncio.run(driver.close())
 
@@ -556,7 +564,7 @@ def test_graph_file_contains_only_graph_tables(tmp_path):
         apply_migrations(conn, "graph")
         tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert tables == {"schema_version", "nodes", "node_versions", "edges"}
-        assert current_schema_version(conn, "graph") == 2  # v2 is graph-tagged
+        assert current_schema_version(conn, "graph") == 5  # v2/v5 are graph-tagged
     finally:
         conn.close()
 
@@ -585,7 +593,7 @@ def test_meta_file_contains_only_meta_tables(tmp_path):
 def test_migration_sequence_is_shared_and_forward_only():
     versions = [m.version for m in MIGRATIONS]
     assert versions == sorted(versions)
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     stores = {op.store for m in MIGRATIONS for op in m.ops}
     assert stores == {"graph", "meta"}
     # every store-region can reach the tail of the shared sequence independently
