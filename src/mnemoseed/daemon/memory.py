@@ -18,6 +18,12 @@ Router + service seam over the retrieval engine and the storage ports:
                             deleted, graph nodes are tombstoned (version chain
                             preserved), the audit trail records exactly what was
                             removed.
+- POST /memory/dream_once / dream_status - the /dream command HTTP surface
+                            (FR-2.8 manual-first): run exactly one manual dream
+                            cycle and read the trigger's observability. Handlers
+                            are async so the chain runs on the app event-loop
+                            thread (the daemon's sqlite connections are bound to
+                            it.
 
 Profiles: the identity in every request is the explicit ``profile_id`` only —
 the daemon never guesses identity (D5 isolation). Token auth is explicitly out
@@ -42,6 +48,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from mnemoseed.capture.stamper import ConsistencyVerdict, NearDuplicateChecker, WriteConfig
 from mnemoseed.config import Config
+from mnemoseed.dream import DreamTrigger, TriggerStatus
 from mnemoseed.retrieve.assemble import (
     AssembledContext,
     AssembledEntry,
@@ -133,6 +140,12 @@ class ForgetRequest(BaseModel):
         if self.chunk_id is None and self.node_id is None and self.entity is None:
             raise ValueError("forget_this requires a chunk_id, node_id, or entity target")
         return self
+
+
+class DreamRequest(BaseModel):
+    """Request body for the /dream command surface (FR-2.8 manual-first)."""
+
+    profile_id: ProfileRef
 
 
 # ---------------------------------------------------------------- as_of views
@@ -670,3 +683,56 @@ def memory_forget_this(req: ForgetRequest, request: Request) -> dict[str, Any]:
         )
     except MemoryNotFoundError as exc:
         raise _route_404(exc) from exc
+
+
+# ------------------------------------------------------------ /dream surface
+
+
+def _trigger_payload(status: TriggerStatus) -> dict[str, Any]:
+    """Serialized trigger observability (state, pending depths, ranges).
+
+    PoolEvent.last_event is reduced to its semantic fields; the injected-clock
+    ``fired_at`` timestamp is part of the event the /dream command displays
+    (FR-2.8), so it stays on the wire as an epoch float.
+    """
+    last = status.last_event
+    current = status.current_range
+    return {
+        "profile_id": status.profile_id,
+        "state": status.state.value,
+        "pending_queue": status.pending_queue,
+        "pending_manual": status.pending_manual,
+        "last_event": (
+            {
+                "kind": last.kind.value,
+                "profile_id": last.profile_id,
+                "turn_range": {"start": last.turn_range.start, "end": last.turn_range.end},
+                "fired_at": last.fired_at,
+            }
+            if last is not None
+            else None
+        ),
+        "current_range": ({"start": current.start, "end": current.end} if current is not None else None),
+    }
+
+
+@router.post("/memory/dream_once")
+async def memory_dream_once(req: DreamRequest, request: Request) -> dict[str, Any]:
+    """One manual dream cycle (FR-2.8 ``/dream once``).
+
+    ``async def`` so the whole snapshot -> reflect -> merge -> safe-clear chain
+    runs on the app event-loop thread: the daemon's sqlite connections are bound
+    to that thread and refuse cross-thread use.
+    """
+    trigger: DreamTrigger = request.app.state.dream
+    launched = trigger.dream_once(req.profile_id)
+    status = trigger.status(req.profile_id)
+    payload = _trigger_payload(status)
+    payload["launched"] = launched
+    return payload
+
+
+@router.post("/memory/dream_status")
+async def memory_dream_status(req: DreamRequest, request: Request) -> dict[str, Any]:
+    trigger: DreamTrigger = request.app.state.dream
+    return _trigger_payload(trigger.status(req.profile_id))

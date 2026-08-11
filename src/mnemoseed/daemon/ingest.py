@@ -18,7 +18,7 @@ from mnemoseed.capture import (
     SessionUnknownError,
     TurnSegmenter,
 )
-from mnemoseed.schema.turn import IngestEvent, SessionEndRequest
+from mnemoseed.schema.turn import FlushRequest, IngestEvent, SessionEndRequest
 
 router = APIRouter()
 
@@ -69,4 +69,32 @@ async def session_end(req: SessionEndRequest, request: Request) -> dict[str, Any
         "profile_id": req.profile_id,
         "turns": turn_range.end - turn_range.start + 1,
         "turn_range": turn_range,
+    }
+
+
+@router.post("/flush")
+async def flush(req: FlushRequest, request: Request) -> dict[str, Any]:
+    """PreCompact rescue (design/06 4, FR-6.3): close the in-flight turn and
+    drain it off the hot path WITHOUT settling the session.
+
+    Closure alone keeps the session ingestable; the subsequent /session/end
+    still settles and drains any turns opened after the flush. The same
+    guarded-drain spine as /session/end keeps injection seams that bind a
+    drain-less pipeline working.
+    """
+    segmenter: TurnSegmenter = request.app.state.segmenter
+    try:
+        closed = segmenter.flush(req.session_id, req.profile_id)
+    except SessionUnknownError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ProfileMismatchError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    drain = getattr(getattr(request.app.state, "capture", None), "drain", None)
+    if drain is not None:
+        drain(req.session_id)
+    return {
+        "status": "flushed",
+        "session_id": req.session_id,
+        "profile_id": req.profile_id,
+        "closed_turns": closed,
     }

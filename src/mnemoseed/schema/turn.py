@@ -101,6 +101,19 @@ class SessionEndRequest(BaseModel):
     ts: float | None = None  # host-stamped end time; server stamps when absent
 
 
+class FlushRequest(BaseModel):
+    """Request body for /flush (PreCompact live-site rescue, design/06 4).
+
+    Closes the in-flight turn and drains it without settling the session, so a
+    mid-session context compaction never loses the turn that was open. Unlike
+    settlement, /flush leaves the session ingestable; the eventual
+    /session/end still settles and drains the rest.
+    """
+
+    session_id: str
+    profile_id: ProfileRef
+
+
 class TurnStep(BaseModel):
     """One ordered step inside a Turn (verbatim text preserved)."""
 

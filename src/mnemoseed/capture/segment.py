@@ -106,6 +106,24 @@ class _SessionState:
         pipeline.end_session(self.session_id, self.turn_range)
         return self.turn_range
 
+    def flush(self, profile_id: str, pipeline: CapturePipeline) -> int:
+        """Close the in-flight turn (if any) without settling the session.
+
+        The closed turn is handed to the pipeline (and drained by the caller)
+        but ``turn_range`` stays unset, so the session keeps accepting further
+        input and the eventual :meth:`end` still settles it. Returns the number
+        of turns closed by this call (0 for an already-flushed or settled
+        session).
+        """
+        if profile_id != self.profile_id:
+            raise ProfileMismatchError(
+                f"session {self.session_id!r} is bound to profile {self.profile_id!r}, got {profile_id!r}"
+            )
+        if self.turn_range is not None or self.open_turn is None:
+            return 0
+        self._close_open_turn(time.time(), pipeline)
+        return 1
+
     def _start_turn(self, event: IngestEvent, pipeline: CapturePipeline) -> Turn:
         if self.open_turn is not None:
             self._close_open_turn(event.ts, pipeline)
@@ -157,3 +175,11 @@ class TurnSegmenter:
         if state is None:
             raise SessionUnknownError(f"session {session_id!r} not captured; nothing to settle")
         return state.end(profile_id, self._pipeline)
+
+    def flush(self, session_id: str, profile_id: str) -> int:
+        """PreCompact rescue: hand the in-flight turn to the pipeline without
+        settling the session (design/06 4). Returns the closed-turn count."""
+        state = self._sessions.get(session_id)
+        if state is None:
+            raise SessionUnknownError(f"session {session_id!r} not captured; nothing to flush")
+        return state.flush(profile_id, self._pipeline)
