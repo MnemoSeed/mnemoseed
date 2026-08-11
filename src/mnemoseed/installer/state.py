@@ -21,11 +21,30 @@ PIDFILE_NAME = "daemon.pid"
 
 @dataclass(frozen=True)
 class RegistrationRecord:
-    """One host registration as recorded by the installer."""
+    """One host registration as recorded by the installer.
+
+    ``files`` holds companion files written together with ``config`` (e.g. the
+    hook scripts of the Cursor hooks artifact), each paired with its own
+    install-time backup path (None when the file was freshly created).
+    """
 
     config: str
     backup: str | None
     installed_at: str
+    files: tuple[tuple[str, str | None], ...] = ()
+
+
+def _read_files(raw: Any) -> tuple[tuple[str, str | None], ...]:
+    """Companion-file list from a state record; absent or malformed -> empty."""
+    if not isinstance(raw, list):
+        return ()
+    pairs: list[tuple[str, str | None]] = []
+    for item in raw:
+        if not (isinstance(item, list) and len(item) == 2 and isinstance(item[0], str)):
+            continue
+        backup = item[1]
+        pairs.append((item[0], str(backup) if backup else None))
+    return tuple(pairs)
 
 
 @dataclass
@@ -46,28 +65,37 @@ class State:
                 config=str(raw.get("config", "")),
                 backup=str(backup) if backup else None,
                 installed_at=str(raw.get("installed_at", "")),
+                files=_read_files(raw.get("files")),
             )
         return cls(registrations=registrations)
 
     def to_data(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "registrations": {
-                host: {
-                    "config": record.config,
-                    "backup": record.backup,
-                    "installed_at": record.installed_at,
-                }
-                for host, record in sorted(self.registrations.items())
-            },
-        }
+        records: dict[str, Any] = {}
+        for host, record in sorted(self.registrations.items()):
+            entry: dict[str, Any] = {
+                "config": record.config,
+                "backup": record.backup,
+                "installed_at": record.installed_at,
+            }
+            if record.files:
+                entry["files"] = [[path, backup] for path, backup in record.files]
+            records[host] = entry
+        return {"version": 1, "registrations": records}
 
-    def record(self, host: str, config: Path, backup: Path | None) -> None:
+    def record(
+        self,
+        host: str,
+        config: Path,
+        backup: Path | None,
+        *,
+        files: tuple[tuple[str, str | None], ...] = (),
+    ) -> None:
         """Record a completed registration and where its pre-write backup sits."""
         self.registrations[host] = RegistrationRecord(
             config=str(config.resolve()),
             backup=str(backup.resolve()) if backup is not None else None,
             installed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            files=files,
         )
 
     def remove(self, host: str) -> None:

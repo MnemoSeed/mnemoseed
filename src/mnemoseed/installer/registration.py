@@ -45,7 +45,12 @@ def _read_raw_text(path: Path) -> str:
 
 @dataclass(frozen=True)
 class RegistrationPlan:
-    """One host's planned write: current config, merge, raw diff + write text."""
+    """One host's planned write: current config, merge, raw diff + write text.
+
+    ``files`` holds companion files written together with ``config`` (used by
+    the Cursor project artifacts: hook scripts written alongside hooks.json);
+    ``what`` names the verb the plan performs for prompts and reports.
+    """
 
     host: str
     display: str
@@ -57,10 +62,14 @@ class RegistrationPlan:
     write_text: str
     diff: str
     changed: bool
+    files: tuple[tuple[Path, str], ...] = ()
+    what: str = "register the mnemoseed MCP entry"
 
     def describe(self) -> str:
-        verb = "no changes (already registered)" if not self.changed else "register the mnemoseed MCP entry"
-        return f"{self.display}: {verb} in {self.config}"
+        if not self.changed:
+            return f"{self.display}: no changes (already registered)"
+        suffix = f" (+{len(self.files)} companion files)" if self.files else ""
+        return f"{self.display}: {self.what} in {self.config}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -132,11 +141,14 @@ def plan_registrations(
     command: str = "mnemoseed",
     profile_id: str | None = None,
     token: str | None = None,
+    cursor_project: Path | None = None,
 ) -> list[RegistrationPlan]:
     """Read-only plan of what each host registration would write (diff shown).
 
     ``hosts`` defaults to everything :func:`detect_hosts` finds under ``home``;
-    a caller may pass an explicit subset to scope the install.
+    a caller may pass an explicit subset to scope the install. With
+    ``cursor_project`` set, the project-scoped Cursor adapter artifacts (hooks
+    + rules, FR-6.3b) are planned as additional approvable items.
     """
     home = resolve_home(home)
     targets = hosts if hosts is not None else detect_hosts(home)
@@ -162,6 +174,10 @@ def plan_registrations(
                 changed=changed,
             )
         )
+    if cursor_project is not None:
+        from mnemoseed.installer.cursorfiles import plan_cursor_project
+
+        plans.extend(plan_cursor_project(cursor_project))
     return plans
 
 
@@ -197,7 +213,8 @@ def apply_registrations(
     A no-change plan (idempotent re-install) passes through the approval
     callback for a uniform report but writes nothing and creates no backup.
     Every approved change is backed up first and recorded in the installer
-    state before its merged config is written.
+    state before its merged config is written; companion files in ``plan.files``
+    are written and recorded the same way.
     """
     data_dir = resolve_data_dir(data_dir)
     state = load_state(data_dir)
@@ -227,9 +244,25 @@ def apply_registrations(
             )
             continue
         backup = _backup_file(plan.config, data_dir, plan.host) if plan.config.exists() else None
+        file_ops: list[tuple[Path, str, Path | None]] = []
+        for path, text in plan.files:
+            resolved = path.resolve()
+            file_backup = _backup_file(resolved, data_dir, plan.host) if resolved.exists() else None
+            file_ops.append((resolved, text, file_backup))
         plan.config.parent.mkdir(parents=True, exist_ok=True)
         plan.config.write_bytes(plan.write_text.encode("utf-8"))
-        state.record(plan.host, plan.config, backup)
+        for path, text, _file_backup in file_ops:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        state.record(
+            plan.host,
+            plan.config,
+            backup,
+            files=tuple(
+                (str(path), str(file_backup.resolve()) if file_backup is not None else None)
+                for path, _text, file_backup in file_ops
+            ),
+        )
         applied.append(
             AppliedRegistration(
                 host=plan.host,
@@ -251,10 +284,17 @@ def install(
     command: str = "mnemoseed",
     profile_id: str | None = None,
     token: str | None = None,
+    cursor_project: Path | None = None,
     approve: Approval,
 ) -> InstallReport:
     """Full FR-6.1 flow: detect -> plan with diff -> apply per approved item."""
     plans = plan_registrations(
-        home, data_dir, hosts=hosts, command=command, profile_id=profile_id, token=token
+        home,
+        data_dir,
+        hosts=hosts,
+        command=command,
+        profile_id=profile_id,
+        token=token,
+        cursor_project=cursor_project,
     )
     return apply_registrations(plans, approve=approve, data_dir=data_dir)

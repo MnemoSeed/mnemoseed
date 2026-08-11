@@ -73,6 +73,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff.lint.per-file-ignores]
-# Hook entry scripts must insert the plugin dir into sys.path before importing
-# the shared client, so import order is intentional there.
+# Hook entry scripts must insert the plugin/adapter dir into sys.path before
+# importing the shared client, so import order is intentional there.
 "plugins/**" = ["I001", "UP034"]
+"adapters/**" = ["I001", "UP034"]

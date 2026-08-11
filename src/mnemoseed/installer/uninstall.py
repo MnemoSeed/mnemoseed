@@ -24,7 +24,7 @@ from mnemoseed.installer.hosts import (
     resolve_home,
     surgical_remove_mnemoseed,
 )
-from mnemoseed.installer.state import PIDFILE_NAME, load_state, save_state
+from mnemoseed.installer.state import PIDFILE_NAME, RegistrationRecord, load_state, save_state
 from mnemoseed.installer.tomlhost import load_host_toml, remove_codex
 
 
@@ -79,6 +79,34 @@ def _remove_mnemoseed_entry(spec: HostSpec, config: Path) -> HostRollback | None
     config.write_bytes(cleaned.encode("utf-8"))
     return HostRollback(
         host=spec.name, outcome="removed", config=str(config.resolve()), detail="exact removal (no backup)"
+    )
+
+
+def _rollback_artifact(host: str, record: RegistrationRecord) -> HostRollback:
+    """Remove one project artifact registration (Cursor hooks/rules, FR-6.3b).
+
+    Restores the main file and every recorded companion from their install-time
+    backups when present; a file that was freshly created by the installer (no
+    backup) is removed outright. Nothing outside the recorded paths is touched.
+    """
+    config = Path(record.config)
+    restored = False
+    if record.backup and Path(record.backup).exists():
+        config.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(record.backup), config)
+        restored = True
+    else:
+        config.unlink(missing_ok=True)
+    for path, backup in record.files:
+        target = Path(path)
+        if backup and Path(backup).exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path(backup), target)
+        else:
+            target.unlink(missing_ok=True)
+    detail = f"restored from backup {record.backup}" if restored else "exact removal (created by installer)"
+    return HostRollback(
+        host=host, outcome="restored" if restored else "removed", config=str(config.resolve()), detail=detail
     )
 
 
@@ -176,6 +204,15 @@ def uninstall(
                     detail="not registered",
                 )
             )
+
+    # Project artifact registrations (Cursor hooks/rules, FR-6.3b) are not host
+    # configs: each recorded item is rolled back from its backup or removed.
+    covered = {spec.name for spec in host_specs(home)}
+    for host, record in list(state.registrations.items()):
+        if host in covered:
+            continue
+        rolls.append(_rollback_artifact(host, record))
+        state.remove(host)
 
     daemon_status = _stop_daemon(data_dir)
 

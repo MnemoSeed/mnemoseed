@@ -15,6 +15,7 @@ import asyncio
 import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from mnemoseed import __version__
@@ -74,7 +75,12 @@ def cmd_install(args: argparse.Namespace) -> int:
     )
 
     try:
-        plans = plan_registrations(command=args.command, profile_id=args.profile_id)
+        cursor_project = Path(args.cursor_project) if args.cursor_project else None
+        plans = plan_registrations(
+            command=args.command,
+            profile_id=args.profile_id,
+            cursor_project=cursor_project,
+        )
     except HostConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -239,6 +245,12 @@ def main(argv: list[str] | None = None) -> int:
         "--profile-id",
         default=None,
         help="profile id embedded as MNEMOSEED_PROFILE_ID env (identity seam; token lands with login)",
+    )
+    p_install.add_argument(
+        "--cursor-project",
+        default=None,
+        metavar="DIR",
+        help="also write the project-level Cursor hooks + rules into DIR (FR-6.3b)",
     )
     p_install.set_defaults(func=cmd_install)
 
