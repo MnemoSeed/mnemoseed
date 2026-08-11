@@ -33,33 +33,37 @@ flowchart LR
 ## 2. The Anima Model (split out as an advanced module; see design/09)
 
 > The Anima soul model and preference dynamics now have their own document: [09-anima-and-preferences](09-anima-and-preferences.md) — an **advanced feature, outside the M1 first-release scope**.
-> This section retains the only coupling point with the rest of this document: the zero-knowledge matrix and isolation mechanisms apply equally to ANIMA/PREFERENCE nodes (both the ANIMA node's `idiographic_notes` plaintext summary and PREFERENCE's `evidence_chain` fall within the scope of "no-plaintext cloud persistence").
+> This section retains the only coupling point with the rest of this document: the encrypted-at-rest and isolation mechanisms apply equally to ANIMA/PREFERENCE nodes (both the ANIMA node's `idiographic_notes` plaintext summary and PREFERENCE's `evidence_chain` fall within the scope of "ciphertext on disk").
 
 ---
 
-## 3. Zero-Knowledge Privacy Matrix
+## 3. Privacy Architecture
 
 **Problem**: memory contains users' deepest preferences, trade secrets, and emotional assets. Without physical-grade isolation, cloud memory cannot earn the trust of enterprise and high-net-worth users.
 
-**The dual-track model**:
+**Deployment topology (core mental model)**: the daemon is a single artifact. **Self-hosted (free tier)**: individual users pick and manage their own environment (local machine / own VPS). **Official SaaS**: the daemon is hosted by us and **runs inside a TEE (Nitro Enclave) as standard**. In both shapes, **E2EE transport + encrypted at-rest storage are built into the app**, independent of whether the runtime is a TEE. **Hosts (user machines) only carry thin tools: MCP / hooks.**
 
 ```mermaid
 flowchart TB
-    subgraph Track1["Track ① BYOK local encryption (self-hosted / free)"]
-        D1["plaintext memory"] -->|"client private-key-derived encryption<br/>(keys never leave the device)"| E1["ciphertext blob"]
-        E1 --> S1["cloud storage bucket<br/>(stores only random ciphertext)"]
+    subgraph Host["Hosts (user machine)<br/>thin tools only: MCP / hooks"]
+        T1["Claude Code / Cursor / Codex / Grok"]
     end
-    subgraph Track2["Track ② TEE confidential computing (commercial SaaS)"]
-        D2["plaintext memory"] -->|"E2EE transport"| NE["AWS Nitro Enclave<br/>(hardware security black box)"]
-        NE -->|"brief in-box decryption<br/>runs dream synthesis"| R2["synthesis results encrypted and returned"]
-        NE -.->|"platform admins / our team<br/>physically cannot see plaintext"| X["❌"]
+    subgraph Daemon["daemon (one artifact, your choice of placement)"]
+        direction TB
+        L["local (default)"]
+        V["own VPS / private cloud"]
+        S["our cloud (SaaS)<br/>TEE as standard<br/>same features, only account/profile limits differ"]
     end
+    T1 -->|"E2EE (encrypted transport + token auth)"| Daemon
+    Daemon -->|"encrypted at rest"| ST[("encrypted storage")]
+    Daemon -->|"ZDR endpoints only<br/>(dream LLM egress)"| LLM["external model APIs"]
 ```
 
 **Trust-boundary rules**:
-1. No cloud component persists plaintext;
-2. Enclave attestation (remote attestation) opens a verification interface to the client — the user can cryptographically verify that "the code being run is untampered MnemoSeed";
-3. Provenance fields are likewise stored encrypted; auditing is completed locally on the client.
+1. **E2EE transport**: host tools ↔ daemon is encrypted end to end with token auth (identity model in design/06), regardless of deployment location;
+2. **Encrypted at rest**: the daemon's persistence layer (chunks / graph / provenance) is ciphertext on disk; keys are derived and managed daemon-side, user-held when self-hosted;
+3. **Isolation has two stories**: self-hosted users arrange their own environment (TEE or not is their call; the app's E2EE/at-rest encryption is unaffected either way); **the official SaaS runs in a TEE as standard** — a baseline promise of the service, not an optional tier;
+4. **Dream LLM egress**: consolidation must call external APIs, so plaintext inevitably leaves the daemon — therefore only **ZDR (Zero-Data-Retention)** endpoints are used. The official SaaS uses TEE + ZDR API services (the specific provider is an operational detail, not an architectural commitment); self-hosted users pick their own model endpoints and the docs recommend ZDR.
 
 ---
 

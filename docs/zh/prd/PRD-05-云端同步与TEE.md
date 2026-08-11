@@ -5,11 +5,11 @@
 
 ## 1. 目标
 
-上线 MnemoSeed Cloud：daemon 云端托管（SaaS）——宿主侧只装瘦工具（MCP/hooks），daemon 由我们部署运维；功能与自部署完全一致，仅账号/profile 限额不同。E2EE 传输 + 加密存储与部署位置无关（design/04 §3）；梦境 LLM 出口只走 ZDR 端点。TEE 规格作为增值部署选项（我们可售、用户也可自建），不是架构前提。
+上线 MnemoSeed Cloud：daemon 云端托管（SaaS），**标配 TEE（Nitro Enclave）运行**——宿主侧只装瘦工具（MCP/hooks），daemon 由我们部署运维；功能与自部署完全一致，仅账号/profile 限额不同。E2EE 传输 + 加密存储是 app 内建功能，与环境无关（design/04 §3）；梦境 LLM 出口只走 ZDR API。
 
 ## 2. 范围
 
-- **In**：云端托管 daemon（多租户隔离）、多端接入与同步、动态路由网关、用量计费、TEE 规格部署选项
+- **In**：云端托管 daemon（TEE 标配、多租户隔离）、多端接入与同步、动态路由网关、用量计费
 - **Out**：企业私有化集群（License 渠道单独谈）
 
 ## 3. 功能需求
@@ -19,8 +19,8 @@
 | FR-5.1 | 加密存储与传输：daemon 持久层落盘即密文；宿主工具 ↔ daemon 全程 E2EE + token 鉴权；密钥派生与管理在 daemon 侧，自部署时用户自持 | P0 |
 | FR-5.2 | 多端同步：密文 blob + provenance 时间序重放，断网队列恢复 | P0 |
 | FR-5.3 | Profile 隔离：单账号 ≤3 个独立 Profile，跨 Profile 零数据泄漏 | P0 |
-| FR-5.4 | TEE 部署选项：daemon 可运行于 Nitro Enclave 规格（我方 SaaS 增值档 / 用户自建均可）；非 TEE 部署下隐私承诺 = E2EE 传输 + 加密存储 + ZDR 出口 | P1 |
-| FR-5.5 | Attestation 验证接口（仅 TEE 档）：客户端可密码学校验 Enclave 内跑的是官方未篡改镜像 | P1 |
+| FR-5.4 | TEE 运行（SaaS 标配）：daemon 在 Nitro Enclave 内执行，记忆明文只在黑盒内短暂存在；自部署无此要求（用户自行安排环境，E2EE/加密存储不受影响） | P0 |
+| FR-5.5 | Attestation 验证接口（SaaS TEE）：客户端可密码学校验 Enclave 内跑的是官方未篡改镜像 | P0 |
 | FR-5.6 | 动态路由：长背景深反思 → Kimi K3（Fireworks，cache read $0.30/M）；短增量（动态预算 ≤32k，PRD-02 FR-2.5） → DeepSeek V4 Flash 0731（Fireworks，$0.14/M input） | P0 |
 | FR-5.7 | 计费：Profile 数量 + 用量的混合计费模型；具体定价为商业决策，不在本文档（见内部市场文档） | P0 |
 | FR-5.8 | 云端多用户账号体系：邮箱注册 + Google sign-up（OAuth 绑定官方域名）；团队邀请与席位管理 | P0 |
