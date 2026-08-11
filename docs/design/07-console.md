@@ -131,7 +131,7 @@ The visualization and management UI for the soul model (for the model itself, se
 
 The official cloud adds one more layer, the **system administrator** (the operator themselves), a fully separate interface from the user console (`admin.` subdomain + separate admin credentials, outside the user account system).
 
-**Red line (architectural, not disciplinary)**: the admin sees **all operational data; memory plaintext is physically invisible**. Cloud memory is a BYOK E2EE ciphertext blob — not "administrators are forbidden to look", but "the keys are on the user's device; the admin couldn't decrypt them even if they wanted to". This is the technical fulfillment of the "even our admins cannot see plaintext" promise, and no requirement may open a loophole in it.
+**Red line (architectural, not disciplinary)**: the admin sees **all operational data; memory content is invisible by default** — local/self-hosted users hold their own keys (encrypted at rest), and the cloud TEE tier enforces it in hardware. Operations work with metadata only, and no requirement may open a loophole in this.
 
 ```mermaid
 flowchart TB

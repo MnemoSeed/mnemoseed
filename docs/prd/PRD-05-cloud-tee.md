@@ -1,31 +1,31 @@
-# PRD-05 · Cloud Sync, TEE Dreaming & Billing Gateway (MnemoSeed Cloud)
+# PRD-05 · Hosted Cloud Daemon & Billing (MnemoSeed Cloud)
 
 > Design docs: [04-isolation-and-privacy](../design/04-isolation-and-privacy.md), [08-sync-and-merge](../design/08-sync-and-merge.md) (sync protocol and conflict-merge semantics follow 08)
 > Milestone: M4 (commercialization) · Estimate 30 days
 
 ## 1. Goals
 
-Launch MnemoSeed Cloud: physical isolation for 3 Profiles, multi-device E2EE sync, dreaming inside Nitro Enclaves, and a dynamic model-routing gateway. Zero plaintext persists anywhere along the cloud path.
+Launch MnemoSeed Cloud: the daemon hosted by us (SaaS) — hosts install only thin tools (MCP/hooks); features identical to self-hosted, differing only in account/profile limits. E2EE transport + encrypted at-rest storage hold regardless of where the daemon runs (design/04 §3); dream LLM egress goes only to ZDR endpoints. A TEE-backed tier is a deployment option (sold by us or self-arranged), not an architectural prerequisite.
 
 ## 2. Scope
 
-- **In**: E2EE sync protocol, multi-Profile isolation, Enclave dream execution environment + attestation, dynamic routing gateway (Sonnet / GPT-5.6 Terra), usage-based billing
+- **In**: hosted multi-tenant daemon (isolation), multi-device sync, dynamic routing gateway (Sonnet / GPT-5.6 Terra), usage-based billing, TEE deployment option
 - **Out**: enterprise private clusters (License channel negotiated separately)
 
 ## 3. Functional Requirements
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-5.1 | BYOK: client-side private-key derived encryption; keys never leave the device; the cloud only stores ciphertext blobs | P0 |
+| FR-5.1 | Encrypted storage & transport: the daemon persists ciphertext at rest; host tools ↔ daemon is E2EE with token auth; keys are derived and managed daemon-side, user-held when self-hosted | P0 |
 | FR-5.2 | Multi-device sync: ciphertext blobs + provenance-ordered replay, with offline queue recovery | P0 |
 | FR-5.3 | Profile isolation: ≤3 independent Profiles per account, zero data leakage across Profiles | P0 |
-| FR-5.4 | Enclave dreaming: memory is briefly decrypted only inside the Nitro Enclave; plaintext is destroyed as soon as reflection completes | P0 |
-| FR-5.5 | Attestation verification interface: clients can cryptographically verify that the Enclave runs the official, untampered image | P0 |
+| FR-5.4 | TEE deployment option: the daemon can run in a Nitro Enclave spec (our SaaS premium tier / user self-arranged); off-TEE, the privacy promise = E2EE transport + encrypted storage + ZDR egress | P1 |
+| FR-5.5 | Attestation verification interface (TEE tier only): clients can cryptographically verify that the Enclave runs the official, untampered image | P1 |
 | FR-5.6 | Dynamic routing: long-context deep reflection → Kimi K3 (Fireworks, cache read $0.30/M); short increments (dynamic budget ≤32k, PRD-02 FR-2.5) → DeepSeek V4 Flash 0731 (Fireworks, $0.14/M input) | P0 |
 | FR-5.7 | Billing: hybrid model of Profile count + usage-based compute credits; specific pricing is a business decision tracked in internal docs | P0 |
 | FR-5.8 | Cloud multi-user account system: email signup + Google sign-up (OAuth bound to the official domain); team invitations and seat management | P0 |
 | FR-5.9 | Commercial License channel: self-hosted multi-user activation (Ed25519-signed license verified offline; entitlements: multi_user/seats/validity period); 30-day grace after expiry, after which multi-user logins are disabled but the owner and data remain intact (data is never touched); self-hosted deployments can configure their own Google OAuth client | P0 |
-| FR-5.10 | Admin Plane super-admin interface: service health / growth operations (signups/funnel/license activation) / user operations (quotas/bans) / cost observability (model-routing breakdown/TEE utilization); **red line: operations metadata only — memory plaintext is physically invisible (guaranteed by the BYOK architecture, not by discipline)**; super-admin uses independent strong authentication (TOTP/hardware keys), and all operations go into an immutable audit log | P0 |
+| FR-5.10 | Admin Plane super-admin interface: service health / growth operations (signups/funnel/license activation) / user operations (quotas/bans) / cost observability (model-routing breakdown/TEE utilization); **red line: operations metadata only — on the TEE tier memory plaintext is physically invisible (hardware-guaranteed); off-TEE it is encrypted at rest with a minimized runtime exposure surface**; super-admin uses independent strong authentication (TOTP/hardware keys), and all operations go into an immutable audit log | P0 |
 
 ## 4. Non-Functional Requirements
 

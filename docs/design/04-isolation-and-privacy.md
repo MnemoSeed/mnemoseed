@@ -1,4 +1,4 @@
-# 04 · Cognitive Grading Isolation and Zero-Knowledge Privacy
+# 04 · Cognitive Grading Isolation and Privacy
 
 ---
 

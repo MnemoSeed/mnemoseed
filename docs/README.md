@@ -12,7 +12,7 @@
 | [01-memory-pipeline](design/01-memory-pipeline.md) | Capture / Consolidate / Retrieve / Reconcile / Decay + Provenance pipeline |
 | [02-dream-engine](design/02-dream-engine.md) | Trigger state machine, snapshot isolation, interrupt protection, dual-track split writes, incremental dehydration |
 | [03-storage-and-retrieval](design/03-storage-and-retrieval.md) | Hybrid dual-store bus, STORAGE_MODE routing matrix, hybrid retrieval, anti-dilution policy |
-| [04-isolation-and-privacy](design/04-isolation-and-privacy.md) | Cognitive grading isolation, BYOK/TEE zero-knowledge architecture |
+| [04-isolation-and-privacy](design/04-isolation-and-privacy.md) | Cognitive grading isolation, encrypted transport/at-rest privacy architecture, optional TEE tier |
 | [05-industry-landscape](design/05-industry-landscape.md) | Stanford/Microsoft/Anthropic/Nvidia lenses, Claude-Mem, MemPalace teardowns and adoption decisions |
 | [06-host-integration](design/06-host-integration.md) | Three-layer adapter architecture (daemon/MCP/plugin), profile credential identity model (login/link), host capability matrix, 3-minute install flow, disconnect/uninstall semantics |
 | [07-console](design/07-console.md) | MnemoSeed Console: profiles, memory browser, graph view, per-memory full dossier, dream panel and token usage, model routing settings |

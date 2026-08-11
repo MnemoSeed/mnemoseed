@@ -29,13 +29,13 @@ Everything is local-first. A typical dream run costs about $0.001 against cloud 
 - **Cross-model memory** — Claude Code, Cursor, Codex, Grok Build, and anything that speaks MCP
 - **A graph you can audit** — every fact carries provenance (who said it, when, from which session), and history is never overwritten
 - **Cost you can predict** — dynamic budget per dream (5k–32k tokens, sized by actual backlog) plus a monthly token ledger with a hard cap
-- **Privacy by default** — your data stays on your machine; BYOK sync and TEE-based cloud dreams are on the roadmap, not bolted on later
+- **Privacy by default** — local-first by default; encrypted transport and encrypted at-rest storage wherever the daemon runs, and cloud dreams only ever leave through zero-retention (ZDR) model endpoints
 
 ## Status
 
 **Shipped:** capture pipeline, dream engine, hybrid retrieval, six MCP tools (`memory.recall` / `remember` / `audit` / `timeline` / `export` / `forget_this`), installer + doctor + uninstall, Claude Code plugin, Cursor / Codex / Gemini adapters. ~1,100 tests green on every push.
 
-**Roadmap:** management console, cloud sync with TEE execution, the anima personality module (spec in `docs/design/09`).
+**Roadmap:** management console, hosted cloud daemon (with an optional TEE-backed tier), the anima personality module (spec in `docs/design/09`).
 
 Design docs live in `docs/design/` (English) and `docs/zh/` (中文工作稿).
 

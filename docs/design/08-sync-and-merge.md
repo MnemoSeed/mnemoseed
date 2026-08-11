@@ -10,7 +10,7 @@
 MnemoSeed's multi-device scenario (the same profile written to simultaneously from Cursor / Claude Code / CLI) is fundamentally a **multi-replica replication problem**. Two paths:
 
 1. **Central coordination** (all writes serialized through the cloud): simple, but violates local-first — offline means crippled, and the cloud becomes a single point of trust;
-2. **Eventual consistency + explicit merge**: each replica is writable, with convergence guaranteed by the data structure. More engineering, but consistent with the "local-first + zero-knowledge" architectural personality.
+2. **Eventual consistency + explicit merge**: each replica is writable, with convergence guaranteed by the data structure. More engineering, but consistent with the "local-first + privacy-first" architectural personality.
 
 We choose the second. Fortunately, the entire database has been append-only since M0, which dissolves most of the merge problem automatically — the inventory in this document will show that only a small slice of data truly needs "merge semantics".
 
@@ -74,7 +74,7 @@ sequenceDiagram
 **Rules**:
 1. The transport layer is an **append-only change log** — replay-safe; resuming after a disconnect is simply "keep reading from the water mark";
 2. The merge is **idempotent throughout**: replaying the same batch N times yields the same result (G-Set union, content-hash dedup, and max water mark are naturally idempotent);
-3. The cloud relay is just a **dumb pipe** — it neither holds merge logic nor decrypts content (the zero-knowledge commitment is unchanged, see [04](04-isolation-and-privacy.md));
+3. The cloud relay is just a **dumb pipe** — it holds no merge logic, and synced content is encrypted (privacy commitments in [04](04-isolation-and-privacy.md));
 4. Low-frequency sync (minute-level / event-triggered) suffices; no latency metric is promised to the user.
 
 ---

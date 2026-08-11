@@ -13,7 +13,7 @@
 | [01-记忆管线五阶段](design/01-记忆管线五阶段.md) | Capture / Consolidate / Retrieve / Reconcile / Decay + Provenance 全管线设计 |
 | [02-梦境引擎](design/02-梦境引擎.md) | 触发状态机、快照隔离、中断保护、双轨分流写入、增量脱水 |
 | [03-存储与检索](design/03-存储与检索.md) | 混合双库总线、STORAGE_MODE 路由矩阵、混合检索、抗稀释策略 |
-| [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、BYOK/TEE 零知识架构 |
+| [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、E2EE 传输+加密存储隐私架构、TEE 可选档位 |
 | [09-anima与偏好动力学](design/09-anima与偏好动力学.md) | **进阶模块（不在 M1 首发）**：Anima 灵魂模型（三层一体/无损切换）、偏好贝叶斯后验更新、特质雷达可视化 |
 | [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
 | [06-接入与安装体验](design/06-接入与安装体验.md) | 三层适配架构（daemon/MCP/plugin）、profile 凭证身份模型（login/link）、宿主能力矩阵、3 分钟安装流程、断开卸载语义 |

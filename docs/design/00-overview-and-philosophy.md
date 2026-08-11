@@ -132,4 +132,4 @@ flowchart LR
 - **Mem0 (the passive-append school)**: has Capture but no gate, no Reconcile and no Decay — it only grows, it never gets smarter.
 - **Letta/MemGPT (the Agent OS school)**: memory management relies on the model's own Tool Calls; token costs grow linearly with the conversation.
 - **Big-vendor native memory (the closed-loop school)**: OpenAI's memory will never feed Claude.
-- **MnemoSeed**: the only neutral layer that turns "five-stage pipeline + cognitive grading isolation + zero-knowledge hosting" into a complete architecture, and specializes in **Agentic Tool-Use muscle memory** (sedimenting and inheriting habitual tool-call sequences).
+- **MnemoSeed**: the only neutral layer that turns "five-stage pipeline + cognitive grading isolation + privacy-first hosting" into a complete architecture, and specializes in **Agentic Tool-Use muscle memory** (sedimenting and inheriting habitual tool-call sequences).
