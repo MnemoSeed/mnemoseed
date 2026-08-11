@@ -190,3 +190,32 @@ flowchart LR
 **② Schema-accelerated assimilation (Tse et al. 2007, *Science*)**: an existing schema accelerates cortical consolidation of isomorphic new information. Engineering translation: distillations highly isomorphic with the existing graph (entities already present, relation patterns matching) → take the fast track and consolidate directly; misfits → need more independent evidence to pass (weighted queuing in the score pool). This is simultaneously a natural anti-noise gate: the more outlandish the claim, the heavier the burden of proof.
 
 **③ anima re-dye (advanced module)**: triggered when switching anima (see [09](09-anima-and-preferences.md) §4; outside the M1 first-release scope) — the new anima core batch-processes and re-digests the profile's existing memories, growing its own dye layer and preferences. Executed by the dream engine, async and non-blocking; the old anima's dye layer is fully preserved (still there if you switch back; lossless switching).
+
+---
+
+## 11. Promotion Quality Gate
+
+**The problem**: consolidation is reconstructive and systematically introduces distortion (Bartlett 1932; Loftus misinformation effect) — the dream engine's "distillation" is the machine version of reconstruction. Strong storage + wrong distillation = preserving the lie more durably. **No distilled output enters the core graph automatically without passing the quality gate.** (See REFERENCES for the full lineage: synaptic tagging only serves as the input-side selection analogy; the gate's legitimacy comes from the reconstruction-distortion literature plus CLS interleaved learning against catastrophic interference.)
+
+**Principle**: all three checks are deterministic/cheap, and **self-grading by the producing model is forbidden** (self-grading = no gate).
+
+### Three pre-promotion checks (run per triple at write-back)
+
+1. **Groundedness**: every triple must carry source-chunk pointers (provenance), and its entities must actually overlap the source chunk text. Distilling entities/relations absent from the source = hallucination → straight to quarantine. Blocks the dominant "hallucinated association" failure mode;
+2. **Conflict check**: contradicting the existing graph → not promoted; goes through the existing flag_conflict channel (§4 / PRD-04);
+3. **Near-duplicate**: near-dup of an existing node → reinforce the old node instead of creating a new one (reuses the capture-side Hebbian path).
+
+### Post-promotion: long-run precision feedback
+
+4. **Promotion precision**: rolling rate of promoted entries later "corrected by the user / flagged conflicting" (user correction is a **first-class negative signal**, see design/01 §5 and PRD-04 FR-4.9); if precision drops below threshold → the gate auto-tightens (raise the groundedness overlap threshold); sustained health never loosens it (one-way ratchet).
+
+### Quarantine semantics
+
+- Quarantined entries are a `promotion_status` attribute on graph nodes (`pending / promoted / quarantined / scrapped`) — **no new store** (reuse the core graph; duplicating the Tier-3 isolated-graph concept would be a new SPOF);
+- Quarantined entries stay out of retrieval and warm-up injection; the console offers per-item manual promote/scrap (PRD-07);
+- TTL applies: unreviewed entries auto-`scrapped` (version chain, never physically deleted — the append-only red line holds);
+- **Rollback semantics**: a promoted entry can only be reverse-versioned (a new revision marked `revoked` + `valid_to`), never physically rolled back — provenance append-only and timeline replay (NFR-4.3) hold; rollback applies to claims/gists only; the verbatim evidence layer cannot be revoked (legal erasure is the only physical-delete path, design/08 §2.4).
+
+### Relationship to existing discipline
+
+Manual-before-auto (§8) is unchanged: in M1 all dreams are human-reviewed, and the gate runs in **shadow mode** (advisory labels, no blocking). Its agreement rate with human judgment is the measured trustworthiness of the gate itself; auto-promotion unlocks only after that passes.

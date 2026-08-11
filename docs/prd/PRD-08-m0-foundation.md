@@ -120,6 +120,7 @@ Total 15.5d (+0.5d integration buffer ≈ **16d**, so roadmap m0b adjusted to 9d
 - **edges**: `id PK / src / dst / rel / weight / provenance JSON` (co-occurrence edge = `rel='cooccur'` + weight counter)
 - **node_versions**: append-only version chain (`node_id / version / payload snapshot / changed_at / superseded_by`) — the physical basis for as_of bitemporal queries
 - **Node-type enum (v1 frozen)**: `USER / HABIT / PREFERENCE / ANIMA / INTENTION / CONSTRAINT / EPISODE / SKILL_SEQUENCE / DECISION / PROJECT / TOOL`
+- **Promotion-status field (v5)**: graph nodes gain `promotion_status` (`pending / promoted / quarantined / scrapped`, default promoted for back-compat) — the carrier of the promotion quality gate (design/02 §11); cheap to add now, expensive later. Read-side rerank gains a ζ·confidence term (design/03 §2)
 - Per-type payload fields follow the design/03 §3 erDiagram; PREFERENCE includes `valence / prior_width / trait_anchor / evidence_chain`; ANIMA includes `core_traits / dye_layer / idiographic_notes / drift_history`
 
 ### A.3 MetaStore (SQLite and PG isomorphic)

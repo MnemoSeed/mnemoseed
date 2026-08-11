@@ -59,7 +59,7 @@ sequenceDiagram
         G-->>HB: structured nodes top-20
     end
     HB->>RR: fusion rerank
-    Note over RR: score = α·semantic similarity<br/>+ β·cue overlap<br/>+ γ·decay_weight<br/>+ δ·graph centrality<br/>+ ε·co-occurrence edge weight
+    Note over RR: score = α·semantic similarity<br/>+ β·cue overlap<br/>+ γ·decay_weight<br/>+ δ·graph centrality<br/>+ ε·co-occurrence edge weight<br/>+ ζ·confidence (source authority)
     RR-->>HB: top-k ≤ 5 and within token budget
     HB->>V: freshness guard check (Freshness Guard)<br/>WHERE ingested_at > watermark<br/>AND entities ∩ returned entities ≠ ∅
     V-->>HB: unconsolidated new evidence 0..n chunks
