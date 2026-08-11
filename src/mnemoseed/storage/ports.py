@@ -79,6 +79,7 @@ class ChunkFilter:
     turn_end: int | None = None
     entities: tuple[str, ...] = ()
     consolidated: bool | None = None
+    needs_reconcile: bool | None = None  # console reconcile-queue filter (PRD-07)
 
 
 @dataclass(frozen=True)

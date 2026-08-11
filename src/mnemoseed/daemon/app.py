@@ -17,6 +17,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from fastapi import FastAPI
@@ -26,6 +27,8 @@ from mnemoseed.capture import ScoringPipeline, StrippingPipeline, TurnScorer, Tu
 from mnemoseed.capture.pool import PoolEvent, ScorePool
 from mnemoseed.capture.stamper import WriteContext
 from mnemoseed.config import Config, load_config
+from mnemoseed.console import ConsoleService, GuardedStaticFiles
+from mnemoseed.console import router as console_router
 from mnemoseed.daemon.ingest import router as ingest_router
 from mnemoseed.daemon.memory import MemoryService
 from mnemoseed.daemon.memory import router as memory_router
@@ -45,6 +48,10 @@ from mnemoseed.storage.factory import Stores, build_stores
 from mnemoseed.storage.ports import CapabilityIssue, GraphStore
 
 logger = logging.getLogger("mnemoseed.daemon")
+
+# Console SPA shell directory, served under /console by GuardedStaticFiles.
+# Path: <pkg>/console/static (sibling of the daemon package).
+_CONSOLE_STATIC_DIR = Path(__file__).resolve().parent.parent / "console" / "static"
 
 
 @dataclass(frozen=True)
@@ -236,6 +243,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The memory surface (T4) owns one retrieval engine whose track executor is
     # shut down in teardown, before the stores close (no worker outlives boot).
     app.state.memory = MemoryService(stores, config)
+    # Console surface (PRD-07): the live dream trigger is bound here so the
+    # /api/v1 routers observe the same trigger instance the /memory and /ingest
+    # surfaces drive.
+    app.state.console = ConsoleService(stores, config, app.state.dream)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,
@@ -266,6 +277,10 @@ def create_app() -> FastAPI:
     app.state.segmenter = TurnSegmenter(app.state.capture)
     app.include_router(ingest_router)
     app.include_router(memory_router)
+    app.include_router(console_router)
+    # Console SPA shell (PRD-07 T1): served from its own static directory,
+    # mounted behind the same localhost/admin-token gate as /api/v1.
+    app.mount("/console", GuardedStaticFiles(directory=_CONSOLE_STATIC_DIR), name="console")
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:

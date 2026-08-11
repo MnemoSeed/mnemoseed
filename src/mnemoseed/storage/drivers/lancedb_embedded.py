@@ -563,6 +563,8 @@ class LanceDbEmbeddedStore:
             parts.append("(" + " OR ".join(contains) + ")")
         if filter.consolidated is not None:
             parts.append("consolidated = " + ("true" if filter.consolidated else "false"))
+        if filter.needs_reconcile is not None:
+            parts.append("needs_reconcile = " + ("true" if filter.needs_reconcile else "false"))
         return parts
 
     def _sparse_similarity(self, query: SparseVector, row: dict[str, Any]) -> float:

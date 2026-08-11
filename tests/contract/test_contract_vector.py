@@ -329,3 +329,21 @@ def test_list_chunks_filter_pagination(stack) -> None:
 
     by_entity = stack.vector.list_chunks(ChunkFilter(profile_id=PROFILE, entities=("math",)), Page(limit=10))
     assert by_entity.total == 0  # no math-flagged chunk present
+
+
+def test_list_chunks_needs_reconcile_filter(stack) -> None:
+    """needs_reconcile filter (console reconcile queue, PRD-07): only the
+    flagged chunk matches the True filter, and the False filter excludes it.
+    Pins the driver SQL clause on both contract arms."""
+    vectors = stack.embed.embed("flagged")
+    stack.vector.upsert_chunk(make_stamp("r1", "flagged", ingested_at=2.0), vectors.dense, vectors.sparse)
+    stack.vector.upsert_chunk(make_stamp("r2", "flagged", ingested_at=1.0), vectors.dense, vectors.sparse)
+    stack.vector.update_chunk_state(["r1"], needs_reconcile=True)
+
+    flagged = stack.vector.list_chunks(ChunkFilter(profile_id=PROFILE, needs_reconcile=True), Page(limit=10))
+    assert {chunk.chunk_id for chunk in flagged.items} == {"r1"}
+    assert flagged.total == 1
+
+    clean = stack.vector.list_chunks(ChunkFilter(profile_id=PROFILE, needs_reconcile=False), Page(limit=10))
+    assert {chunk.chunk_id for chunk in clean.items} == {"r2"}
+    assert clean.total == 1

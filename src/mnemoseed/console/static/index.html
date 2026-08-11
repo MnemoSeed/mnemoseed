@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MnemoSeed console</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1c1c1c; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    .badge { color: #666; font-size: 0.85rem; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>MnemoSeed console</h1>
+  <p class="badge">management shell &mdash; REST surface at <code>/api/v1</code></p>
+  <section id="status">
+    <p>Loading daemon status&hellip;</p>
+  </section>
+  <script>
+    // Placeholder SPA shell (PRD-07 T1). Interactive panels land in T2/T4;
+    // for now the shell only proves the /console mount + auth gate live.
+    async function loadStatus() {
+      try {
+        const response = await fetch("/api/v1/status");
+        if (!response.ok) {
+          throw new Error("status " + response.status);
+        }
+        const data = await response.json();
+        document.getElementById("status").innerHTML =
+          "<h2>Daemon</h2><pre>" +
+          JSON.stringify(data.daemon, null, 2) +
+          "</pre><h2>Profiles</h2><pre>" +
+          JSON.stringify(data.profiles, null, 2) +
+          "</pre>";
+      } catch (error) {
+        document.getElementById("status").innerHTML =
+          "<p>Status unavailable: " + String(error) + "</p>";
+      }
+    }
+    loadStatus();
+  </script>
+</body>
+</html>

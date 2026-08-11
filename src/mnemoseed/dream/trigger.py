@@ -162,6 +162,23 @@ class DreamTrigger:
         elif rec.state is DreamState.INTERRUPTED:
             rec.state = DreamState.ACCUMULATING
 
+    # ------------------------------------------------------------ auto toggle (PRD-07)
+
+    def set_auto_trigger(self, enabled: bool) -> None:
+        """Flip the manual-first flag at runtime (console toggle, FR-2.8).
+
+        The trigger keeps its current state; only the auto path is re-armed:
+        with True the next pool event launches a dream directly, with False it
+        resumes holding events as ``pending_manual``. The persisted config file
+        stays the source of truth across restarts (the console writes it back).
+        """
+        self._auto_trigger = enabled
+
+    @property
+    def auto_trigger_enabled(self) -> bool:
+        """Current auto-trigger flag (console dashboard reads this)."""
+        return self._auto_trigger
+
     # ------------------------------------------------------------ manual (FR-2.8)
 
     def dream_once(self, profile_id: str) -> bool:

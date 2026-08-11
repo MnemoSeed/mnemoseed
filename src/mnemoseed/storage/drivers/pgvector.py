@@ -441,6 +441,9 @@ def _filter_clauses(filter: ChunkFilter) -> tuple[list[str], list[Any]]:
     if filter.consolidated is not None:
         clauses.append("consolidated = %s")
         params.append(bool(filter.consolidated))
+    if filter.needs_reconcile is not None:
+        clauses.append("needs_reconcile = %s")
+        params.append(bool(filter.needs_reconcile))
     return clauses, params
 
 
