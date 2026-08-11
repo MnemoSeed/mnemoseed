@@ -239,6 +239,25 @@ const FILTER_MODEL = {
   ],
 };
 
+// FR-7.6 review verdicts and FR-7.7 resolution branches are closed vocab on the
+// console surface (mirrors the API / glance-view). All labels stay in English.
+const REVIEW_VERDICTS = [
+  { value: "accept", label: "accept", cls: "ok" },
+  { value: "reject", label: "reject", cls: "warn" },
+  { value: "hallucination", label: "hallucination", cls: "err" },
+];
+const VERDICT_BADGE = {
+  accept: '<span class="badge badge-ok">accept</span>',
+  reject: '<span class="badge badge-warn">reject</span>',
+  hallucination: '<span class="badge badge-err">hallucination</span>',
+};
+const CONFLICT_BRANCHES = [
+  { value: "reinforce", label: "reinforce one side" },
+  { value: "coexist", label: "let both coexist — scope it" },
+  { value: "invalidate", label: "invalidate one side" },
+  { value: "pending", label: "leave pending" },
+];
+
 // ---------------------------------------------------------------- state
 const state = {
   profileId: store.get("mnemoseed.profile") || null,
@@ -253,6 +272,8 @@ const state = {
     limit: 50,
     data: null,
   },
+  review: { runId: null, data: null },
+  conflicts: { data: null },
   autoRefreshTimer: null,
 };
 
@@ -285,6 +306,8 @@ function parseRoute() {
     return { name: "detail", type: bits[1] || null, id: decodeURIComponent(bits[2] || "") };
   }
   if (hash.startsWith("/browse")) return { name: "browse" };
+  if (hash.startsWith("/review")) return { name: "review" };
+  if (hash.startsWith("/conflicts")) return { name: "conflicts" };
   return { name: "dashboard" };
 }
 
@@ -325,6 +348,12 @@ function render() {
   } else if (route.name === "browse") {
     renderBrowseShell();
     loadBrowse();
+  } else if (route.name === "review") {
+    view.innerHTML = '<p class="loading">Loading dream review…</p>';
+    loadReview();
+  } else if (route.name === "conflicts") {
+    view.innerHTML = '<p class="loading">Loading conflicts inbox…</p>';
+    loadConflicts();
   } else {
     view.innerHTML = '<p class="loading">Loading detail…</p>';
     if (!route.type || !route.id) {
@@ -1064,6 +1093,232 @@ async function loadDashboardNow() {
   scheduleAutoRefresh();
 }
 
+// ---------------------------------------------------------------- dream review (FR-7.6)
+async function loadReview() {
+  const view = document.getElementById("view");
+  try {
+    await ensureProfile();
+  } catch (_err) {
+    /* fall through to the empty state */
+  }
+  if (!state.profileId) {
+    if (view) view.innerHTML = reviewShellHtml(null, null);
+    return;
+  }
+  try {
+    const runsBody = await api("/api/v1/dream/runs?limit=1");
+    const run = (runsBody.runs || [])[0] || null;
+    if (!run) {
+      state.review.runId = null;
+      state.review.data = null;
+      if (view) view.innerHTML = reviewShellHtml(run, null);
+      return;
+    }
+    const review = await api(
+      `/api/v1/dream/review/${encodeURIComponent(run.run_id)}?profile_id=${encodeURIComponent(state.profileId)}`,
+    );
+    state.review.runId = run.run_id;
+    state.review.data = review;
+    if (view) view.innerHTML = reviewShellHtml(run, review);
+    setUpdatedAt();
+  } catch (error) {
+    state.review.data = null;
+    if (view) view.innerHTML = errorPanel(`Review request failed: ${error.message}`);
+  }
+}
+
+function reviewShellHtml(run, review) {
+  const toolbar = `<div class="toolbar">
+    <button class="btn" data-act="go-home">← dashboard</button>
+    <button class="btn" data-act="review-refresh" ${state.profileId ? "" : "disabled"}>Refresh</button>
+    <span class="spacer"></span>
+    <span class="toolbar-note">every verdict is written to the audit log</span>
+  </div>`;
+  if (!run) {
+    return toolbar + `<div class="card"><h2>dream quality review</h2>${emptyPanel("No dream runs recorded yet — Dream once on the dashboard, then review its distilled triples against the source chunks here.")}</div>`;
+  }
+  const head = `<div class="card">
+    <h2>dream quality review</h2>
+    ${kvList([
+      ["run", `<span class="mono">${esc(run.run_id)}</span>`],
+      ["turn range", esc(fmtRange(run.turn_range))],
+      ["started", esc(fmtEpoch(run.started_at))],
+      ["model", esc(run.model_id || "—")],
+    ])}
+  </div>`;
+  if (!review || review.reflected !== true) {
+    return toolbar + head + `<div class="card"><h2>distilled triples</h2>${emptyPanel("This run produced no reviewable triples.")}</div>`;
+  }
+  const triples = (review.triples || []);
+  const cards = triples.map((triple, index) => tripleReviewCard(triple, index)).join("");
+  return toolbar + head + `<div class="card"><h2>distilled triples · ${fmtNum(triples.length)}</h2><p class="toolbar-note">each triple sits beside the verbatim source chunks it was distilled from — accept what held, reject what misled, flag what was invented.</p>${cards || emptyPanel("No triples distilled in this run.")}</div>`;
+}
+
+function tripleReviewCard(triple, index) {
+  const chunks = (triple.chunks || []).map(
+    (chunk) => `<div class="source-chunk"><div class="row-title">${esc(chunk.text)}</div><div class="chunk-id mono">${esc(chunk.chunk_id)}</div></div>`,
+  ).join("");
+  const verdict = triple.verdict;
+  const controls = verdict
+    ? `${VERDICT_BADGE[verdict.action] || esc(verdict.action)} <span class="dim">recorded · ${esc(fmtEpoch(verdict.at))}</span>`
+    : REVIEW_VERDICTS.map(
+        (v) =>
+          `<button class="btn btn-primary" data-act="review-verdict" data-index="${index}" data-verdict="${v.value}" title="record ${esc(v.value)} verdict">${esc(v.label)}</button>`,
+      ).join("");
+  return `<div class="triple-review">
+    <div class="trip-line"><span class="triple-term s">${esc(triple.subject)}</span> → <span class="triple-term p">${esc(triple.predicate)}</span> → <span class="triple-term o">${esc(triple.object)}</span></div>
+    <div class="row-meta">route ${esc(triple.route)} · confidence ${fmtNum(triple.confidence)} · preference ${triple.preference ? "yes" : "no"} · polarity ${esc(triple.polarity)}</div>
+    ${chunks}
+    <div class="verdict-row">${controls}</div>
+  </div>`;
+}
+
+async function submitReviewVerdict(runId, triple, verdict) {
+  const view = document.getElementById("view");
+  try {
+    await api("/api/v1/dream/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: runId,
+        profile_id: state.profileId,
+        subject: triple.subject,
+        predicate: triple.predicate,
+        object: triple.object,
+        route: triple.route,
+        verdict,
+      }),
+    });
+    await loadReview();
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`verdict failed: ${error.message}`));
+  }
+}
+
+// ---------------------------------------------------------------- conflicts inbox (FR-7.7)
+async function loadConflicts() {
+  const view = document.getElementById("view");
+  try {
+    await ensureProfile();
+  } catch (_err) {
+    /* fall through to the empty state */
+  }
+  if (!state.profileId) {
+    if (view) view.innerHTML = conflictsShellHtml(null);
+    return;
+  }
+  try {
+    const body = await api(`/api/v1/conflicts?profile_id=${encodeURIComponent(state.profileId)}`);
+    state.conflicts.data = body;
+    if (view) view.innerHTML = conflictsShellHtml(body);
+    setUpdatedAt();
+  } catch (error) {
+    state.conflicts.data = null;
+    if (view) view.innerHTML = errorPanel(`Conflicts request failed: ${error.message}`);
+  }
+}
+
+function conflictsShellHtml(body) {
+  const toolbar = `<div class="toolbar">
+    <button class="btn" data-act="go-home">← dashboard</button>
+    <button class="btn" data-act="conflict-refresh" ${state.profileId ? "" : "disabled"}>Refresh</button>
+    <span class="spacer"></span>
+    <span class="toolbar-note">resolution writes the version chain — reconciled, never erased</span>
+  </div>`;
+  if (!body) {
+    return toolbar + `<div class="card"><h2>conflicts inbox</h2>${emptyPanel("No profile available yet — contradictions surface here per active profile.")}</div>`;
+  }
+  const groups = body.groups || [];
+  if (!groups.length) {
+    return toolbar + `<div class="card"><h2>conflicts inbox</h2>${emptyPanel("No conflict pairs in the inbox. When two memories land in the same conflict group, they appear here side-by-side for a reconcile decision.")}</div>`;
+  }
+  const cards = groups.map((group, index) => conflictGroupCard(group, index)).join("");
+  return toolbar + `<div class="card"><h2>conflicts inbox · ${fmtNum(groups.length)} pair${groups.length === 1 ? "" : "s"}</h2>${cards}</div>`;
+}
+
+function conflictGroupCard(group, index) {
+  const sides = (group.sides || []).map((side) => conflictSideCard(side, index)).join("");
+  const branches = CONFLICT_BRANCHES.map(
+    (branch) => `<option value="${branch.value}">${esc(branch.label)}</option>`,
+  ).join("");
+  return `<div class="conflict-group">
+    <h3>conflict group <span class="mono">${esc(group.group_id)}</span></h3>
+    <div class="conflict-sides">${sides}</div>
+    <h4>resolve</h4>
+    <div class="resolve-row">
+      <select data-resolution-branch data-index="${index}" aria-label="resolution branch">${branches}</select>
+      <input type="text" data-resolution-scope data-index="${index}" hidden placeholder="context where each side holds, e.g. 'go projects use tabs, python uses spaces'" />
+      <button class="btn btn-primary" data-act="conflict-resolve" data-index="${index}">resolve</button>
+    </div>
+    <p class="resolve-note" data-scope-note data-index="${index}">reinforce / invalidate pick one side; coexist needs a scope annotation.</p>
+  </div>`;
+}
+
+function conflictSideCard(side, index) {
+  const provenance = side.provenance || {};
+  return `<div class="conflict-side">
+    <label class="check-row side-pick"><input type="radio" name="conflict-side-${index}" value="${esc(side.node_id)}" /> <span><strong>${esc(side.statement)}</strong></span></label>
+    <div class="row-meta">${decayMeter(side.decay_weight)} · confidence ${fmtNum(side.confidence)} · ${fmtNum(side.reinforce_count)} reinforcement${side.reinforce_count === 1 ? "" : "s"} · v${fmtNum(side.version)}</div>
+    ${kvList([
+      ["domain", esc(side.domain || "—")],
+      ["scope", esc(side.scope || "—")],
+      ["entities", badgeList(side.entities)],
+      ["asserted by", esc(provenance.asserted_by || "—")],
+      ["source", esc(provenance.source || "—")],
+      ["asserted at", esc(fmtEpoch(provenance.asserted_at))],
+    ])}
+  </div>`;
+}
+
+async function resolveConflict(index) {
+  const view = document.getElementById("view");
+  const groups = (state.conflicts.data && state.conflicts.data.groups) || [];
+  const group = groups[index];
+  if (!group) return;
+  const branchSelect = document.querySelector(`[data-resolution-branch][data-index="${index}"]`);
+  const branch = branchSelect ? branchSelect.value : "pending";
+  const scopeInput = document.querySelector(`[data-resolution-scope][data-index="${index}"]`);
+  const scope = scopeInput ? String(scopeInput.value || "").trim() : "";
+  let nodeId = null;
+  if (branch === "reinforce" || branch === "invalidate") {
+    const picked = document.querySelector(`input[name="conflict-side-${index}"]:checked`);
+    if (!picked || !picked.value) {
+      if (view) view.insertAdjacentHTML("beforeend", errorInline("pick the side to reinforce or invalidate first."));
+      return;
+    }
+    nodeId = picked.value;
+  }
+  const payload = { profile_id: state.profileId, branch };
+  if (nodeId) payload.node_id = nodeId;
+  if (branch === "coexist") payload.scope = scope;
+  try {
+    const result = await api(`/api/v1/conflicts/${encodeURIComponent(group.group_id)}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    await loadConflicts();
+    const live = document.getElementById("view");
+    if (live) {
+      const outcome = result.already_resolved ? "already resolved earlier" : `resolved · ${esc(result.branch)}`;
+      const written = Array.isArray(result.written) && result.written.length
+        ? `<span class="mono">${esc(result.written.join(", "))}</span>`
+        : '<span class="dim">none</span>';
+      live.insertAdjacentHTML(
+        "afterbegin",
+        `<div class="card"><h2>resolution</h2>${kvList([
+          ["group", `<span class="mono">${esc(group.group_id)}</span>`],
+          ["branch", esc(result.branch)],
+          ["outcome", esc(outcome)],
+          ["written", written],
+        ])}</div>`,
+      );
+    }
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`resolve failed: ${error.message}`));
+  }
+}
+
 // ---------------------------------------------------------------- events (delegation)
 function handleClick(event) {
   const el = event.target.closest("[data-act]");
@@ -1098,6 +1353,26 @@ function handleClick(event) {
     case "go-browse":
       location.hash = "#/browse";
       break;
+    case "go-home":
+      location.hash = "#/dashboard";
+      break;
+    case "review-refresh":
+      loadReview();
+      break;
+    case "conflict-refresh":
+      loadConflicts();
+      break;
+    case "review-verdict": {
+      const index = Number(el.dataset.index);
+      const verdict = el.dataset.verdict;
+      const triple = state.review.data && state.review.data.triples && state.review.data.triples[index];
+      if (!triple || !verdict || !state.review.runId) break;
+      submitReviewVerdict(state.review.runId, triple, verdict);
+      break;
+    }
+    case "conflict-resolve":
+      resolveConflict(Number(el.dataset.index));
+      break;
     case "retry":
       render();
       break;
@@ -1118,6 +1393,18 @@ function handleChange(event) {
   }
   if (target.dataset && target.dataset.act === "toggle-auto") {
     setAutoTrigger(target.checked === true);
+  }
+  if (target.hasAttribute && target.hasAttribute("data-resolution-branch")) {
+    const index = target.dataset.index;
+    const scopeInput = document.querySelector(`[data-resolution-scope][data-index="${index}"]`);
+    if (scopeInput) scopeInput.hidden = target.value !== "coexist";
+    const note = document.querySelector(`[data-scope-note][data-index="${index}"]`);
+    if (note) {
+      note.textContent =
+        target.value === "coexist"
+          ? "both sides keep their statement; the scope annotation lands on both version chains."
+          : "reinforce / invalidate pick one side; coexist needs a scope annotation.";
+    }
   }
 }
 

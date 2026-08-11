@@ -13,7 +13,13 @@ from typing import Annotated, Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from mnemoseed.console.auth import require_console_auth
-from mnemoseed.console.service import ConsoleNotFoundError, ConsoleService
+from mnemoseed.console.service import (
+    CONFLICT_BRANCHES,
+    REVIEW_ROUTES,
+    REVIEW_VERDICTS,
+    ConsoleNotFoundError,
+    ConsoleService,
+)
 from mnemoseed.schema.graph import NodeType
 
 router = APIRouter(
@@ -174,3 +180,92 @@ def dream_auto_trigger(request: Request, body: dict[str, Any]) -> dict[str, Any]
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=422, detail="body.enabled must be a boolean")
     return _service(request).set_auto_trigger(enabled)
+
+
+# ---------------------------------------------------------------- dream review (FR-7.6)
+
+
+@router.get("/dream/review/{run_id}")
+def dream_review(request: Request, run_id: str, profile_id: str = Query(..., min_length=1)) -> dict[str, Any]:
+    """FR-7.6 quality review: one run's triples with their source chunks
+    (diff-style pairing) and any already-recorded verdicts."""
+    try:
+        return _service(request).dream_review(run_id=run_id, profile_id=profile_id)
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _string_field(body: dict[str, Any], name: str) -> str:
+    value = body.get(name)
+    if not isinstance(value, str) or not value:
+        raise HTTPException(status_code=422, detail=f"body.{name} must be a non-empty string")
+    return value
+
+
+@router.post("/dream/review")
+def dream_review_verdict(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.6 review write: per-triple accept/reject/hallucination verdict,
+    audit-logged and idempotent."""
+    run_id = _string_field(body, "run_id")
+    profile_id = _string_field(body, "profile_id")
+    subject = _string_field(body, "subject")
+    predicate = _string_field(body, "predicate")
+    obj = _string_field(body, "object")
+    route = _string_field(body, "route")
+    if route not in REVIEW_ROUTES:
+        raise HTTPException(status_code=422, detail=f"body.route must be one of {sorted(REVIEW_ROUTES)}")
+    verdict = _string_field(body, "verdict")
+    if verdict not in REVIEW_VERDICTS:
+        raise HTTPException(status_code=422, detail=f"body.verdict must be one of {sorted(REVIEW_VERDICTS)}")
+    try:
+        return _service(request).dream_review_verdict(
+            run_id=run_id,
+            profile_id=profile_id,
+            subject=subject,
+            predicate=predicate,
+            obj=obj,
+            route=route,
+            verdict=verdict,
+        )
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------- conflicts inbox (FR-7.7)
+
+
+@router.get("/conflicts")
+def list_conflicts(request: Request, profile_id: str = Query(..., min_length=1)) -> dict[str, Any]:
+    """FR-7.7 inbox: flag_conflict pairs, both sides with provenance and cues."""
+    return _service(request).list_conflicts(profile_id=profile_id)
+
+
+@router.post("/conflicts/{group_id}/resolve")
+def resolve_conflict(request: Request, group_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.7 resolution: reinforce / coexist / invalidate / pending, written
+    back to the version chain + audit. Idempotent on re-submit."""
+    profile_id = _string_field(body, "profile_id")
+    branch = _string_field(body, "branch")
+    if branch not in CONFLICT_BRANCHES:
+        raise HTTPException(status_code=422, detail=f"body.branch must be one of {sorted(CONFLICT_BRANCHES)}")
+    node_id = body.get("node_id")
+    if node_id is not None and (not isinstance(node_id, str) or not node_id):
+        raise HTTPException(status_code=422, detail="body.node_id must be a non-empty string")
+    scope = body.get("scope")
+    if scope is not None and not isinstance(scope, str):
+        raise HTTPException(status_code=422, detail="body.scope must be a string")
+    service = _service(request)
+    if branch in ("reinforce", "invalidate") and (node_id is None or not node_id):
+        raise HTTPException(status_code=422, detail=f"body.node_id is required for branch {branch!r}")
+    if branch == "coexist" and (scope is None or not scope.strip()):
+        raise HTTPException(status_code=422, detail="body.scope is required for branch 'coexist'")
+    try:
+        return service.resolve_conflict(
+            group_id=group_id,
+            profile_id=profile_id,
+            branch=branch,
+            node_id=node_id,
+            scope=scope,
+        )
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

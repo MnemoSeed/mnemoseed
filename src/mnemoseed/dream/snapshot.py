@@ -284,7 +284,14 @@ class FileSnapshotter:
         if SnapshotPhase.MERGE_DONE.value in snap.phases:
             return 0
         consumed = self._consumed_ids(snap) if consumed_chunk_ids is None else tuple(consumed_chunk_ids)
-        merged = snap.with_phase(SnapshotPhase.MERGE_DONE.value)
+        # The on-disk journal is the authoritative copy: the reflect pass
+        # persisted its triples there without updating ``_active``, so the
+        # merge-done rewrite must build on the journaled snapshot, never the
+        # stale in-memory one (or every distilled triple would be clobbered by
+        # an otherwise complete dream). The in-memory copy only diverges when
+        # the journal is missing, which pre-delta direct/test calls expect.
+        on_disk = load_snapshot_file(self._directory / f"{snap.snapshot_id}.json")
+        merged = (on_disk if on_disk is not None else snap).with_phase(SnapshotPhase.MERGE_DONE.value)
         write_snapshot_file(self._directory, merged)
         self._active[profile_id] = merged
         if consumed is not None:

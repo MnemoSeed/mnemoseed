@@ -575,3 +575,26 @@ def test_crash_between_marker_and_purge_does_not_reexecute(tmp_path: Path) -> No
     assert fs.purge_snapshot("alice", TurnRange(0, 2)) == 0
     assert store.purge_calls == 1
     assert {c.chunk_id for c in store.chunks} == {"a"}
+
+
+def test_purge_preserves_journaled_reflect_result(tmp_path: Path) -> None:
+    """The safe-clear merge-done marker must NOT clobber the reflect payload:
+    the reflect pass persists its triples into the journal (the only per-run
+    triple record the review view reads), and purge_snapshot rewrites the file
+    only to add the MERGE_DONE phase. A regression here loses every distilled
+    triple to an otherwise complete dream."""
+    store = _FakeStore([_stamp("a", "text a", turn_start=0, turn_end=2, session="s1")])
+    fs = _snapshotter(store, directory=tmp_path)
+    snap = fs.request("alice", TurnRange(0, 2)).snapshot
+    assert snap is not None
+    # the reflect pass wrote its result back to the journal (in-memory _active
+    # never sees it -- the on-disk journal is the authoritative copy)
+    payload = {"snapshot_id": snap.snapshot_id, "profile_id": "alice", "turn_range": {"start": 0, "end": 2}}
+    write_snapshot_file(tmp_path, snap.with_reflect(payload).with_phase(SnapshotPhase.REFLECT_DONE.value))
+
+    fs.purge_snapshot("alice", TurnRange(0, 2))
+
+    on_disk = load_snapshot_file(tmp_path / f"{snap.snapshot_id}.json")
+    assert on_disk is not None
+    assert SnapshotPhase.MERGE_DONE.value in on_disk.phases
+    assert on_disk.reflect_result is not None, "merge-done rewrite dropped the reflect payload"

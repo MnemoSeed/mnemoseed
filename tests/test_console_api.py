@@ -21,6 +21,7 @@ FR/AC:
 
 from __future__ import annotations
 
+import json
 import secrets
 import time
 from pathlib import Path
@@ -36,6 +37,8 @@ from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_met
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
 from mnemoseed.storage.ports import (
     AuditFilter,
+    GraphFlag,
+    NodeFilter,
     Page,
     StoredProfile,
     TurnRange,
@@ -710,3 +713,584 @@ def test_console_admin_token_check_uses_compare_digest(tmp_path, monkeypatch) ->
 
     with _client(tmp_path, monkeypatch, loopback=False) as client:
         assert client.get("/console/").status_code == 401
+
+
+# ---------------------------------------------------------------- dream review (FR-7.6 T3)
+
+
+def _write_user_chunk(
+    client: TestClient,
+    *,
+    chunk_id: str,
+    text: str,
+    entities: tuple[str, ...] = (),
+    turn_start: int = 0,
+    turn_end: int = 1,
+) -> str:
+    """Seed a verbatim chunk stamped as user-originated (FR-2.12: preference
+    extraction requires origin=user, which persona_id/asserted_by gate)."""
+    now = time.time()
+    stamp = ChunkStamp(
+        chunk_id=chunk_id,
+        profile_id=_PROFILE,
+        text=text,
+        cognitive_tier=CognitiveTier.TIER_1,
+        model_id="test-model",
+        cues=Cues(entities=list(entities)),
+        provenance=Provenance(
+            asserted_by="user",
+            session_id=_SESSION,
+            source="seed",
+            asserted_at=now,
+            history=[
+                ProvenanceEvent(at=now - 1.0, action="created", actor="test", detail={"round": 0}),
+            ],
+        ),
+        decay_weight=1.0,
+        score=0.0,
+        consolidated=False,
+        ingested_at=now,
+        turn_start=turn_start,
+        turn_end=turn_end,
+    )
+    embedded = client.app.state.stores.embed.embed(text)
+    client.portal.call(client.app.state.stores.vector.upsert_chunk, stamp, embedded.dense, embedded.sparse)
+    return chunk_id
+
+
+def _dream_run_id(client: TestClient, profile_id: str = _PROFILE) -> str:
+    """Fire one manual dream through the real daemon (reflect + merge + safe
+    clear run synchronously) and return the journaled run id."""
+    _fire_dream_event(client, profile_id)
+    launched = client.post("/api/v1/dream/once", json={"profile_id": profile_id}).json()
+    assert launched["launched"] is True
+    runs = client.get("/api/v1/dream/runs").json()["runs"]
+    assert runs, "the manual dream must register a run"
+    return runs[0]["run_id"]
+
+
+def test_dream_review_404_unknown_run_and_foreign_profile(tmp_path, monkeypatch) -> None:
+    """FR-7.6 typed 404: an unknown run id, and a run of another profile, are
+    both 404 for the review view."""
+    with _client(tmp_path, monkeypatch) as client:
+        assert client.get("/api/v1/dream/review/nope", params={"profile_id": _PROFILE}).status_code == 404
+        _seed_profile(client)
+        run_id = _dream_run_id(client)
+        foreign = client.get(f"/api/v1/dream/review/{run_id}", params={"profile_id": "other"})
+        assert foreign.status_code == 404
+
+
+def test_dream_review_lists_triples_pairing_source_chunks(tmp_path, monkeypatch) -> None:
+    """FR-7.6 AC-1: a completed run review view lists its triples side-by-side
+    with the verbatim source chunks they were distilled from, verdict pending."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _write_user_chunk(client, chunk_id="tabs-1", text="I prefer tabs for indentation")
+        _write_user_chunk(client, chunk_id="coffee-1", text="I like coffee in the morning")
+        run_id = _dream_run_id(client)
+
+        body = client.get(f"/api/v1/dream/review/{run_id}", params={"profile_id": _PROFILE}).json()
+        assert body["run_id"] == run_id
+        assert body["profile_id"] == _PROFILE
+        assert body["reflected"] is True
+        assert body["turn_range"] == {"start": 0, "end": 1}
+
+        by_object = {t["object"]: t for t in body["triples"]}
+        assert set(by_object) == {"tabs for indentation", "coffee in the morning"}
+        for triple in body["triples"]:
+            assert triple["subject"] == "user"
+            assert triple["predicate"] == "prefers"
+            assert triple["confidence"] == 0.7
+            assert triple["route"] == "core"
+            assert triple["polarity"] == "positive"
+            assert triple["preference"] is True
+            assert triple["verdict"] is None
+            # diff-style pairing: every triple carries its verbatim source chunks
+            assert triple["chunk_ids"] and triple["chunks"]
+            assert triple["chunk_ids"][0] == triple["chunks"][0]["chunk_id"]
+            assert triple["chunks"][0]["text"].startswith("I ")
+
+
+def test_dream_review_verdict_records_audits_and_is_idempotent(tmp_path, monkeypatch) -> None:
+    """FR-7.6 write: a per-triple verdict lands one audit row, the review view
+    reflects it, and re-submitting the identical verdict writes nothing twice."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _write_user_chunk(client, chunk_id="tabs-1", text="I prefer tabs for indentation")
+        run_id = _dream_run_id(client)
+        triple = client.get(f"/api/v1/dream/review/{run_id}", params={"profile_id": _PROFILE}).json()[
+            "triples"
+        ][0]
+
+        def _send(verdict: str) -> dict:
+            return client.post(
+                "/api/v1/dream/review",
+                json={
+                    "run_id": run_id,
+                    "profile_id": _PROFILE,
+                    "subject": triple["subject"],
+                    "predicate": triple["predicate"],
+                    "object": triple["object"],
+                    "route": triple["route"],
+                    "verdict": verdict,
+                },
+            ).json()
+
+        recorded = _send("accept")
+        assert recorded["recorded"] is True
+        assert recorded["verdict"] == "accept"
+
+        refreshed = client.get(f"/api/v1/dream/review/{run_id}", params={"profile_id": _PROFILE}).json()
+        assert refreshed["triples"][0]["verdict"]["action"] == "accept"
+        assert refreshed["triples"][0]["verdict"]["at"] == pytest.approx(recorded["at"])
+
+        # idempotent double-submit: same verdict, no duplicate write
+        again = _send("accept")
+        assert again["recorded"] is False
+        assert again["at"] == pytest.approx(recorded["at"])
+
+        entries = _audit(client, "review_verdict")
+        assert len(entries) == 1
+        assert entries[0].detail["run_id"] == run_id
+        assert entries[0].detail["subject"] == triple["subject"]
+        assert entries[0].detail["object"] == triple["object"]
+        assert entries[0].detail["verdict"] == "accept"
+
+
+def test_dream_review_verdict_typed_errors(tmp_path, monkeypatch) -> None:
+    """FR-7.6 typed errors: invalid verdict/route/missing fields are 422,
+    unknown runs and triples outside the run are 404."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _write_user_chunk(client, chunk_id="tabs-1", text="I prefer tabs for indentation")
+        run_id = _dream_run_id(client)
+        triple = client.get(f"/api/v1/dream/review/{run_id}", params={"profile_id": _PROFILE}).json()[
+            "triples"
+        ][0]
+
+        base = {
+            "run_id": run_id,
+            "profile_id": _PROFILE,
+            "subject": triple["subject"],
+            "predicate": triple["predicate"],
+            "object": triple["object"],
+            "route": triple["route"],
+            "verdict": "accept",
+        }
+
+        def _with(**patch):
+            payload = dict(base)
+            payload.update(patch)
+            return payload
+
+        assert client.post("/api/v1/dream/review", json=_with(verdict="maybe")).status_code == 422
+        assert client.post("/api/v1/dream/review", json=_with(route="ghost")).status_code == 422
+        assert client.post("/api/v1/dream/review", json=_with(object="")).status_code == 422
+        assert client.post("/api/v1/dream/review", json=_with(run_id="nope")).status_code == 404
+        # a triple that is not part of this run is a typed 404, not a silent no-op
+        status = client.post("/api/v1/dream/review", json=_with(object="coffee in the morning")).status_code
+        assert status == 404
+
+
+def test_dream_review_run_id_cannot_escape_journal_dir(tmp_path, monkeypatch) -> None:
+    """F2: a crafted run_id ('../x') must never resolve to a snapshot outside
+    the journal dir. A decoy file planted one level above journal_dir would be
+    loaded by a path-traversal run_id and accepted here; the service must
+    reject it as an unknown run (404) instead of reading outside its sandbox."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        # journal_dir is tmp_path / "dreams"; the decoy lives in tmp_path itself,
+        # exactly what "../escape" normalizes to when concatenated unsafely.
+        journal_dir = tmp_path / "dreams"
+        decoy = {
+            "snapshot_id": "escape",
+            "profile_id": _PROFILE,
+            "turn_range": {"start": 0, "end": 1},
+            "chunks": [],
+            "created_at": time.time(),
+            "phases": ["consolidate"],
+            "reflect_result": {
+                "snapshot_id": "escape",
+                "profile_id": _PROFILE,
+                "turn_range": {"start": 0, "end": 1},
+                "prompt_version": "test",
+                "triples": [
+                    {
+                        "subject": "alice",
+                        "predicate": "prefers",
+                        "object": "tea",
+                        "tiers": [1],
+                        "chunk_ids": [],
+                        "turn_range": {"start": 0, "end": 1},
+                        "confidence": 0.8,
+                        "route": "core",
+                        "preference": False,
+                        "polarity": "positive",
+                    }
+                ],
+                "conflicts": [],
+                "delta_overflow": [],
+                "consumed_chunk_ids": [],
+            },
+        }
+        (tmp_path / "escape.json").write_text(json.dumps(decoy), encoding="utf-8")
+        assert not (journal_dir / "escape.json").exists()
+
+        # traversal: '../escape' would read tmp_path/escape.json — a 200 here
+        # means the sandbox was escaped; it must be an unknown-run 404 instead.
+        response = client.post(
+            "/api/v1/dream/review",
+            json={
+                "run_id": "../escape",
+                "profile_id": _PROFILE,
+                "subject": "alice",
+                "predicate": "prefers",
+                "object": "tea",
+                "route": "core",
+                "verdict": "accept",
+            },
+        )
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------- conflicts inbox (FR-7.7 T4)
+
+
+def _seed_conflict_pair(client: TestClient, *, group_id: str = "cg-tabs-vs-spaces") -> tuple[str, str, str]:
+    node_a = _pref("cn-tabs", "prefers tabs", entities=("Fmt",), conflict_flag=True, conflict_group=group_id)
+    node_b = _pref(
+        "cn-spaces", "prefers spaces", entities=("Fmt",), conflict_flag=True, conflict_group=group_id
+    )
+    _write_node(client, node_a)
+    _write_node(client, node_b)
+    return node_a.node_id, node_b.node_id, group_id
+
+
+def test_conflicts_inbox_pairs_both_sides_with_provenance(tmp_path, monkeypatch) -> None:
+    """FR-7.7 inbox: flag_conflict pairs surface both sides with their statement,
+    domain, entities, weights, version and provenance summary."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        node_a, node_b, group_id = _seed_conflict_pair(client)
+
+        body = client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()
+        assert len(body["groups"]) == 1
+        group = body["groups"][0]
+        assert group["group_id"] == group_id
+        sides = {side["node_id"]: side for side in group["sides"]}
+        assert set(sides) == {node_a, node_b}
+
+        side_a = sides[node_a]
+        assert side_a["statement"] == "prefers tabs"
+        assert side_a["node_type"] == "PREFERENCE"
+        assert side_a["domain"] == "coding"
+        assert side_a["entities"] == ["Fmt"]
+        assert side_a["decay_weight"] == 1.0
+        assert side_a["confidence"] == 0.9
+        assert side_a["version"] == 1
+        assert side_a["provenance"]["asserted_by"] == "dream-engine"
+        assert side_a["provenance"]["source"] == "seed"
+        assert sides[node_b]["statement"] == "prefers spaces"
+        # nothing ungrouped leaks in: a conflict flag without a group id is skipped
+        loner = _write_node(client, _pref("cn-loner", "prefers tabs", conflict_flag=True))
+        assert loner
+        assert len(client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()["groups"]) == 1
+
+
+def test_conflicts_resolve_coexist_annotates_scope_and_clears_pair(tmp_path, monkeypatch) -> None:
+    """FR-7.7 AC-3: coexist writes the scope annotation onto both sides version
+    chain, clears the pair conflict flags, and leaves one audit row."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        node_a, node_b, group_id = _seed_conflict_pair(client)
+        scope = "go projects use tabs, python projects use spaces"
+
+        resolved = client.post(
+            f"/api/v1/conflicts/{group_id}/resolve",
+            json={"profile_id": _PROFILE, "branch": "coexist", "scope": scope},
+        ).json()
+        assert resolved["already_resolved"] is False
+        assert resolved["branch"] == "coexist"
+        assert set(resolved["written"]) == {node_a, node_b}
+        assert resolved["scope"] == scope
+
+        for node_id in (node_a, node_b):
+            dossier = client.get(f"/api/v1/nodes/{node_id}", params={"profile_id": _PROFILE}).json()
+            assert dossier["flags"]["conflict_flag"] is False
+            assert dossier["flags"]["conflict_group"] is None
+            # the scope annotation is written into the version chain payload
+            assert dossier["version_chain"][-1]["props"]["scope"] == scope
+            assert dossier["version_chain"][-1]["provenance"]["history"][-1]["action"] == "scope_annotated"
+            # a resolution APPENDS a revision (design/01 section 4): the chain
+            # grows, the old revision is closed, and it stays readable
+            # temporally with the pre-resolution state (never an in-place rewrite).
+            versions = client.portal.call(client.app.state.stores.graph.versions, node_id)
+            assert len(versions) == 2
+            assert versions[0].version == 1
+            assert versions[0].valid_to is not None
+            assert versions[0].props.get("scope") is None
+            assert versions[1].version == 2
+            assert versions[1].valid_to is None
+            assert versions[1].props.get("scope") == scope
+            pre = client.portal.call(
+                client.app.state.stores.graph.as_of,
+                resolved["at"] - 1.0,
+                NodeFilter(profile_id=_PROFILE),
+            )
+            pre_node = next(n for n in pre if n.node_id == node_id)
+            assert pre_node.version == 1
+            assert pre_node.props.get("scope") is None
+            assert pre_node.confidence == 0.9
+
+        assert client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()["groups"] == []
+
+        entries = _audit(client, "conflict.resolve")
+        assert len(entries) == 1
+        assert entries[0].detail["branch"] == "coexist"
+        assert entries[0].detail["group_id"] == group_id
+        assert entries[0].detail["scope"] == scope
+
+
+def test_conflicts_resolve_reinforce_boosts_kept_side(tmp_path, monkeypatch) -> None:
+    """FR-7.7 reinforce: the kept side gains confidence + decay-weight rebound
+    (design/01 4a) plus a pinned provenance event; the pair clears the inbox."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        node_a, node_b, group_id = _seed_conflict_pair(client)
+
+        resolved = client.post(
+            f"/api/v1/conflicts/{group_id}/resolve",
+            json={"profile_id": _PROFILE, "branch": "reinforce", "node_id": node_a},
+        ).json()
+        assert resolved["already_resolved"] is False
+        assert resolved["reinforced"] == [node_a]
+        assert set(resolved["written"]) == {node_a, node_b}
+
+        kept = client.get(f"/api/v1/nodes/{node_a}", params={"profile_id": _PROFILE}).json()
+        assert kept["weights"]["confidence"] == pytest.approx(0.95)  # 0.9 + 0.05, capped
+        assert kept["weights"]["reinforce_count"] == 1
+        assert kept["weights"]["decay_weight"] == 1.0
+        assert kept["version_chain"][-1]["confidence"] == pytest.approx(0.95)
+        assert kept["version_chain"][-1]["provenance"]["history"][-1]["action"] == "conflict_reinforced"
+
+        # the resolution appends, it never rewrites in place (design/01 section
+        # 4): the kept side grows its chain, the pre-resolution revision stays
+        # temporally readable as_of with the original strength (0.9).
+        versions = client.portal.call(client.app.state.stores.graph.versions, node_a)
+        assert len(versions) == 2
+        assert versions[0].version == 1
+        assert versions[0].valid_to is not None
+        assert versions[0].confidence == 0.9
+        assert versions[1].version == 2
+        assert versions[1].valid_to is None
+        assert versions[1].confidence == pytest.approx(0.95)
+        pre = client.portal.call(
+            client.app.state.stores.graph.as_of,
+            resolved["at"] - 1.0,
+            NodeFilter(profile_id=_PROFILE),
+        )
+        pre_kept = next(n for n in pre if n.node_id == node_a)
+        assert pre_kept.version == 1
+        assert pre_kept.confidence == 0.9
+
+        # the other side is untouched, but the pair still resolves out of the inbox
+        other = client.get(f"/api/v1/nodes/{node_b}", params={"profile_id": _PROFILE}).json()
+        assert other["weights"]["confidence"] == 0.9
+        assert other["weights"]["reinforce_count"] == 0
+        assert client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()["groups"] == []
+
+
+def test_conflicts_resolve_invalidate_closes_revision(tmp_path, monkeypatch) -> None:
+    """FR-7.7 invalidate: the dropped side current revision is closed (valid_to
+    set), it stops being a current node, and the survivor stays."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        node_a, node_b, group_id = _seed_conflict_pair(client)
+        before = client.portal.call(client.app.state.stores.graph.get_node, node_a)
+
+        resolved = client.post(
+            f"/api/v1/conflicts/{group_id}/resolve",
+            json={"profile_id": _PROFILE, "branch": "invalidate", "node_id": node_a},
+        ).json()
+        assert resolved["already_resolved"] is False
+        assert resolved["invalidated"] == [node_a]
+
+        # the invalidated party is no longer a current node (typed 404)...
+        assert client.get(f"/api/v1/nodes/{node_a}", params={"profile_id": _PROFILE}).status_code == 404
+        # ...but its version chain is closed, not deleted: the invalidation is
+        # traced for audit replay
+        versions = client.portal.call(client.app.state.stores.graph.versions, node_a)
+        assert versions
+        assert versions[-1].valid_to is not None
+        assert before is not None
+
+        surviving = client.get(f"/api/v1/nodes/{node_b}", params={"profile_id": _PROFILE})
+        assert surviving.status_code == 200
+        assert client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()["groups"] == []
+
+        entries = _audit(client, "conflict.resolve")
+        assert len(entries) == 1
+        assert entries[0].detail["invalidated"] == [node_a]
+        assert entries[0].detail["written"] == []
+
+
+def test_conflicts_resolve_pending_keeps_pair_in_inbox(tmp_path, monkeypatch) -> None:
+    """FR-7.7 pending: recorded but the pair stays flagged for a later decision."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        node_a, node_b, group_id = _seed_conflict_pair(client)
+
+        resolved = client.post(
+            f"/api/v1/conflicts/{group_id}/resolve",
+            json={"profile_id": _PROFILE, "branch": "pending"},
+        ).json()
+        assert resolved["already_resolved"] is False
+        assert resolved["written"] == []
+        assert resolved["reinforced"] == []
+        assert resolved["invalidated"] == []
+
+        # still flagged, still paired in the inbox
+        inbox = client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()
+        assert len(inbox["groups"]) == 1
+        assert {s["node_id"] for s in inbox["groups"][0]["sides"]} == {node_a, node_b}
+
+        entries = _audit(client, "conflict.resolve")
+        assert len(entries) == 1
+        assert entries[0].detail["branch"] == "pending"
+        assert entries[0].detail["node_id"] is None
+
+
+def test_conflicts_resolve_idempotent_on_resubmit(tmp_path, monkeypatch) -> None:
+    """FR-7.7: re-submitting a resolution for an already-resolved group returns
+    the recorded branch without re-writing or duplicating the audit row."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _, _, group_id = _seed_conflict_pair(client)
+        scope = "python only for data tasks"
+
+        first = client.post(
+            f"/api/v1/conflicts/{group_id}/resolve",
+            json={"profile_id": _PROFILE, "branch": "coexist", "scope": scope},
+        ).json()
+        assert first["already_resolved"] is False
+
+        again = client.post(
+            f"/api/v1/conflicts/{group_id}/resolve",
+            json={"profile_id": _PROFILE, "branch": "coexist", "scope": scope},
+        ).json()
+        assert again["already_resolved"] is True
+        assert again["branch"] == "coexist"
+        assert again["at"] == pytest.approx(first["at"])
+        assert len(_audit(client, "conflict.resolve")) == 1
+
+
+def test_conflicts_resolve_typed_errors(tmp_path, monkeypatch) -> None:
+    """FR-7.7 typed errors: 422 on unknown branch / missing node_id / missing
+    scope; 404 on unknown groups and node_id outside the pair."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        node_a, node_b, group_id = _seed_conflict_pair(client)
+        assert node_a and node_b
+
+        def _resolve(**patch):
+            payload = {"profile_id": _PROFILE, "branch": "pending"}
+            payload.update(patch)
+            return client.post(f"/api/v1/conflicts/{group_id}/resolve", json=payload).status_code
+
+        assert _resolve(branch="nuke") == 422
+        assert _resolve(branch="reinforce") == 422
+        assert _resolve(branch="invalidate") == 422
+        assert _resolve(branch="coexist") == 422
+        # unknown group
+        status = client.post(
+            "/api/v1/conflicts/nope/resolve", json={"profile_id": _PROFILE, "branch": "pending"}
+        ).status_code
+        assert status == 404
+        # node_id that is not part of the pair
+        assert _resolve(branch="reinforce", node_id="stranger-node") == 404
+        # scope of the wrong type
+        assert _resolve(branch="coexist", scope=7) == 422
+
+
+# ---------------------------------------------------------------- e2e: full dream -> review -> conflicts loop
+
+
+def test_dream_conflict_full_loop_e2e(tmp_path, monkeypatch) -> None:
+    """AC-3 end-to-end: two user preference chunks dream into contradictory
+    nodes, the review view pairs triples with their source chunks and takes a
+    verdict, the conflict-flag surface pairs the two nodes, coexist resolves
+    them, and the version chain + audit log both reflect the reconciliation."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _write_user_chunk(client, chunk_id="tabs-1", text="I prefer tabs for indentation")
+        _write_user_chunk(client, chunk_id="spaces-1", text="I prefer spaces for indentation")
+        run_id = _dream_run_id(client)
+
+        # 1. FR-7.6: the run triples pair side-by-side with their source chunks
+        review = client.get(f"/api/v1/dream/review/{run_id}", params={"profile_id": _PROFILE}).json()
+        assert review["reflected"] is True
+        assert {t["object"] for t in review["triples"]} == {
+            "tabs for indentation",
+            "spaces for indentation",
+        }
+        for triple in review["triples"]:
+            assert triple["chunks"], "each distilled triple shows its verbatim source"
+            assert triple["verdict"] is None
+        first = review["triples"][0]
+        verdict = client.post(
+            "/api/v1/dream/review",
+            json={
+                "run_id": run_id,
+                "profile_id": _PROFILE,
+                "subject": first["subject"],
+                "predicate": first["predicate"],
+                "object": first["object"],
+                "route": first["route"],
+                "verdict": "accept",
+            },
+        ).json()
+        assert verdict["recorded"] is True
+
+        # 2. the dream distilled exactly the two contradictory preference nodes
+        nodes = client.get("/api/v1/nodes", params={"profile_id": _PROFILE}).json()["items"]
+        by_statement = {n["statement"]: n["node_id"] for n in nodes}
+        assert set(by_statement) == {"tabs for indentation", "spaces for indentation"}
+        node_a, node_b = by_statement["tabs for indentation"], by_statement["spaces for indentation"]
+
+        # 3. the conflict-flag pair surface links both sides into one group
+        client.portal.call(
+            client.app.state.stores.graph.set_flags, [node_a, node_b], [GraphFlag.CONFLICT_GROUP]
+        )
+        group_id = client.get("/api/v1/nodes", params={"profile_id": _PROFILE, "conflict": "true"}).json()[
+            "items"
+        ][0]["conflict_group"]
+        assert group_id
+
+        # 4. FR-7.7: the inbox pairs the two sides of the contradiction
+        inbox = client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()
+        assert len(inbox["groups"]) == 1
+        group = inbox["groups"][0]
+        assert group["group_id"] == group_id
+        assert {s["node_id"] for s in group["sides"]} == {node_a, node_b}
+
+        # 5. FR-7.7: coexist resolves with a scope; version chain + audit reflect it
+        scope = "prefer tabs in go projects, spaces in python projects"
+        resolved = client.post(
+            f"/api/v1/conflicts/{group_id}/resolve",
+            json={"profile_id": _PROFILE, "branch": "coexist", "scope": scope},
+        ).json()
+        assert resolved["already_resolved"] is False
+        assert set(resolved["written"]) == {node_a, node_b}
+
+        for node_id in (node_a, node_b):
+            dossier = client.get(f"/api/v1/nodes/{node_id}", params={"profile_id": _PROFILE}).json()
+            assert dossier["flags"]["conflict_flag"] is False
+            assert dossier["version_chain"][-1]["props"]["scope"] == scope
+
+        assert client.get("/api/v1/conflicts", params={"profile_id": _PROFILE}).json()["groups"] == []
+        entries = _audit(client, "conflict.resolve")
+        assert len(entries) == 1
+        assert entries[0].detail["branch"] == "coexist"
+        assert entries[0].detail["group_id"] == group_id
+        assert entries[0].detail["scope"] == scope

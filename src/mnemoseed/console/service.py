@@ -35,14 +35,19 @@ from mnemoseed import __version__
 from mnemoseed.config import Config
 from mnemoseed.daemon.memory import _trigger_payload
 from mnemoseed.dream import DreamTrigger, TokenLedger
+from mnemoseed.dream import snapshot as _dream_snapshot
+from mnemoseed.dream.reflect import result_from_payload
+from mnemoseed.dream.snapshot import Snapshot, load_snapshot_file
 from mnemoseed.schema.graph import GraphNode, NodeType
-from mnemoseed.schema.stamp import ChunkStamp
+from mnemoseed.schema.stamp import ChunkStamp, ProvenanceEvent
 from mnemoseed.storage.factory import Stores
 from mnemoseed.storage.ports import (
     AuditEntry,
+    AuditFilter,
     ChunkFilter,
     DreamRun,
     DreamRunFilter,
+    GraphFlag,
     NodeFilter,
     Page,
     TurnRange,
@@ -55,6 +60,20 @@ _SCAN_PAGE = 500
 _SCAN_CAP = 10_000
 
 _AUTO_TRIGGER_LINE = re.compile(r"(\s*)auto_trigger\s*=\s*(?:true|false)(.*)")
+
+# FR-7.6 quality-review verdicts and FR-7.7 Reconcile branches (design/01
+# section 4a semantics) live as closed vocabulary on the console surface.
+REVIEW_VERDICTS: frozenset[str] = frozenset({"accept", "reject", "hallucination"})
+REVIEW_ROUTES: frozenset[str] = frozenset({"core", "isolated", "salvage"})
+CONFLICT_BRANCHES: frozenset[str] = frozenset({"reinforce", "coexist", "invalidate", "pending"})
+
+_REVIEW_ACTION = "review_verdict"
+_CONFLICT_RESOLVE_ACTION = "conflict.resolve"
+
+# Journal filenames are "<run_id>.json"; run_id is a whitelist-restricted slug
+# (uuid hex for real runs) so a crafted value ("../x", absolute paths, dots)
+# can never escape the journal dir through path concatenation.
+_RUN_ID_CHARS = re.compile(r"[A-Za-z0-9_-]+")
 
 
 class ConsoleNotFoundError(Exception):
@@ -81,10 +100,24 @@ def _utc_week_start(timestamp: float) -> float:
 class ConsoleService:
     """Daemon-owned read/write surface behind the /api/v1 console router."""
 
-    def __init__(self, stores: Stores, config: Config, trigger: DreamTrigger) -> None:
+    def __init__(
+        self,
+        stores: Stores,
+        config: Config,
+        trigger: DreamTrigger,
+        journal_dir: Path | None = None,
+    ) -> None:
         self._stores = stores
         self._config = config
         self._trigger = trigger
+        # The dream snapshot journal (the same directory the snapshotter and
+        # reflect pass write) is the review view's source of triples + source
+        # chunks. Read the module attribute at construction so a test patch of
+        # ``mnemoseed.dream.snapshot.CONFIG_DIR`` is honoured exactly like the
+        # snapshotter/reflector's own default.
+        self._journal_dir = (
+            Path(journal_dir) if journal_dir is not None else _dream_snapshot.CONFIG_DIR / "dreams"
+        )
 
     # ------------------------------------------------------------ dashboard
 
@@ -526,6 +559,385 @@ class ConsoleService:
         dream_raw = self._config.raw.setdefault("dream", {})
         dream_raw["auto_trigger"] = enabled
         return path
+
+    # ------------------------------------------------------------ dream review (FR-7.6)
+
+    def dream_review(self, *, run_id: str, profile_id: str) -> dict[str, Any]:
+        """FR-7.6 quality-review view: one run's produced triples with their
+        source chunks (diff-style pairing) and any already-recorded verdicts."""
+        snap = self._load_run_snapshot(run_id, profile_id)
+        result = result_from_payload(snap.reflect_result)
+        if result is None:
+            return {
+                "run_id": run_id,
+                "profile_id": profile_id,
+                "turn_range": _range_payload(snap.turn_range),
+                "reflected": False,
+                "triples": [],
+            }
+        chunks_by_id = {chunk.chunk_id: chunk.text for chunk in snap.chunks}
+        verdicts = self._verdicts_for_run(run_id)
+        return {
+            "run_id": run_id,
+            "profile_id": profile_id,
+            "turn_range": _range_payload(snap.turn_range),
+            "prompt_version": result.prompt_version,
+            "reflected": True,
+            "triples": [
+                {
+                    "subject": triple.subject,
+                    "predicate": triple.predicate,
+                    "object": triple.object,
+                    "confidence": triple.confidence,
+                    "route": triple.route.value,
+                    "polarity": triple.polarity,
+                    "preference": triple.preference,
+                    "tiers": [int(tier) for tier in triple.tiers],
+                    "chunk_ids": list(triple.chunk_ids),
+                    "chunks": [
+                        {"chunk_id": chunk_id, "text": chunks_by_id[chunk_id]}
+                        for chunk_id in triple.chunk_ids
+                        if chunk_id in chunks_by_id
+                    ],
+                    "verdict": verdicts.get(
+                        self._triple_key(triple.subject, triple.predicate, triple.object, triple.route.value)
+                    ),
+                }
+                for triple in result.triples
+            ],
+        }
+
+    def dream_review_verdict(
+        self,
+        *,
+        run_id: str,
+        profile_id: str,
+        subject: str,
+        predicate: str,
+        obj: str,
+        route: str,
+        verdict: str,
+    ) -> dict[str, Any]:
+        """FR-7.6 review write: record one per-triple verdict, audit-logged and
+        idempotent (re-submitting the same verdict does not duplicate the row)."""
+        snap = self._load_run_snapshot(run_id, profile_id)
+        result = result_from_payload(snap.reflect_result)
+        if result is None:
+            raise ConsoleNotFoundError(f"dream run {run_id!r} has no reviewable output")
+        key = self._triple_key(subject, predicate, obj, route)
+        if not any(
+            self._triple_key(t.subject, t.predicate, t.object, t.route.value) == key for t in result.triples
+        ):
+            raise ConsoleNotFoundError(
+                f"triple ({subject}, {predicate}, {obj}) is not part of dream run {run_id!r}"
+            )
+        existing = self._verdicts_for_run(run_id).get(key)
+        if existing is not None and existing["action"] == verdict:
+            return {"recorded": False, "verdict": verdict, "at": existing["at"]}
+        at = time.time()
+        self._stores.meta.audit_append(
+            AuditEntry(
+                actor="console",
+                action=_REVIEW_ACTION,
+                detail={
+                    "run_id": run_id,
+                    "profile_id": profile_id,
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": obj,
+                    "route": route,
+                    "verdict": verdict,
+                },
+                at=at,
+            )
+        )
+        return {"recorded": True, "verdict": verdict, "at": at}
+
+    def _load_run_snapshot(self, run_id: str, profile_id: str) -> Snapshot:
+        """The journaled snapshot behind a dream run; 404 for unknown/foreign."""
+        if not _RUN_ID_CHARS.fullmatch(run_id):
+            raise ConsoleNotFoundError(f"dream run {run_id!r} not found")
+        # Defense in depth on top of the whitelist: anchor the resolved path
+        # inside the journal dir so a symlink or exotic spelling cannot escape.
+        snapped = (self._journal_dir / f"{run_id}.json").resolve()
+        if not snapped.is_relative_to(self._journal_dir.resolve()):
+            raise ConsoleNotFoundError(f"dream run {run_id!r} not found")
+        snap = load_snapshot_file(snapped)
+        if snap is None or snap.profile_id != profile_id:
+            raise ConsoleNotFoundError(f"dream run {run_id!r} not found")
+        return snap
+
+    def _verdicts_for_run(self, run_id: str) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+        """Per-triple verdicts recorded for one run (last write wins)."""
+        out: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        page = Page(limit=200)
+        while True:
+            result = self._stores.meta.audit_query(AuditFilter(actor="console", action=_REVIEW_ACTION), page)
+            for entry in result.items:
+                detail = entry.detail
+                if str(detail.get("run_id", "")) != run_id:
+                    continue
+                key = self._triple_key(
+                    detail.get("subject"), detail.get("predicate"), detail.get("object"), detail.get("route")
+                )
+                verdict = str(detail.get("verdict", ""))
+                if verdict:
+                    out[key] = {"action": verdict, "at": entry.at}
+            consumed = page.offset + len(result.items)
+            if result.total <= consumed:
+                return out
+            page = Page(offset=consumed, limit=page.limit)
+
+    @staticmethod
+    def _triple_key(subject: Any, predicate: Any, obj: Any, route: Any) -> tuple[str, str, str, str]:
+        """The review subject/predicate/object/route dedup key (casefold)."""
+        return (
+            str(subject or "").casefold(),
+            str(predicate or "").casefold(),
+            str(obj or "").casefold(),
+            str(route or "").casefold(),
+        )
+
+    # ------------------------------------------------------------ conflicts inbox (FR-7.7)
+
+    def list_conflicts(self, *, profile_id: str) -> dict[str, Any]:
+        """FR-7.7 inbox: flag_conflict pairs, grouped by their shared group id."""
+        flagged = [
+            node
+            for node in self._scan_nodes(NodeFilter(profile_id=profile_id))
+            if node.conflict_flag and node.conflict_group is not None
+        ]
+        groups: dict[str, list[GraphNode]] = {}
+        for node in flagged:
+            groups.setdefault(str(node.conflict_group), []).append(node)
+        return {
+            "groups": [
+                {"group_id": group_id, "sides": [self._conflict_side(node) for node in members]}
+                for group_id, members in sorted(groups.items())
+            ]
+        }
+
+    @classmethod
+    def _conflict_side(cls, node: GraphNode) -> dict[str, Any]:
+        """One side of a conflict pair: statement, cues (domain/entities/scope),
+        weights, version, and the provenance summary."""
+        props = node.props
+        statement = props.get("statement")
+        if not isinstance(statement, str) or not statement:
+            fallback = props.get("object")
+            statement = fallback if isinstance(fallback, str) and fallback else node.node_id
+        return {
+            "node_id": node.node_id,
+            "node_type": node.node_type.value,
+            "statement": statement,
+            "domain": props.get("domain"),
+            "scope": props.get("scope"),
+            "entities": list(node.entities),
+            "decay_weight": node.decay_weight,
+            "confidence": node.confidence,
+            "reinforce_count": node.reinforce_count,
+            "last_reinforced": node.last_reinforced,
+            "version": node.version,
+            "updated_at": node.updated_at,
+            "provenance": {
+                "asserted_by": node.provenance.asserted_by,
+                "session_id": node.provenance.session_id,
+                "source": node.provenance.source,
+                "asserted_at": node.provenance.asserted_at,
+            },
+        }
+
+    def resolve_conflict(
+        self,
+        *,
+        group_id: str,
+        profile_id: str,
+        branch: str,
+        node_id: str | None = None,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        """FR-7.7 resolution: one of the four Reconcile branches (design/01
+        section 4a) on a conflict pair, written back to the version chain and
+        audit-logged. ``reinforce``/``invalidate`` name one side; ``coexist``
+        annotates every side with a scope; ``pending`` records without touching
+        the pair (it stays flagged in the inbox). Any resolving branch clears
+        the pair's conflict flags. Re-submitting an already-resolved group is
+        idempotent: the recorded resolution is returned, never re-written."""
+        members = self._conflict_group_nodes(group_id, profile_id)
+        prior = self._prior_resolution(group_id, profile_id)
+
+        def _already(detail: dict[str, Any] | None) -> dict[str, Any]:
+            return {
+                "group_id": group_id,
+                "profile_id": profile_id,
+                "branch": (detail or {}).get("branch") or branch,
+                "already_resolved": True,
+                "at": (detail or {}).get("at"),
+            }
+
+        if members is None:
+            if prior is None:
+                raise ConsoleNotFoundError(f"conflict group {group_id!r} not found")
+            return _already(prior)
+        if branch == "pending" and prior is not None and prior.get("branch") == "pending":
+            return _already(prior)
+
+        written: list[str] = []
+        reinforced: list[str] = []
+        invalidated: list[str] = []
+        at = time.time()
+        if branch == "reinforce":
+            target = self._member_node(members, node_id, group_id)
+            if target is None:
+                raise ConsoleNotFoundError(f"node {node_id!r} is not part of conflict group {group_id!r}")
+            self._stores.graph.append_version(self._reinforced_node(target, group_id, at), invalidate_at=at)
+            written = [node.node_id for node in members]
+            reinforced = [target.node_id]
+        elif branch == "coexist":
+            if scope is None or not scope.strip():
+                raise ConsoleNotFoundError("coexist resolution requires a scope annotation")
+            for node in members:
+                self._stores.graph.append_version(
+                    self._scoped_node(node, scope.strip(), group_id, at), invalidate_at=at
+                )
+                written.append(node.node_id)
+        elif branch == "invalidate":
+            target = self._member_node(members, node_id, group_id)
+            if target is None:
+                raise ConsoleNotFoundError(f"node {node_id!r} is not part of conflict group {group_id!r}")
+            self._stores.graph.invalidate(target.node_id, at)
+            invalidated = [target.node_id]
+
+        if branch != "pending":
+            self._stores.graph.clear_flags([node.node_id for node in members], [GraphFlag.CONFLICT_GROUP])
+        self._audit(
+            _CONFLICT_RESOLVE_ACTION,
+            {
+                "group_id": group_id,
+                "profile_id": profile_id,
+                "branch": branch,
+                "node_id": node_id,
+                "scope": scope.strip() if scope else None,
+                "written": written,
+                "reinforced": reinforced,
+                "invalidated": invalidated,
+            },
+        )
+        return {
+            "group_id": group_id,
+            "profile_id": profile_id,
+            "branch": branch,
+            "already_resolved": False,
+            "written": written,
+            "reinforced": reinforced,
+            "invalidated": invalidated,
+            "scope": scope.strip() if scope else None,
+            "at": at,
+        }
+
+    def _conflict_group_nodes(self, group_id: str, profile_id: str) -> list[GraphNode] | None:
+        """Currently-flagged members of one group; None when the group is gone."""
+        members = [
+            node
+            for node in self._scan_nodes(NodeFilter(profile_id=profile_id))
+            if node.conflict_flag and str(node.conflict_group) == group_id
+        ]
+        return members if members else None
+
+    @staticmethod
+    def _member_node(members: list[GraphNode], node_id: str | None, group_id: str) -> GraphNode | None:
+        if node_id is None:
+            return None
+        for node in members:
+            if node.node_id == node_id:
+                return node
+        return None
+
+    def _reinforced_node(self, node: GraphNode, group_id: str, at: float) -> GraphNode:
+        """Reinforce the kept side (design/01 4a): confidence up, decay_weight
+        back to 1.0, last_reinforced/last_reinforce_count refreshed, and the
+        resolution pinned into the provenance history (version chain payload)."""
+        history = list(node.provenance.history)
+        history.append(
+            ProvenanceEvent(
+                at=at,
+                action="conflict_reinforced",
+                actor="console",
+                detail={"group_id": group_id, "branch": "reinforce"},
+            )
+        )
+        provenance = node.provenance.model_copy(update={"history": history})
+        # A resolution is a chain append, never an in-place rewrite (design/01
+        # section 4): bump the version and start the new revision at ``at`` so
+        # the old revision stays temporally readable as_of, bitemporal-first.
+        return node.model_copy(
+            update={
+                "version": node.version + 1,
+                "valid_from": at,
+                "confidence": min(0.95, round(float(node.confidence) + 0.05, 4)),
+                "decay_weight": 1.0,
+                "last_reinforced": at,
+                "reinforce_count": int(node.reinforce_count) + 1,
+                "updated_at": at,
+                "provenance": provenance,
+            }
+        )
+
+    def _scoped_node(self, node: GraphNode, scope: str, group_id: str, at: float) -> GraphNode:
+        """Coexist with scope (design/01 4a): both sides keep their statement,
+        the shared scope annotation lands on each node's props and provenance."""
+        props = dict(node.props)
+        props["scope"] = scope
+        history = list(node.provenance.history)
+        history.append(
+            ProvenanceEvent(
+                at=at,
+                action="scope_annotated",
+                actor="console",
+                detail={"group_id": group_id, "scope": scope, "branch": "coexist"},
+            )
+        )
+        provenance = node.provenance.model_copy(update={"history": history})
+        # Chain append semantics: the rewritten node is a new revision that
+        # takes over at ``at``; the pre-resolution revision is closed by the
+        # caller's append_version(invalidate_at=at) and stays as_of-readable.
+        return node.model_copy(
+            update={
+                "version": node.version + 1,
+                "valid_from": at,
+                "props": props,
+                "updated_at": at,
+                "provenance": provenance,
+            }
+        )
+
+    def _prior_resolution(self, group_id: str, profile_id: str) -> dict[str, Any] | None:
+        """The most recent recorded resolution of a group (None when never
+        resolved); this is the idempotency ledger for re-submits."""
+        latest: dict[str, Any] | None = None
+        page = Page(limit=200)
+        while True:
+            result = self._stores.meta.audit_query(
+                AuditFilter(actor="console", action=_CONFLICT_RESOLVE_ACTION), page
+            )
+            for entry in result.items:
+                detail = entry.detail
+                if (
+                    str(detail.get("group_id", "")) == group_id
+                    and str(detail.get("profile_id", "")) == profile_id
+                ):
+                    latest = {
+                        "group_id": group_id,
+                        "profile_id": profile_id,
+                        "branch": detail.get("branch"),
+                        "node_id": detail.get("node_id"),
+                        "scope": detail.get("scope"),
+                        "at": entry.at,
+                    }
+            consumed = page.offset + len(result.items)
+            if result.total <= consumed:
+                return latest
+            page = Page(offset=consumed, limit=page.limit)
 
     # ------------------------------------------------------------ plumbing
 

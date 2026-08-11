@@ -369,3 +369,27 @@ tr:last-child td { border-bottom: none; }
 .pagination { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.6rem; font-size: 0.83rem; color: var(--text-dim); }
 
 .updated-note { color: var(--text-faint); font-size: 0.78rem; }
+
+/* ---------------------------------------------------------------- dream review (FR-7.6) */
+
+.triple-review { border: 1px solid var(--border-soft); border-radius: 10px; padding: 0.8rem; margin-bottom: 0.8rem; }
+.triple-review .trip-line { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
+.triple-review .trip-line code { overflow-wrap: anywhere; }
+.triple-review .verdict-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.6rem; }
+
+.source-chunk { background: var(--bg-inset); border: 1px solid var(--border-soft); border-radius: 8px; padding: 0.45rem 0.6rem; margin-top: 0.4rem; }
+.source-chunk .chunk-id { font-size: 0.72rem; color: var(--text-faint); }
+
+/* ---------------------------------------------------------------- conflicts inbox (FR-7.7) */
+
+.conflict-group { border: 1px solid var(--border-soft); border-radius: 10px; padding: 0.8rem; margin-bottom: 0.9rem; }
+.conflict-group h3 { margin-top: 0; }
+.conflict-sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.8rem; }
+.conflict-side { background: var(--bg-inset); border: 1px solid var(--border-soft); border-radius: 10px; padding: 0.7rem; }
+.conflict-side .side-pick { align-items: flex-start; }
+.side-pick strong { font-size: 0.95rem; overflow-wrap: anywhere; }
+
+.resolve-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.7rem; }
+.resolve-row select, .resolve-row input[type="text"] { background: var(--bg-inset); border: 1px solid var(--border-soft); color: var(--text); border-radius: 8px; padding: 0.4rem 0.55rem; font-size: 0.85rem; }
+.resolve-row input[type="text"] { min-width: 280px; flex: 1; }
+.resolve-note { color: var(--text-faint); font-size: 0.78rem; margin-top: 0.4rem; }
