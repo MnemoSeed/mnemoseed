@@ -71,7 +71,7 @@
 
 | # | 引用 | 用于 | 状态 |
 |---|---|---|---|
-| R28 | Craik, F. I. M., & Lockhart, R. S. (1972). Levels of processing: A framework for memory research. *Journal of Verbal Learning and Verbal Behavior*, 11(6), 671–684. DOI: 10.1016/S0022-5371(72)80001-X | importance_hint 用户显式加权的依据（意向性编码优先于偶然编码） | ✅ Crossref 命中 |
+| R28 | Craik, F. I. M., & Lockhart, R. S. (1972). Levels of processing: A framework for memory research. *Journal of Verbal Learning and Verbal Behavior*, 11(6), 671–684. DOI: 10.1016/S0022-5371(72)80001-X | importance_hint 用户显式加权的依据（加工深度：语义加工优于浅层加工；意向性本身不增效，见 R55） | ✅ Crossref 命中 |
 
 ## 人格、偏好与系统动力学（2026-08-08 anima 模型 + 系统复盘新增）
 
@@ -104,6 +104,16 @@
 | R48 | Borbély, A. A. (1982). A two process model of sleep regulation. *Human Neurobiology*, 1(3), 195–204. | 动态预算动机：积分池 = Process S 睡眠压力，梦长随睡眠债伸缩而非固定 | ⚠️ 高置信经典；原刊 Human Neurobiology 未被 Crossref 收录（已停刊），PubMed PMID 7185792 可查 |
 | R49 | Little, J. D. C. (1961). A proof for the queuing formula: L = λW. *Operations Research*, 9(3), 383–387. DOI: 10.1287/opre.9.3.383 | 稳态校验：长期到达率 ≤ 清算能力，否则任何有限预算都积压 | ✅ Crossref 命中（DOI 验证 2026-08-10） |
 | R50 | Dement, W. (1960). The effect of dream deprivation. *Science*, 131(3415), 1705–1707. | REM rebound：剥夺后超量补偿——积压期预算扩张的生理学对应 | ✅ Crossref 命中（2026-08-11 抽查，DOI 10.1126/science.131.3415.1705） |
+
+## 晋升质量门与反馈（promote-gate 新增）
+
+| # | 引用 | 用于 | 状态 |
+|---|---|---|---|
+| R51 | Bartlett, F. C. (1932). *Remembering: A Study in Experimental and Social Psychology*. Cambridge. | 重构性记忆：巩固会扭曲，提炼物须先验证（质量门合法性根源） | ✅ Crossref 命中（1995 重印版 DOI 10.1017/cbo9780511759185） |
+| R52 | Loftus, E. F. (2005). Planting misinformation in the human mind. *Learning & Memory*, 12(4), 361–366. DOI: 10.1101/lm.94705 | 错误信息效应：重构=失真风险 → verify-before-commit | ✅ Crossref 命中 |
+| R53 | Nelson, T. O., & Narens, L. (1990). Metamemory: A theoretical framework and new findings. *Psychology of Learning and Motivation*, 26, 125–173. DOI: 10.1016/s0079-7421(08)60053-5 | 元记忆：用户显性 pin/纠正 = 最高权威信号 | ✅ Crossref 命中 |
+| R54 | Stickgold, R., & Walker, M. P. (2013). Sleep-dependent memory triage. *Nature Neuroscience*, 16(2), 139–145. DOI: 10.1038/nn.3303 | 睡眠是筛选性巩固（triage），非全量回放——质量门与动态预算的共同依据 | ✅ Crossref 命中 |
+| R55 | Hyde, T. S., & Jenkins, J. J. (1973). Recall for words as a function of semantic, graphic, and syntactic orienting tasks. *Journal of Verbal Learning and Verbal Behavior*, 12(5), 471–480. DOI: 10.1016/s0022-5371(73)80027-1 | 意向性本身不增记忆（深度匹配时）——pin 的效力来自加工深度而非"想记" | ✅ Crossref 命中 |
 
 ---
 

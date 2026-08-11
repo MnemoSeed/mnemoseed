@@ -71,7 +71,7 @@
 
 | # | Citation | Used for | Status |
 |---|---|---|---|
-| R28 | Craik, F. I. M., & Lockhart, R. S. (1972). Levels of processing: A framework for memory research. *Journal of Verbal Learning and Verbal Behavior*, 11(6), 671–684. DOI: 10.1016/S0022-5371(72)80001-X | Basis for importance_hint explicit user weighting (intentional encoding beats incidental encoding) | ✅ Crossref hit |
+| R28 | Craik, F. I. M., & Lockhart, R. S. (1972). Levels of processing: A framework for memory research. *Journal of Verbal Learning and Verbal Behavior*, 11(6), 671–684. DOI: 10.1016/S0022-5371(72)80001-X | Basis for importance_hint explicit user weighting (depth of processing: semantic beats shallow; intention per se adds little, see R55) | ✅ Crossref hit |
 
 ## Personality, Preferences & System Dynamics (anima model + system review)
 
@@ -104,6 +104,16 @@
 | R48 | Borbély, A. A. (1982). A two process model of sleep regulation. *Human Neurobiology*, 1(3), 195–204. | Dynamic-budget motivation: score pool = Process S sleep pressure; dream length scales with sleep debt rather than staying fixed | ⚠️ high-confidence classic; original journal *Human Neurobiology* is defunct and not indexed in Crossref; PubMed PMID 7185792 |
 | R49 | Little, J. D. C. (1961). A proof for the queuing formula: L = λW. *Operations Research*, 9(3), 383–387. DOI: 10.1287/opre.9.3.383 | Steady-state check: long-run arrival rate must be ≤ drain capacity, or any finite budget backlogs without bound | ✅ Crossref hit (DOI verified) |
 | R50 | Dement, W. (1960). The effect of dream deprivation. *Science*, 131(3415), 1705–1707. | REM rebound: supra-normal compensation after deprivation — the physiological counterpart of budget expansion during backlog | ✅ Crossref hit (spot-checked; DOI 10.1126/science.131.3415.1705) |
+
+## Promotion Gate & Feedback
+
+| # | Citation | Used for | Status |
+|---|---|---|---|
+| R51 | Bartlett, F. C. (1932). *Remembering: A Study in Experimental and Social Psychology*. Cambridge. | Reconstructive memory: consolidation distorts, so distilled output must be verified before commit (root legitimacy of the quality gate) | ✅ Crossref hit (1995 reissue, DOI 10.1017/cbo9780511759185) |
+| R52 | Loftus, E. F. (2005). Planting misinformation in the human mind. *Learning & Memory*, 12(4), 361–366. DOI: 10.1101/lm.94705 | Misinformation effect: reconstruction = distortion risk → verify-before-commit | ✅ Crossref hit |
+| R53 | Nelson, T. O., & Narens, L. (1990). Metamemory: A theoretical framework and new findings. *Psychology of Learning and Motivation*, 26, 125–173. DOI: 10.1016/s0079-7421(08)60053-5 | Metamemory: explicit user pin/correction = highest-authority signal | ✅ Crossref hit |
+| R54 | Stickgold, R., & Walker, M. P. (2013). Sleep-dependent memory triage. *Nature Neuroscience*, 16(2), 139–145. DOI: 10.1038/nn.3303 | Sleep as selective consolidation (triage), not wholesale replay — shared basis for the quality gate and the dynamic budget | ✅ Crossref hit |
+| R55 | Hyde, T. S., & Jenkins, J. J. (1973). Recall for words as a function of semantic, graphic, and syntactic orienting tasks. *Journal of Verbal Learning and Verbal Behavior*, 12(5), 471–480. DOI: 10.1016/s0022-5371(73)80027-1 | Intention to learn adds little once depth is matched — pinning works via depth of processing, not "wanting to remember" | ✅ Crossref hit |
 
 ---
 

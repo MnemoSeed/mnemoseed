@@ -120,6 +120,7 @@
 - **edges**：`id PK / src / dst / rel / weight / provenance JSON`（共现边 = `rel='cooccur'` + weight 计数）
 - **node_versions**：append-only 版本链（`node_id / version / payload 快照 / changed_at / superseded_by`）——as_of 双时态查询的物理基础
 - **节点类型枚举（v1 冻结）**：`USER / HABIT / PREFERENCE / ANIMA / INTENTION / CONSTRAINT / EPISODE / SKILL_SEQUENCE / DECISION / PROJECT / TOOL`
+- **晋升状态字段（v5）**：图谱节点加 `promotion_status`（`pending / promoted / quarantined / scrapped`，默认 promoted 兼容存量）——晋升质量门的载体（design/02 §11），早加比晚加便宜；读取侧重排加 ζ·confidence 项（design/03 §2）
 - 各类型 payload 字段按 design/03 §3 erDiagram；PREFERENCE 含 `valence / prior_width / trait_anchor / evidence_chain`；ANIMA 含 `core_traits / dye_layer / idiographic_notes / drift_history`
 
 ### A.3 MetaStore（SQLite 与 PG 同构）

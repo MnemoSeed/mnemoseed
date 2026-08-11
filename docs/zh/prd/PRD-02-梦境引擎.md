@@ -31,6 +31,7 @@
 | FR-2.11 | anima 重染色（re-dye）批处理：换 anima 触发，新核心异步重消化 profile 既有记忆长出新染层/喜好；旧实例染层完整保留（无损切换，design/09 §4） | 进阶模块（不在 M1） |
 | FR-2.12 | 染层/偏好证据边界：更新只消费用户原始输入，永不采纳 agent 渲染输出（防慢漂移自锁，design/02 §5） | P0 |
 | FR-2.13 | De-biasing eval harness：染色样本剥除率指标进 CI，剥除率退化即构建失败（单点故障面防线，design/02 §5） | P1 |
+| FR-2.15 | **晋升质量门**（design/02 §11）：提炼物写回前过三道确定性检查（groundedness 实体-源文重叠 / 冲突 / 近重复强化），不过则置 `promotion_status=quarantined`（不进检索）；过闸后滚动统计 promotion precision（用户纠正为一等负反馈），跌出阈值自动收紧闸门（单向棘轮）；M1 手动期以"建议"形态运行，判定与人工一致率达标才允许自动晋升；撤销只做反向版本化 | P1 |
 | FR-2.14 | **LLM 端口与模型路由配置**：定义 `DreamLLM` Protocol（chat 完成 + 用量统计 + 连通性自检），驱动注册表与存储层同构——驱动：`oauth`（复用宿主已登录的订阅态：**Codex**（读 `~/.codex/auth.json` 的 `tokens.access_token`/`refresh_token`/`account_id`，OIDC 自动刷新）与 **Grok**（读 `~/.grok/auth.json` 按 issuer 分键的 `key`/`refresh_token`/`expires_at`）——两者服务条款允许第三方复用；**Anthropic 订阅明确不做**（条款不允许），`anthropic` 驱动仅支持自带 API key；MiniMax/Kimi 等中国 CLI 服务商可选，选择时明示数据出境提示）/ `openai_compatible`（Fireworks 等自带 key 端点）/ `anthropic`（仅 API key）/ `ollama`（高级离线轨，**非默认**）；默认推荐顺序 OAuth > API key > 离线；config.toml 按**角色**分别配置：`deep_reflection`（长背景深睡眠反思）/ `short_increment`（短增量，动态预算 ≤32k，FR-2.5）/ `local_track` 开关；默认路由按 design/02（深睡眠 → Kimi K3（Fireworks），短增量 → DeepSeek V4 Flash 0731（Fireworks），本地轨 → Ollama + ≤14B 量化模型（如 Llama 3.1 8B，与 FR-2.7 一致））；**密钥按角色分离**——各角色默认独立环境变量（`MNEMOSEED_DEEP_REFLECTION_API_KEY` / `MNEMOSEED_SHORT_INCREMENT_API_KEY`），未设置回退共享 `FIREWORKS_API_KEY`，允许两个角色挂不同服务商；每角色可独立切换驱动与模型名，改动写审计；连通性自检接口供 console 实测按钮（design/07 §8）调用 | P0 |
 
 ## 4. 非功能需求
