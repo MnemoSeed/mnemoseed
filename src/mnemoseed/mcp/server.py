@@ -26,18 +26,22 @@ from mnemoseed.mcp.client import (
     resolve_profile_id,
 )
 
-# Initialize instructions (FR-3.11): self-contained boot context for the host,
-# naming the six tools and the environment configuration keys. Bilingual: the
-# tool names and the memory behavior are English, the two primary verbs carry
-# the Chinese cue so a Chinese-speaking host picks it up immediately.
+# Initialize instructions (FR-3.11 / FR-6.5): self-contained boot context for
+# the host, naming the six tools and the environment configuration keys, plus
+# the Tier-2 degraded-mode guidance a hook-less host needs -- recall before
+# answering, remember for durable facts, and the repin-idempotency expectation
+# (a repeated pin reinforces, never duplicates). Bilingual: the tool names and
+# the memory behavior are English, the two primary verbs carry the Chinese cue
+# so a Chinese-speaking host picks it up immediately. Kept <=512 chars (Codex's
+# hard cap; test_mcp_degraded_mode pins the bound against this constant).
 INSTRUCTIONS = (
-    "Memory gateway for the MnemoSeed daemon (FR-3.1). Tools: memory.recall "
-    "(retrieve relevant memory, 按分数返回相关记忆), memory.remember (store an "
-    "explicit user pin, 存储用户明确的钉记), memory.audit (provenance / version "
-    "chain), memory.timeline (version replay), memory.export (paged profile "
-    "dump), memory.forget_this (GDPR deletion). Pass profile_id per call or set "
-    "MNEMOSEED_PROFILE_ID; the daemon lives at MNEMOSEED_BASE_URL (default "
-    "http://localhost:7788)."
+    "MnemoSeed memory (FR-3.1) - MCP-only host, no hooks: the model drives memory. "
+    "Call memory.recall (检索) before answering anything memory-dependent; "
+    "call memory.remember (钉记) for durable facts and preferences; "
+    "re-remembering the same fact reinforces the stored pin, never duplicates. "
+    "Also memory.audit, memory.timeline, memory.export, memory.forget_this (GDPR). "
+    "Pass profile_id per call or set MNEMOSEED_PROFILE_ID; daemon at "
+    "MNEMOSEED_BASE_URL (default http://localhost:7788)."
 )
 
 _SERVER_NAME = "mnemoseed-memory"
