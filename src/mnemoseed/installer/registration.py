@@ -148,7 +148,9 @@ def plan_registrations(
     ``hosts`` defaults to everything :func:`detect_hosts` finds under ``home``;
     a caller may pass an explicit subset to scope the install. With
     ``cursor_project`` set, the project-scoped Cursor adapter artifacts (hooks
-    + rules, FR-6.3b) are planned as additional approvable items.
+    + rules, FR-6.3b) are planned as additional approvable items. When Codex is
+    among the targets, the user-level Codex artifacts (hooks.json + hook
+    scripts, AGENTS.md fragment, FR-6.3c) are planned the same way.
     """
     home = resolve_home(home)
     targets = hosts if hosts is not None else detect_hosts(home)
@@ -178,6 +180,10 @@ def plan_registrations(
         from mnemoseed.installer.cursorfiles import plan_cursor_project
 
         plans.extend(plan_cursor_project(cursor_project))
+    if any(spec.name == "codex" for spec in targets):
+        from mnemoseed.installer.codexfiles import plan_codex_files
+
+        plans.extend(plan_codex_files(home))
     return plans
 
 

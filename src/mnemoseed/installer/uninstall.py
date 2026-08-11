@@ -82,12 +82,43 @@ def _remove_mnemoseed_entry(spec: HostSpec, config: Path) -> HostRollback | None
     )
 
 
+def _rollback_artifact_file(host: str, config: Path) -> None:
+    """Remove a freshly-created artifact file (no install-time backup).
+
+    Special case: the Codex AGENTS.md registration appends a guidance fragment
+    to a file that may predate the installer, so only the appended fragment is
+    stripped -- the file is deleted only when the stripped text is empty and the
+    user's own content is never removed.
+    """
+    if host == "codex-agents":
+        from mnemoseed.installer.codexfiles import (
+            AGENTS_REL,
+            adapter_templates_dir,
+            artifact_texts,
+            strip_agents_fragment,
+        )
+
+        if not config.exists():
+            return
+        fragment = artifact_texts(adapter_templates_dir())[AGENTS_REL]
+        stripped = strip_agents_fragment(config.read_text(encoding="utf-8"), fragment)
+        if stripped is None:
+            return  # fragment absent (user-edited file); leave it alone
+        if stripped:
+            config.write_text(stripped, encoding="utf-8")
+        else:
+            config.unlink(missing_ok=True)
+        return
+    config.unlink(missing_ok=True)
+
+
 def _rollback_artifact(host: str, record: RegistrationRecord) -> HostRollback:
-    """Remove one project artifact registration (Cursor hooks/rules, FR-6.3b).
+    """Remove one artifact registration (Cursor hooks/rules, Codex files).
 
     Restores the main file and every recorded companion from their install-time
     backups when present; a file that was freshly created by the installer (no
-    backup) is removed outright. Nothing outside the recorded paths is touched.
+    backup) is removed outright, except the Codex AGENTS.md fragment which is
+    stripped instead of unlinked. Nothing outside the recorded paths is touched.
     """
     config = Path(record.config)
     restored = False
@@ -96,7 +127,7 @@ def _rollback_artifact(host: str, record: RegistrationRecord) -> HostRollback:
         shutil.copy2(Path(record.backup), config)
         restored = True
     else:
-        config.unlink(missing_ok=True)
+        _rollback_artifact_file(host, config)
     for path, backup in record.files:
         target = Path(path)
         if backup and Path(backup).exists():

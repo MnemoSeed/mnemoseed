@@ -6,6 +6,7 @@ written MCP entry structure is ready but the identity env keys are only emitted
 once a profile_id and token are supplied.
 """
 
+from mnemoseed.installer.codexfiles import plan_codex_files, trust_guidance_lines
 from mnemoseed.installer.cursorfiles import adapter_templates_dir, artifact_texts, plan_cursor_project
 from mnemoseed.installer.doctor import Check, DoctorReport, run_doctor
 from mnemoseed.installer.hosts import (
@@ -47,9 +48,11 @@ __all__ = [
     "host_specs",
     "install",
     "mnemoseed_mcp_entry",
+    "plan_codex_files",
     "plan_cursor_project",
     "plan_registrations",
     "purge_plan",
     "run_doctor",
+    "trust_guidance_lines",
     "uninstall",
 ]

@@ -72,6 +72,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         HostConfigError,
         apply_registrations,
         plan_registrations,
+        trust_guidance_lines,
     )
 
     try:
@@ -107,6 +108,9 @@ def cmd_install(args: argparse.Namespace) -> int:
         else:
             print(f"  {item.host}: no changes")
     print(f"installed: {report.written} host registration(s)")
+    if any(plan.host in ("codex", "codex-hooks", "codex-agents") for plan in plans):
+        for line in trust_guidance_lines():
+            print(line)
     return 0
 
 

@@ -196,10 +196,10 @@ def test_install_is_idempotent_second_run_no_changes(tmp_path) -> None:
     _all_three(home)
 
     first = install(home, data, approve=_approve_all)
-    assert first.written == 3
+    assert first.written == 5  # 3 MCP registrations + Codex hooks + AGENTS.md item
 
     plans = plan_registrations(home, data)
-    assert len(plans) == 3
+    assert len(plans) == 5
     assert all(not plan.changed for plan in plans)
     assert all(not plan.diff for plan in plans)
 
@@ -219,7 +219,7 @@ def test_install_approval_gates_each_item(tmp_path) -> None:
         return plan.host == "claude-code"
 
     report = install(home, data, approve=approve_partial)
-    assert sorted(seen) == ["claude-code", "codex", "cursor"]
+    assert sorted(seen) == ["claude-code", "codex", "codex-agents", "codex-hooks", "cursor"]
     assert report.written == 1
 
     registered = [
@@ -542,7 +542,7 @@ def test_cli_install_yes_writes_and_backs_up(tmp_path) -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "installed: 3 host registration(s)" in proc.stdout
+    assert "installed: 5 host registration(s)" in proc.stdout  # 3 hosts + Codex hooks + AGENTS.md
 
     assert _read(home / ".claude.json")["mcpServers"]["mnemoseed"]["command"] == "mnemoseed"
     assert _read(home / ".cursor" / "mcp.json")["mcpServers"]["mnemoseed"]["args"] == ["mcp"]
@@ -755,7 +755,7 @@ def test_install_codex_writes_toml_mcp_server_table(tmp_path) -> None:
     codex_config = home / ".codex" / "config.toml"
 
     report = install(home, data, hosts=[_spec(home, "codex")], approve=_approve_all)
-    assert report.written == 1
+    assert report.written == 3  # MCP entry + Codex hooks + AGENTS.md item
     assert codex_config.exists()
     parsed = _read_toml(codex_config)
     assert parsed["mcp_servers"]["mnemoseed"] == {"command": "mnemoseed", "args": ["mcp"]}
@@ -788,10 +788,10 @@ def test_install_codex_is_idempotent(tmp_path) -> None:
     _codex_marker(home)
 
     first = install(home, data, hosts=[_spec(home, "codex")], approve=_approve_all)
-    assert first.written == 1
+    assert first.written == 3  # MCP entry + Codex hooks + AGENTS.md item
 
     plans = plan_registrations(home, data, hosts=[_spec(home, "codex")])
-    assert len(plans) == 1
+    assert len(plans) == 3
     assert not plans[0].changed
     assert not plans[0].diff
 
