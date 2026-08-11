@@ -14,13 +14,21 @@ This repository houses the core algorithmic stack responsible for emotional impa
 
 ---
 
+## 📍 Status
+
+**Shipped today (local M1 core):** the capture pipeline (deterministic zero-LLM scoring), the dream engine mechanics (snapshot-isolated consolidation, dual-track tier routing, incremental delta packing with a dynamic budget and a monthly token ledger), hybrid retrieval with anti-dilution budgeting, the six MCP tools (`memory.recall` / `remember` / `audit` / `timeline` / `export` / `forget_this`), the installer + doctor + uninstall, and the Claude Code plugin (hooks + commands). ~1,000 tests run green in CI on every push.
+
+**Roadmap (designed, not yet shipped):** cloud sync with Nitro Enclave TEE execution (M4), the anima personality module (post-M1, spec in `docs/design/09`), Cursor/Codex/Gemini adapters, and the management console. Sections below describe the target architecture; the status list above is what runs today.
+
+---
+
 ## 🧠 Core Architectural Pillars
 
 ### 1. Dynamic Dream Engine & Watermark Trigger
 Humans do not compress long-term memories in real-time while performing tasks. MnemoSeed splits memory operations into two distinct neurological layers:
 *   **The Hippocampus (Hot Memory Layer)**: A high-concurrency, zero-latency local memory cache that temporarily tracks raw user interaction strings.
 *   **The Cerebral Cortex (Cold Memory Layer)**: A structured **Cognitive Graph** storing long-term experience weights, habits, and user pattern nodes.
-*   **The Impact Evaluator**: Every incoming packet is scored locally by a deterministic, zero-LLM scorer (rules + curated lexicons + embedding heuristics — no model call, no tokens spent) across three vectors: *Emotional Intensity, Informational Novelty,* and *Causal Long-Chains*.
+*   **The Impact Evaluator**: Every incoming packet is scored locally by a deterministic, zero-LLM scorer (rules + curated lexicons + local embedding heuristics — no LLM call, no API tokens spent) across three vectors: *Emotional Intensity, Informational Novelty,* and *Causal Long-Chains*.
 *   **Snapshot Isolation Sleep**: Once the accumulated scores cross the **Watermark Threshold (>=10.0)** and the agent registers 5 seconds of idle time, an asynchronous "Dreaming Thread" takes a read-only snapshot of the hot memory to run reflective synthesis. If a user interrupts mid-dream, the agent responds with 0 latency, appending new chats to the tail without blocking.
 
 ### 👥 2. Cognitive Grading Isolation (Anti-Contamination Protocol)
@@ -47,18 +55,17 @@ Enterprise engineers and high-net-worth creators refuse to host their raw lifelo
 
 ## ⚖️ Dual-Licensing Protocol & Commercial Defense
 
-MnemoSeed Core operates under a strict **Dual-Licensing Strategy** to foster developer innovation while securing enterprise commercialization avenues:
+MnemoSeed Core operates under a **Dual-Licensing Strategy** to foster developer innovation while securing enterprise commercialization avenues:
 
-### 🟢 1. Non-Commercial / Individual Tier (AGPL-3.0 Rules)
-Free and open-source forever for individual development, educational purposes, and hobbyist self-hosting. 
-*   **The Attribution Clause**: Any public fork, modified version, or wrapper of MnemoSeed Core **must** remain entirely open-source under the identical license framework, and **must prominently display** the original branding: `"Powered by MnemoSeed"`.
+### 🟢 1. Open-Source Tier (AGPL-3.0)
+Free forever, including commercial use, under the terms of the GNU Affero General Public License v3 — any modified version you deploy or offer over a network must remain open-source under the same license, with copyright and license notices preserved.
 
-### 🔴 2. Commercial / Closed-Source Tier (Licensing Required)
-You **must** purchase a Commercial License if you intend to:
-*   Integrate MnemoSeed Core inside a commercial proprietary application or closed-source enterprise software stack.
-*   Offer hosted MnemoSeed multi-tenant cognitive databases to end-users for corporate profit without open-sourcing your platform's surrounding infrastructure.
+### 🔴 2. Commercial License (Proprietary Use)
+Purchase a Commercial License if you intend to:
+*   Integrate MnemoSeed Core inside a proprietary application or closed-source enterprise software stack.
+*   Offer hosted MnemoSeed multi-tenant services without open-sourcing your surrounding infrastructure.
 
-*To obtain a proprietary commercial license or to request dedicated enterprise TEE Enclave cluster provisioning, reach out to our legal department at: `license@mnemoseed.com`*
+*To obtain a commercial license, reach out to: `license@mnemoseed.com`*
 
 ---
 
@@ -78,7 +85,7 @@ uv sync
 uv run mnemoseed up
 ```
 
-Or bring up the full stack (Postgres + pgvector + daemon) with `docker compose up`. Every service exposes a `/healthz` probe.
+Or bring up the full stack (Postgres + pgvector + daemon) with `docker compose up`. The daemon and embedding sidecar expose HTTP `/healthz` probes; the Postgres services report health via `pg_isready`.
 
 The MCP server ships inside this package as a thin stdio adapter (`uv run mnemoseed mcp`) — any MCP host (Cursor/Cline/Claude Code) attaches to it directly; host hooks talk to the daemon's localhost HTTP API.
 
