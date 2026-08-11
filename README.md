@@ -1,10 +1,12 @@
+![MnemoSeed](assets/banner.png)
+
 # 🌱 MnemoSeed Core Engine
 
 > **The Brain-Inspired, Dual-Licensed Cognitive Memory & Persona Baseline for Autonomous AI Agents.**
 
-[![License: Dual AGPL/Commercial](https://shields.io)](#-dual-licensing-protocol-commercial-defense)
-[![Architecture: Neuroscience-Inspired](https://shields.io)](#-core-architectural-pillars)
-[![Privacy: Zero-Knowledge TEE](https://shields.io)](#-zero-knowledge-privacy-matrix)
+[![License: Dual AGPL/Commercial](https://img.shields.io/badge/License-Dual%20AGPL%2FCommercial-blue)](#%EF%B8%8F-dual-licensing-protocol--commercial-defense)
+[![Architecture: Neuroscience-Inspired](https://img.shields.io/badge/Architecture-Neuroscience--Inspired-5b8def)](#-core-architectural-pillars)
+[![Privacy: Zero-Knowledge TEE](https://img.shields.io/badge/Privacy-Zero--Knowledge%20TEE-2ea44f)](#-zero-knowledge-privacy-matrix)
 
 **MnemoSeed Core** is the underlying intelligence and long-term reflection engine of the MnemoSeed ecosystem. While standard vector database wrappers treat AI memory as a chaotic, dead filing cabinet—causing severe context bloat and model-switching amnesia—MnemoSeed models human cognitive neuroscience to implant an evolving, selective, and unified "soul" that lives across varying LLM bodies (Claude, GPT, local models) and interfaces (Cursor, Cline).
 
