@@ -640,12 +640,53 @@ def test_console_loopback_passes_without_token(tmp_path, monkeypatch) -> None:
 
 
 def test_console_static_shell_served_and_guarded(tmp_path, monkeypatch) -> None:
-    """FR-7.7 shell: /console serves the placeholder SPA from its static dir,
-    behind the same auth gate a remote request hits."""
+    """FR-7.7 shell: /console serves the SPA from its static dir, behind the
+    same auth gate a remote request hits."""
     with _client(tmp_path, monkeypatch, loopback=True) as client:
         response = client.get("/console/")
         assert response.status_code == 200
         assert "MnemoSeed console" in response.text
+
+
+def test_console_static_assets_served_with_content_types(tmp_path, monkeypatch) -> None:
+    """FR-7.1: every static asset the SPA references (html shell, css, js,
+    banner) is served with the correct content-type — the page must not need a
+    build step, so these are served raw from the static dir."""
+    # (path, expected content-type prefix or None for a JS dual check)
+    expected = [
+        ("/console/", "text/html"),
+        ("/console/styles.css", "text/css"),
+        ("/console/app.js", None),
+        ("/console/banner.png", "image/png"),
+    ]
+    with _client(tmp_path, monkeypatch, loopback=True) as client:
+        for path, ctype in expected:
+            response = client.get(path)
+            assert response.status_code == 200, path
+            content_type = response.headers["content-type"]
+            if path.endswith(".js"):
+                assert content_type in (
+                    "application/javascript",
+                    "text/javascript",
+                ), (path, content_type)
+            else:
+                assert content_type.startswith(ctype), (path, content_type)
+        # the SPA shell must reference the assets we assert on (so a rename
+        # cannot silently break the offline console)
+        shell = client.get("/console/").text
+        assert "/console/styles.css" in shell
+        assert "/console/app.js" in shell
+        assert "/console/banner.png" in shell
+
+
+def test_console_static_assets_guarded_for_remote(tmp_path, monkeypatch) -> None:
+    """NFR-7.1: the static assets sit behind the same admin-token gate as the
+    API — a remote request without the token gets 401, never content."""
+    with _client(tmp_path, monkeypatch, loopback=False) as client:
+        for path in ("/console/", "/console/styles.css", "/console/app.js", "/console/banner.png"):
+            assert client.get(path).status_code == 401, path
+        with_token = client.get("/console/styles.css", headers={"X-Admin-Token": _ADMIN_TOKEN})
+        assert with_token.status_code == 200
 
 
 def test_console_admin_token_check_uses_compare_digest(tmp_path, monkeypatch) -> None:

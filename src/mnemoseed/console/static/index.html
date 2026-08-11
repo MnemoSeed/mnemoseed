@@ -3,41 +3,35 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
   <title>MnemoSeed console</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1c1c1c; }
-    pre { background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; }
-    .badge { color: #666; font-size: 0.85rem; margin-bottom: 1rem; }
-  </style>
+  <link
+    rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%234f8cff'/%3E%3Cpath d='M8 4v5M5.5 6.5h5' stroke='%230f1318' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"
+  />
+  <link rel="stylesheet" href="/console/styles.css" />
 </head>
 <body>
-  <h1>MnemoSeed console</h1>
-  <p class="badge">management shell &mdash; REST surface at <code>/api/v1</code></p>
-  <section id="status">
-    <p>Loading daemon status&hellip;</p>
-  </section>
-  <script>
-    // Placeholder SPA shell (PRD-07 T1). Interactive panels land in T2/T4;
-    // for now the shell only proves the /console mount + auth gate live.
-    async function loadStatus() {
-      try {
-        const response = await fetch("/api/v1/status");
-        if (!response.ok) {
-          throw new Error("status " + response.status);
-        }
-        const data = await response.json();
-        document.getElementById("status").innerHTML =
-          "<h2>Daemon</h2><pre>" +
-          JSON.stringify(data.daemon, null, 2) +
-          "</pre><h2>Profiles</h2><pre>" +
-          JSON.stringify(data.profiles, null, 2) +
-          "</pre>";
-      } catch (error) {
-        document.getElementById("status").innerHTML =
-          "<p>Status unavailable: " + String(error) + "</p>";
-      }
-    }
-    loadStatus();
-  </script>
+  <header class="app-header">
+    <img class="brand-banner" src="/console/banner.png" alt="MnemoSeed" />
+    <nav class="app-nav" aria-label="Sections">
+      <a href="#/dashboard" data-nav="dashboard" class="nav-link">Dashboard</a>
+      <a href="#/browse" data-nav="browse" class="nav-link">Memory Browser</a>
+    </nav>
+    <label class="profile-picker" title="Active profile (drives every /api/v1 read)">
+      <span class="profile-label">profile</span>
+      <select id="profile-select" aria-label="Active profile"></select>
+    </label>
+  </header>
+  <main id="app" class="app-main">
+    <section id="view" class="view" aria-live="polite">
+      <p class="loading">Loading…</p>
+    </section>
+  </main>
+  <footer class="app-footer">
+    <span id="updated-at"></span>
+    <span>MnemoSeed console &mdash; a local admin surface. No account, no cloud.</span>
+  </footer>
+  <script src="/console/app.js"></script>
 </body>
 </html>
