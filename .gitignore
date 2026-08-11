@@ -163,3 +163,6 @@ pip-wheel-metadata/
 # Local capture benchmark corpus and label set (real session logs stay local;
 # only the tooling and the synthetic CI fixture are committed)
 .bench/
+
+# Local dev environment (agent definitions etc.)
+.claude/
