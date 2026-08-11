@@ -34,10 +34,6 @@
 | [PRD-07 管理控制台](prd/PRD-07-管理控制台.md) | Console SPA：Dashboard/Profiles/记忆浏览/梦境审查/冲突收件箱（M1 只读核心，M2 补全） |
 | [PRD-08 M0 地基](prd/PRD-08-M0地基.md) | repo 骨架 + CI、四存储接口双驱动、capability 校验、Schema v1 冻结（阻塞全部后续 PRD） |
 
-### 市场
-
-市场材料（推广计划、竞品调研）为内部资料，已移出本仓库（私有 repo `MnemoSeed/marketing`），不随公开仓库分发。
-
 ## 理论文献备案
 
 **[REFERENCES.md](REFERENCES.md)** —— 所有引用理论的完整出处与核实状态（✅ Crossref 已核实 / 📕 经典专著 / ⚠️ 待抽查）。铁律：未验证的信息必须标注，不允许靠推测或记忆充数。
