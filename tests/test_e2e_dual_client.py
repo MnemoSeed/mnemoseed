@@ -221,7 +221,13 @@ async def _mcp_timeline(
 
 
 def _mcp_child_pids() -> set[int]:
-    """PIDs of python processes running the real MCP stdio gateway (Windows CIM)."""
+    """PIDs of python processes running the real MCP stdio gateway.
+
+    Uses the Windows CIM query; on other platforms the stdio transport's own
+    process-tree cleanup is trusted and the guard degrades to a no-op.
+    """
+    if sys.platform != "win32":
+        return set()
     script = (
         "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
         f"Where-Object {{ $_.CommandLine -like '*{_MCP_CHILD_MARKER}*' }} | "
