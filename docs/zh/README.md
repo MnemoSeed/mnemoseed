@@ -15,6 +15,7 @@
 | [03-存储与检索](design/03-存储与检索.md) | 混合双库总线、STORAGE_MODE 路由矩阵、混合检索、抗稀释策略 |
 | [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、E2EE 传输+加密存储隐私架构、TEE 可选档位 |
 | [09-anima与偏好动力学](design/09-anima与偏好动力学.md) | **进阶模块（不在 M1 首发）**：Anima 灵魂模型（三层一体/无损切换）、偏好贝叶斯后验更新、特质雷达可视化 |
+| [10-云端部署与远程接入](design/10-云端部署与远程接入.md) | daemon 上云/VPS 部署指南：拓扑、TLS 与鉴权、宿主远程接入、验证清单 |
 | [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
 | [06-接入与安装体验](design/06-接入与安装体验.md) | 三层适配架构（daemon/MCP/plugin）、profile 凭证身份模型（login/link）、宿主能力矩阵、3 分钟安装流程、断开卸载语义 |
 | [07-管理控制台](design/07-管理控制台.md) | MnemoSeed Console：profiles 管理、记忆浏览、图谱可视化、单条记忆全档案、梦境面板与 token 用量、模型路由设置 |
