@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 import uvicorn
+from _identity_helpers import OWNER_PASSWORD, OWNER_USERNAME
 
 from mnemoseed.daemon.app import create_app
 
@@ -89,6 +90,7 @@ class _DaemonHarness:
         self._monkeypatch = monkeypatch
         self._task: asyncio.Task | None = None
         self.base_url = ""
+        self.token = ""
 
     async def __aenter__(self) -> _DaemonHarness:
         self._monkeypatch.delenv("STORAGE_MODE", raising=False)
@@ -114,7 +116,30 @@ class _DaemonHarness:
         assert server.started, "daemon never started its run loop"
         port = server.servers[0].sockets[0].getsockname()[1]
         self.base_url = f"http://127.0.0.1:{port}"
+        self.token = await self._attach_owner()
         return self
+
+    async def _attach_owner(self) -> str:
+        """Finish first-run setup and return a profile token (issue #14): the
+        /memory/* surface this integration drives is gated on the owner."""
+        import httpx
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            setup = await client.post(
+                f"{self.base_url}/api/v1/setup",
+                json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+            )
+            assert setup.status_code == 201, setup.text
+            login = await client.post(
+                f"{self.base_url}/api/v1/auth/login",
+                json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+            )
+            assert login.status_code == 200, login.text
+            return login.json()["token"]
+
+    @property
+    def auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"}
 
     async def __aexit__(self, *exc_info: object) -> None:
         assert self._task is not None
@@ -128,13 +153,14 @@ class _DaemonHarness:
         import httpx
 
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(f"{self.base_url}{path}", json=payload)
+            response = await client.post(f"{self.base_url}{path}", json=payload, headers=self.auth_headers)
             return {"status": response.status_code, "json": response.json()}
 
 
-def _base_env(base_url: str, **overrides: str) -> dict[str, str]:
+def _base_env(base_url: str, token: str, **overrides: str) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if not key.startswith("MNEMOSEED_")}
     env["MNEMOSEED_BASE_URL"] = base_url
+    env["MNEMOSEED_TOKEN"] = token
     env["PYTHONUTF8"] = "1"  # same UTF-8 guarantee that hooks/py.sh gives the shell launch
     env.update(overrides)
     return env
@@ -169,7 +195,7 @@ async def test_session_start_warmup_injects_the_actual_recalled_memory(tmp_path,
         seeded = await _post(daemon, "/memory/remember", {"profile_id": _PROFILE, "text": _WARMUP_TEXT})
         assert seeded["status"] == 200
 
-        env = _base_env(daemon.base_url, MNEMOSEED_PROFILE_ID=_PROFILE)
+        env = _base_env(daemon.base_url, daemon.token, MNEMOSEED_PROFILE_ID=_PROFILE)
         env["MNEMOSEED_SESSION_START_QUERY"] = _WARMUP_TEXT
         proc = await asyncio.to_thread(
             _run_hook,
@@ -198,7 +224,7 @@ async def test_session_start_warmup_injects_the_actual_recalled_memory(tmp_path,
 
 async def test_user_prompt_submit_capture_lands_in_the_real_store(tmp_path, monkeypatch) -> None:
     async with _DaemonHarness(tmp_path, monkeypatch) as daemon:
-        env = _base_env(daemon.base_url, MNEMOSEED_PROFILE_ID=_PROFILE)
+        env = _base_env(daemon.base_url, daemon.token, MNEMOSEED_PROFILE_ID=_PROFILE)
         proc = await asyncio.to_thread(
             _run_hook,
             "user_prompt_submit",

@@ -43,12 +43,13 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Annotated, Any, Self, cast
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
 
 from mnemoseed.capture.stamper import ConsistencyVerdict, NearDuplicateChecker, WriteConfig
 from mnemoseed.config import Config
 from mnemoseed.dream import DreamTrigger, TriggerStatus
+from mnemoseed.identity.gate import require_identity
 from mnemoseed.retrieve.assemble import (
     AssembledContext,
     AssembledEntry,
@@ -619,7 +620,10 @@ class MemoryService:
 # ---------------------------------------------------------------- router
 
 
-router = APIRouter()
+# Identity gate (issue #14): every /memory route answers 503 with a setup
+# pointer until the owner account exists, and requires a valid profile token
+# (Bearer) once setup has run — loopback carries no implicit trust post-setup.
+router = APIRouter(dependencies=[Depends(require_identity)])
 
 
 def _route_404(exc: MemoryNotFoundError) -> HTTPException:

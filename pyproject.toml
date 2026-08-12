@@ -28,6 +28,8 @@ dependencies = [
     "pgvector>=0.3",
     # MCP stdio memory gateway (PRD-03 FR-3.1): official MCP SDK, pinned to 2.x.
     "mcp>=2.0,<3",
+    # local owner passwords are argon2id-hashed at rest (issue #14, PRD-06 FR-6.1e)
+    "argon2-cffi>=23.1",
 ]
 
 [dependency-groups]

@@ -8,8 +8,10 @@ by driver convention.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import time
 import uuid
@@ -31,11 +33,13 @@ from mnemoseed.storage.ports import (
     DreamRun,
     DreamRunFilter,
     DriverInfo,
+    OwnerConflictError,
     Page,
     PageResult,
     PoolState,
     StorageError,
     StoredProfile,
+    StoredUser,
     Token,
     TurnRange,
 )
@@ -208,7 +212,14 @@ class SqliteMetaDriver:
         scopes: CSeq[str],
         expires_at: float | None = None,
     ) -> Token:
+        """Issue a profile token whose bearer secret is returned exactly once.
+
+        Only the sha256 digest is persisted (``tokens.token_hash``); the raw
+        secret survives solely in the returned Token.token_secret field, so a
+        later table read can never recover a usable credential (PRD-06).
+        """
         token_id = uuid.uuid4().hex
+        secret = secrets.token_urlsafe(32)
         issued_at = time.time()
         with _transaction(self._conn):
             profile = self._conn.execute(
@@ -217,14 +228,16 @@ class SqliteMetaDriver:
             if profile is None:
                 raise StorageError(f"cannot issue token for unknown profile {profile_id!r}")
             self._conn.execute(
-                "INSERT INTO tokens (token_id, profile_id, scopes, issued_at, expires_at, revoked) "
-                "VALUES (?, ?, ?, ?, ?, 0)",
+                "INSERT INTO tokens (token_id, profile_id, scopes, issued_at, expires_at, "
+                "revoked, token_hash) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?)",
                 (
                     token_id,
                     profile_id,
                     json.dumps(list(scopes)),
                     iso8601_utc(issued_at),
                     iso8601_utc(expires_at) if expires_at is not None else None,
+                    _token_hash(secret),
                 ),
             )
         return Token(
@@ -234,10 +247,100 @@ class SqliteMetaDriver:
             issued_at=issued_at,
             expires_at=expires_at,
             revoked=False,
+            token_secret=secret,
         )
 
     def revoke_token(self, token_id: str) -> None:
         self._conn.execute("UPDATE tokens SET revoked = 1 WHERE token_id = ?", (token_id,))
+
+    def authenticate_token(self, secret: str) -> Token | None:
+        row = self._conn.execute(
+            "SELECT token_id, profile_id, scopes, issued_at, expires_at, revoked "
+            "FROM tokens WHERE token_hash = ? AND revoked = 0 "
+            "AND (expires_at IS NULL OR expires_at >= ?)",
+            (_token_hash(secret), iso8601_utc(time.time())),
+        ).fetchone()
+        if row is None:
+            return None
+        return _decode_token(row)
+
+    # ------------------------------------------------------------ users (FR-6.1a)
+
+    def create_user(self, user: StoredUser) -> None:
+        self._conn.execute(
+            "INSERT INTO users (user_id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                user.user_id,
+                user.username,
+                user.password_hash,
+                user.role,
+                iso8601_utc(user.created_at if user.created_at else time.time()),
+            ),
+        )
+
+    def create_owner(self, owner: StoredUser, profile: StoredProfile, audit: AuditEntry) -> None:
+        """Create the single owner + default profile + audit in one transaction.
+
+        BEGIN IMMEDIATE serializes concurrent writers: the losing setup blocks
+        here until the winner commits, then re-reads the owner count and raises
+        the typed ``OwnerConflictError``. The username UNIQUE constraint is a
+        final backstop, translated to the same typed conflict.
+        """
+        with _transaction(self._conn):
+            row = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()
+            if row is not None and int(row[0]) > 0:
+                raise OwnerConflictError("an owner account already exists")
+            try:
+                self._conn.execute(
+                    "INSERT INTO users (user_id, username, password_hash, role, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        owner.user_id,
+                        owner.username,
+                        owner.password_hash,
+                        owner.role,
+                        iso8601_utc(owner.created_at if owner.created_at else time.time()),
+                    ),
+                )
+                created = profile.created_at if profile.created_at else time.time()
+                self._conn.execute(
+                    "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)",
+                    (profile.profile_id, profile.display_name, iso8601_utc(created)),
+                )
+                self._conn.execute(
+                    "INSERT INTO audit_log (actor, action, detail, at) VALUES (?, ?, ?, ?)",
+                    (
+                        audit.actor,
+                        audit.action,
+                        json.dumps(audit.detail),
+                        iso8601_utc(audit.at if audit.at else time.time()),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise OwnerConflictError("an owner account already exists") from exc
+
+    def get_user_by_username(self, username: str) -> StoredUser | None:
+        row = self._conn.execute(
+            "SELECT user_id, username, password_hash, role, created_at FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _decode_user(row)
+
+    def count_users(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def list_users(self) -> list[StoredUser]:
+        rows = self._conn.execute("SELECT * FROM users ORDER BY created_at").fetchall()
+        return [_decode_user(row) for row in rows]
+
+    def update_user_password(self, user_id: str, password_hash: str) -> None:
+        self._conn.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (password_hash, user_id),
+        )
 
     # ------------------------------------------------------------ config
 
@@ -469,3 +572,29 @@ def _turn_range_or_none(start: Any, end: Any) -> TurnRange | None:
 
 def _maybe_epoch(value: Any) -> float | None:
     return epoch_from_iso(str(value)) if value is not None else None
+
+
+def _token_hash(secret: str) -> str:
+    """Deterministic sha256 digest of a bearer secret (never reversible)."""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def _decode_token(row: sqlite3.Row) -> Token:
+    return Token(
+        token_id=str(row["token_id"]),
+        profile_id=str(row["profile_id"]),
+        scopes=tuple(json.loads(str(row["scopes"]))) if row["scopes"] else (),
+        issued_at=epoch_from_iso(str(row["issued_at"])),
+        expires_at=_maybe_epoch(row["expires_at"]),
+        revoked=bool(int(row["revoked"])),
+    )
+
+
+def _decode_user(row: sqlite3.Row) -> StoredUser:
+    return StoredUser(
+        user_id=str(row["user_id"]),
+        username=str(row["username"]),
+        password_hash=str(row["password_hash"]),
+        role=str(row["role"]),
+        created_at=epoch_from_iso(str(row["created_at"])),
+    )

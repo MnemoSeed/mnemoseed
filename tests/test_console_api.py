@@ -24,9 +24,12 @@ from __future__ import annotations
 import json
 import secrets
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from _identity_helpers import attach_token, fresh_token
 from fastapi.testclient import TestClient
 
 from mnemoseed.capture import PoolEvent, PoolEventKind
@@ -90,6 +93,7 @@ def _config_toml(tmp_path: Path, *, dream: bool = False) -> Path:
     return cfg
 
 
+@contextmanager
 def _client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -97,11 +101,20 @@ def _client(
     cfg: Path | None = None,
     token: str | None = _ADMIN_TOKEN,
     loopback: bool = True,
-) -> TestClient:
+    authenticate: bool = True,
+) -> Iterator[TestClient]:
     """Boot the real daemon with a throwaway config + the console token env.
+    Context manager: enters the TestClient (runs lifespan) and attaches the
+    owner profile token before yielding.
 
     Defaults to a loopback source (the live console is local-first); the
-    remote-auth tests opt out with ``loopback=False``.
+    remote-auth tests opt out with ``loopback=False``. ``token`` still controls
+    the MNEMOSEED_CONSOLE_ADMIN_TOKEN env for the /console static guard.
+
+    Once an owner account exists every /api/v1 request needs the profile token
+    (issue #14), so the helper finishes first-run setup and stamps
+    ``Authorization: Bearer`` onto the client's default headers; pass
+    ``authenticate=False`` to keep the daemon in zero-owner setup mode instead.
     """
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", cfg if cfg is not None else _config_toml(tmp_path))
@@ -111,7 +124,10 @@ def _client(
     else:
         monkeypatch.setenv("MNEMOSEED_CONSOLE_ADMIN_TOKEN", token)
     kwargs = {"client": ("127.0.0.1", 50057)} if loopback else {}
-    return TestClient(create_app(), **kwargs)
+    with TestClient(create_app(), **kwargs) as client:
+        if authenticate:
+            attach_token(client)
+        yield client
 
 
 def _seed_profile(client: TestClient, profile_id: str = _PROFILE) -> None:
@@ -625,31 +641,50 @@ def test_auto_trigger_422_on_non_boolean(tmp_path, monkeypatch) -> None:
         assert response.status_code == 422
 
 
-# ---------------------------------------------------------------- auth (FR-7.1 / NFR-7.1)
+# ---------------------------------------------------------------- auth (issue #14)
 
 
-def test_console_requires_admin_token_for_non_loopback(tmp_path, monkeypatch) -> None:
-    """FR-7.1: a non-localhost request is refused without the token and with a
-    wrong token; either authorized header shape passes."""
+def test_api_status_503_setup_pointer_until_owner_exists(tmp_path, monkeypatch) -> None:
+    """issue #14: with zero owner accounts the console API answers 503 with the
+    setup pointer (never 401) -- for loopback and remote sources alike, and the
+    setup probe stays open."""
+    for loopback in (True, False):
+        with _client(tmp_path, monkeypatch, authenticate=False, loopback=loopback) as client:
+            response = client.get("/api/v1/status")
+            assert response.status_code == 503, (loopback, response.text)
+            body = response.json()
+            assert body["detail"]["detail"] == "setup required: no owner account exists yet"
+            assert body["detail"]["setup_url"] == "/console/#/setup"
+            probe = client.get("/api/v1/setup/status")
+            assert probe.status_code == 200
+            assert probe.json()["setup_required"] is True
+
+
+def test_api_requires_profile_token_after_setup(tmp_path, monkeypatch) -> None:
+    """issue #14: once the owner exists every /api/v1 request needs a valid
+    profile token -- wrong token 401, missing token 401, valid token 200. A
+    loopback client carries no implicit trust post-setup (deviation from the
+    earlier localhost-passwordless model; the console resolves identity through
+    the same login route a remote client uses)."""
     with _client(tmp_path, monkeypatch, loopback=False) as client:
+        # missing token (drop the default Authorization header)
+        client.headers.pop("authorization", None)
         assert client.get("/api/v1/status").status_code == 401
+        # wrong token
         assert client.get("/api/v1/status", headers={"Authorization": "Bearer nope"}).status_code == 401
-        ok_bearer = client.get("/api/v1/status", headers={"Authorization": f"Bearer {_ADMIN_TOKEN}"})
-        assert ok_bearer.status_code == 200
-        ok_x = client.get("/api/v1/status", headers={"X-Admin-Token": _ADMIN_TOKEN})
-        assert ok_x.status_code == 200
+        # a freshly issued profile token passes
+        token = fresh_token(client)
+        ok = client.get("/api/v1/status", headers={"Authorization": f"Bearer {token}"})
+        assert ok.status_code == 200
+        assert ok.json()["daemon"]["preset"] == "embedded"
 
 
-def test_console_refuses_remote_when_token_unconfigured(tmp_path, monkeypatch) -> None:
-    """NFR-7.1: no admin token configured -> remote access refused outright."""
-    with _client(tmp_path, monkeypatch, token=None, loopback=False) as client:
-        assert client.get("/api/v1/status").status_code == 401
-
-
-def test_console_loopback_passes_without_token(tmp_path, monkeypatch) -> None:
-    """FR-7.1: a loopback request is implicitly trusted -- no credential."""
-    with _client(tmp_path, monkeypatch, token=None, loopback=True) as client:
-        assert client.get("/api/v1/status").status_code == 200
+def test_setup_route_permanently_closed_after_first_run(tmp_path, monkeypatch) -> None:
+    """issue #14: the setup wizard is a first-run-only route -- a second POST on
+    an already-set-up daemon answers 410, it can never be re-run."""
+    with _client(tmp_path, monkeypatch) as client:
+        again = client.post("/api/v1/setup", json={"username": "second-owner", "password": "x-never-real-2"})
+        assert again.status_code == 410
 
 
 def test_console_static_shell_served_and_guarded(tmp_path, monkeypatch) -> None:
@@ -663,8 +698,8 @@ def test_console_static_shell_served_and_guarded(tmp_path, monkeypatch) -> None:
 
 def test_console_static_assets_served_with_content_types(tmp_path, monkeypatch) -> None:
     """FR-7.1: every static asset the SPA references (html shell, css, js,
-    banner) is served with the correct content-type — the page must not need a
-    build step, so these are served raw from the static dir."""
+    banner/logo) is served with the correct content-type — the page must not
+    need a build step, so these are served raw from the static dir."""
     # (path, expected content-type prefix or None for a JS dual check)
     expected = [
         ("/console/", "text/html"),
@@ -694,10 +729,19 @@ def test_console_static_assets_served_with_content_types(tmp_path, monkeypatch) 
 
 
 def test_console_static_assets_guarded_for_remote(tmp_path, monkeypatch) -> None:
-    """NFR-7.1: the static assets sit behind the same admin-token gate as the
-    API — a remote request without the token gets 401, never content."""
-    with _client(tmp_path, monkeypatch, loopback=False) as client:
-        for path in ("/console/", "/console/styles.css", "/console/app.js", "/console/logo.png"):
+    """NFR-7.1: the /console static assets sit behind the admin-token guard — a
+    remote request without the admin token gets 401, never content (the /api/v1
+    routes moved to the profile-token gate in issue #14, this guard only wraps
+    the SPA mount). authenticate=False: no profile token stamped, so the admin
+    token alone decides."""
+    with _client(tmp_path, monkeypatch, loopback=False, authenticate=False) as client:
+        for path in (
+            "/console/",
+            "/console/styles.css",
+            "/console/app.js",
+            "/console/banner.png",
+            "/console/logo.png",
+        ):
             assert client.get(path).status_code == 401, path
         with_token = client.get("/console/styles.css", headers={"X-Admin-Token": _ADMIN_TOKEN})
         assert with_token.status_code == 200
@@ -706,7 +750,11 @@ def test_console_static_assets_guarded_for_remote(tmp_path, monkeypatch) -> None
 def test_console_admin_token_check_uses_compare_digest(tmp_path, monkeypatch) -> None:
     """The admin-token match must run through secrets.compare_digest
     (constant-time), never a plain a == b -- swapping the call for ``==`` must
-    leave this test red (mutation pin)."""
+    leave this test red (mutation pin).
+
+    The admin token now guards only the /console static mount (the /api/v1
+    routes moved to the profile-token gate in issue #14), so the spy runs over a
+    remote request for the SPA shell."""
     calls: list[tuple[str, str]] = []
     real_compare = secrets.compare_digest
 
@@ -715,14 +763,14 @@ def test_console_admin_token_check_uses_compare_digest(tmp_path, monkeypatch) ->
         return real_compare(left, right)
 
     monkeypatch.setattr(secrets, "compare_digest", _spy)
-    with _client(tmp_path, monkeypatch, loopback=False) as client:
-        response = client.get("/api/v1/status", headers={"X-Admin-Token": _ADMIN_TOKEN})
+    with _client(tmp_path, monkeypatch, loopback=False, authenticate=False) as client:
+        response = client.get("/console/", headers={"X-Admin-Token": _ADMIN_TOKEN})
         assert response.status_code == 200
 
     assert calls, "the admin-token check bypassed secrets.compare_digest"
     assert (_ADMIN_TOKEN, _ADMIN_TOKEN) in calls  # (supplied, expected)
 
-    with _client(tmp_path, monkeypatch, loopback=False) as client:
+    with _client(tmp_path, monkeypatch, loopback=False, authenticate=False) as client:
         assert client.get("/console/").status_code == 401
 
 

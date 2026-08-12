@@ -12,7 +12,6 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from mnemoseed.console.auth import require_console_auth
 from mnemoseed.console.service import (
     CONFLICT_BRANCHES,
     REVIEW_ROUTES,
@@ -20,12 +19,18 @@ from mnemoseed.console.service import (
     ConsoleNotFoundError,
     ConsoleService,
 )
+from mnemoseed.identity.gate import require_identity
 from mnemoseed.schema.graph import NodeType
 
+# Identity gate (issue #14): /api/v1 was previously behind the console admin
+# token (localhost implicit trust); it now runs the shared profile-token gate —
+# 503 with a setup pointer until the owner exists, then Bearer profile token
+# (auth ends loopback implicit trust once setup has run). The console admin
+# token still guards only the /console static mount (console/auth.py).
 router = APIRouter(
     prefix="/api/v1",
     tags=["console"],
-    dependencies=[Depends(require_console_auth)],
+    dependencies=[Depends(require_identity)],
 )
 
 

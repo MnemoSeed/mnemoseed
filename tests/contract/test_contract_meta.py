@@ -21,10 +21,12 @@ from mnemoseed.storage.ports import (
     ConfigEntry,
     DreamRun,
     DreamRunFilter,
+    OwnerConflictError,
     Page,
     PoolState,
     StorageError,
     StoredProfile,
+    StoredUser,
     TurnRange,
 )
 
@@ -128,6 +130,99 @@ def test_issue_token_and_revoke(stack) -> None:
     assert int(raw_meta_row(stack, "tokens", "token_id", token.token_id)["revoked"]) == 1
 
 
+def test_users_crud_and_password_rotation(stack) -> None:
+    """Account layer (PRD-06 FR-6.1a): users rows; the password_hash is opaque
+    (argon2 at the service layer) — the port only stores what it is given."""
+    assert stack.meta.count_users() == 0
+    stack.meta.create_user(
+        StoredUser(
+            user_id="u-owner",
+            username="owner",
+            password_hash="argon2-stub",
+            role="owner",
+            created_at=100.0,
+        )
+    )
+    assert stack.meta.count_users() == 1
+    got = stack.meta.get_user_by_username("owner")
+    assert got is not None
+    assert got.user_id == "u-owner"
+    assert got.role == "owner"
+    assert got.password_hash == "argon2-stub"
+    assert stack.meta.get_user_by_username("ghost") is None
+    stack.meta.update_user_password("u-owner", "argon2-rotated")
+    assert stack.meta.get_user_by_username("owner").password_hash == "argon2-rotated"
+    assert [user.user_id for user in stack.meta.list_users()] == ["u-owner"]
+
+
+def test_create_owner_atomic_and_conflict(stack) -> None:
+    """FR-6.1a exact-once at the port: create_owner writes the owner's user,
+    default profile and audit row in ONE transaction, and a second call is the
+    typed OwnerConflictError -- never a bare IntegrityError."""
+    assert stack.meta.count_users() == 0
+    stack.meta.create_owner(
+        StoredUser(
+            user_id="u-owner",
+            username="owner",
+            password_hash="argon2-stub",
+            role="owner",
+            created_at=100.0,
+        ),
+        StoredProfile(profile_id="default", display_name="owner", created_at=100.0),
+        AuditEntry(actor="setup", action="owner_created", detail={"username": "owner"}, at=100.0),
+    )
+    assert stack.meta.count_users() == 1
+    assert stack.meta.get_profile("default").display_name == "owner"
+    page = stack.meta.audit_query(AuditFilter(action="owner_created"), Page(0, 50))
+    assert page.total == 1
+
+    with pytest.raises(OwnerConflictError):
+        stack.meta.create_owner(
+            StoredUser(
+                user_id="u-owner-2",
+                username="second",
+                password_hash="argon2-stub",
+                role="owner",
+                created_at=101.0,
+            ),
+            StoredProfile(profile_id="default", display_name="second", created_at=101.0),
+            AuditEntry(actor="setup", action="owner_created", detail={"username": "second"}, at=101.0),
+        )
+    # the rejected setup mutated nothing: no second user, profile, or audit row
+    assert stack.meta.count_users() == 1
+    assert stack.meta.audit_query(AuditFilter(action="owner_created"), Page(0, 50)).total == 1
+
+
+def test_token_secret_hashed_at_rest_and_authenticates(stack) -> None:
+    """issue_token hands back a bearer secret that is NEVER stored verbatim:
+    the row keeps only its sha256 digest, and authenticate_token resolves the
+    digest back to the live token."""
+    stack.meta.upsert_profile(_pool_profile(stack))
+    token = stack.meta.issue_token("u1", ("graph:read", "meta:read"))
+    assert token.token_secret, "issue_token must return the one-shot bearer secret"
+    row = raw_meta_row(stack, "tokens", "token_id", token.token_id)
+    assert row != {}
+    assert row["token_hash"]
+    assert row["token_hash"] != token.token_secret  # plaintext never persisted
+    found = stack.meta.authenticate_token(token.token_secret)
+    assert found is not None
+    assert found.token_id == token.token_id
+    assert found.profile_id == "u1"
+    assert tuple(found.scopes) == ("graph:read", "meta:read")
+    assert stack.meta.authenticate_token("unknown-secret") is None
+
+
+def test_authenticate_respects_revocation_and_expiry(stack) -> None:
+    """A revoked or expired token stops authenticating (the gate relies on it)."""
+    stack.meta.upsert_profile(_pool_profile(stack))
+    token = stack.meta.issue_token("u1", ("graph:read",), expires_at=time.time() + 60.0)
+    assert stack.meta.authenticate_token(token.token_secret) is not None
+    stack.meta.revoke_token(token.token_id)
+    assert stack.meta.authenticate_token(token.token_secret) is None
+    expired = stack.meta.issue_token("u1", ("graph:read",), expires_at=time.time() - 1.0)
+    assert stack.meta.authenticate_token(expired.token_secret) is None
+
+
 def test_config_versioned_get_set_rollback(stack) -> None:
     v1 = stack.meta.set_config("theme", {"mode": "dark"})
     assert v1 == 1
@@ -195,12 +290,13 @@ def test_dream_runs_roundtrip(stack) -> None:
 
 
 def test_schema_version_and_migrate_forward_only(stack) -> None:
-    """meta's head is v4 (frozen v1 schema + v3 profile_score_pool + v4
-    dream_token_ledger); migrate is idempotent and forward-only."""
-    assert stack.meta.schema_version() == 4
-    assert stack.meta.migrate() == 4
-    assert stack.meta.migrate(target=1) == 4  # back-targeting is a no-op at head
-    assert stack.meta.schema_version() == 4
+    """meta's head is v6 (frozen v1 schema + v3 profile_score_pool + v4
+    dream_token_ledger + v6 identity users/token_hash); migrate is idempotent
+    and forward-only."""
+    assert stack.meta.schema_version() == 6
+    assert stack.meta.migrate() == 6
+    assert stack.meta.migrate(target=1) == 6  # back-targeting is a no-op at head
+    assert stack.meta.schema_version() == 6
 
 
 def test_dream_token_ledger_atomic_increment(stack) -> None:

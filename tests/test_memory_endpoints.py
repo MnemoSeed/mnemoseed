@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _identity_helpers import attach_token
 from fastapi.testclient import TestClient
 
 from mnemoseed.daemon.app import create_app
@@ -75,11 +78,17 @@ def _memory_config_toml(tmp_path: Path) -> Path:
     return cfg
 
 
-def _client(tmp_path, monkeypatch) -> TestClient:
+@contextmanager
+def _client(tmp_path, monkeypatch) -> Iterator[TestClient]:
+    """Boot the real daemon, finish setup, and attach the profile token to the
+    default headers so the suite keeps asserting through the HTTP surface."""
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _memory_config_toml(tmp_path))
     monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
-    return TestClient(create_app())
+    client = TestClient(create_app())
+    with client:
+        attach_token(client)
+        yield client
 
 
 def _write_chunk(

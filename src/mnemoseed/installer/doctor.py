@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from mnemoseed.config import Config, load_config
+from mnemoseed.identity.session import bearer_headers, resolve_token
 from mnemoseed.installer.hosts import (
     MCP_SERVERS_KEY,
     MCP_SERVERS_TOML_KEY,
@@ -73,9 +74,17 @@ def _http_request(
     timeout: float = _PROBE_TIMEOUT,
     json: Any | None = None,
 ) -> httpx.Response:
+    # The profile-token gate (issue #14) closes /api/v1 and /memory once an
+    # owner exists; when MNEMOSEED_TOKEN / the stored session holds a token,
+    # doctor attaches it so the round-trip probe still works against a set-up
+    # daemon. Absent a token it fails open: the probe just reports its 401/503.
+    headers: dict[str, str] = {}
+    token = resolve_token()
+    if token:
+        headers.update(bearer_headers(token))
     if method == "GET":
-        return httpx.get(url, timeout=timeout)
-    return httpx.post(url, json=json, timeout=timeout)
+        return httpx.get(url, timeout=timeout, headers=headers)
+    return httpx.post(url, json=json, timeout=timeout, headers=headers)
 
 
 def _tcp_probe(host: str, port: int) -> bool:
@@ -110,14 +119,31 @@ def _json_body(response: httpx.Response) -> dict[str, Any] | None:
     return body
 
 
+def _setup_pending(response: httpx.Response) -> bool:
+    """True when a 503 is the issue-#14 setup pointer (owner account missing)."""
+    if response.status_code != 503:
+        return False
+    body = _json_body(response)
+    detail = (body or {}).get("detail")
+    return isinstance(detail, dict) and "setup required" in str(detail.get("detail", ""))
+
+
 def _round_trip(request: HttpFn, baseurl: str) -> tuple[bool, str]:
-    """Write a probe pin, read it back, forget it. Returns (ok, detail)."""
+    """Write a probe pin, read it back, forget it. Returns (ok, detail).
+
+    A reachable daemon that has not been set up yet (503 setup pointer) is not
+    broken: the memory surface is intentionally closed until the owner account
+    exists, so doctor reports the probe as skipped (ok) with an honest detail
+    instead of a restart-worthy failure.
+    """
     marker = f"mnemoseed doctor probe {time.time():.9f}"
     try:
         write = request(
             "POST", f"{baseurl}/memory/remember", json={"profile_id": _PROBE_PROFILE, "text": marker}
         )
         if write.status_code != 200:
+            if _setup_pending(write):
+                return True, "skipped (daemon ready, setup pending: run the console setup wizard)"
             return False, f"write failed (HTTP {write.status_code})"
         write_body = _json_body(write)
         if write_body is None:
