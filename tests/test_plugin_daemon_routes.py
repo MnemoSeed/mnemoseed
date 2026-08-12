@@ -57,7 +57,10 @@ def _config_toml(tmp_path: Path) -> Path:
         f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
         f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
         f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
-        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n',
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
+        # test-only: the deep_reflection role runs the deterministic offline
+        # StubLLM driver so the manual dream chain stays network-free (issue #4)
+        '[dream.llm.deep_reflection]\ndriver = "stub"\nmodel = "stub"\n',
         encoding="utf-8",
     )
     return cfg
