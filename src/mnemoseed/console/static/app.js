@@ -274,6 +274,7 @@ const state = {
   },
   review: { runId: null, data: null },
   conflicts: { data: null },
+  llm: { routes: null, oauth: null, editingRole: null, message: null },
   autoRefreshTimer: null,
 };
 
@@ -394,7 +395,7 @@ async function submitSetup(form) {
   } catch (error) {
     return flashAuthError(panel, `setup failed: ${error.message}`);
   }
-  showLogin(`Owner ${username} created — sign in with that password.`);
+  await setupLoginAndDreamModels({ username, password });
 }
 
 async function submitLogin(form) {
@@ -417,6 +418,144 @@ async function submitLogin(form) {
   state.profileId = body.profile_id || "default";
   store.set("mnemoseed.profile", state.profileId);
   authViewKind = null;
+  render();
+}
+
+// First-run dream model step (FR-6.9): after the owner is created, the wizard
+// offers host-OAuth pickup (Codex / Grok), a bring-your-own-key route, or skip.
+// Keys are referenced by env-var NAME only — no token value ever crosses this
+// page or is written by the daemon.
+async function setupLoginAndDreamModels(credentials) {
+  let body;
+  try {
+    body = await fetchOpen("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+  } catch (error) {
+    showLogin(`auto sign-in failed: ${error.message}`);
+    return;
+  }
+  setAuth({ token: body.token, username: body.username });
+  state.profileId = body.profile_id || "default";
+  store.set("mnemoseed.profile", state.profileId);
+  await showDreamSetup();
+}
+
+async function showDreamSetup() {
+  authViewKind = "dream";
+  document.title = "MnemoSeed console — dream model";
+  renderHeaderAuth();
+  const view = document.getElementById("view");
+  view.innerHTML = '<p class="loading">Checking host OAuth…</p>';
+  let routes = { roles: [], drivers: [] };
+  let oauth = { providers: [] };
+  try {
+    const loaded = await Promise.all([
+      api("/api/v1/llm/routes"),
+      api("/api/v1/llm/oauth-availability"),
+    ]);
+    routes = loaded[0];
+    oauth = loaded[1];
+  } catch (_err) {
+    /* degrade: the BYO-key and skip paths still work without the catalogs */
+  }
+  state.llm.routes = routes;
+  state.llm.oauth = oauth;
+  if (view) view.innerHTML = dreamSetupHtml(routes, oauth);
+}
+
+function dreamSetupHtml(routes, oauth) {
+  const providers = (oauth && oauth.providers) || [];
+  const oauthRows = providers.length
+    ? providers
+        .map((entry) => {
+          const live = entry.present === true && entry.expired !== true;
+          const mark = live
+            ? '<span class="badge badge-ok">logged in</span>'
+            : entry.present === true
+              ? '<span class="badge badge-warn">expired</span>'
+              : '<span class="badge">not detected</span>';
+          return `<div class="resolve-row">
+            ${mark} <span class="mono">${esc(entry.provider)}</span>${entry.expires_at ? ` <span class="dim">· ${esc(fmtEpoch(entry.expires_at))}</span>` : ""}
+            <span class="spacer"></span>
+            <button class="btn btn-primary" data-act="llm-wizard-oauth" data-provider="${esc(entry.provider)}" ${live ? "" : "disabled"} title="fill the route below with ${esc(entry.provider)} OAuth">use ${esc(entry.provider)} oauth</button>
+          </div>`;
+        })
+        .join("")
+    : "";
+  const drivers = routes.drivers || [];
+  const driverOptions = drivers
+    .map((d) => `<option value="${esc(d.name)}">${esc(d.name)}</option>`)
+    .join("");
+  return `<div class="auth-panel card">
+    <h2>dream model</h2>
+    <p class="toolbar-note">Owner created. Pick the model the dream pipeline uses to distill memories — or skip and keep the defaults. Routes are editable any time from the Models view.</p>
+    <h3>host OAuth</h3>
+    <p class="toolbar-note">The console only detects whether this machine is already signed in to a provider CLI. Picking one fills the route below — enter the model name your subscription uses, then save. No key value is read, sent, or stored.</p>
+    ${oauthRows || emptyPanel("No host OAuth login detected (~/.codex or ~/.grok).")}
+    <h3>bring your own key</h3>
+    <form data-llm-wizard-form>
+      <div class="filter-grid">
+        <div class="field"><label for="wz-driver">driver</label><select id="wz-driver" name="driver">${driverOptions}</select></div>
+        <div class="field"><label for="wz-model">model</label><input type="text" id="wz-model" name="model" required placeholder="e.g. claude-opus-5" autocomplete="off" /></div>
+        <div class="field"><label for="wz-base-url">base URL</label><input type="text" id="wz-base-url" name="base_url" placeholder="blank = driver default" autocomplete="off" /></div>
+        <div class="field"><label for="wz-apikeyenv">api key env var</label><input type="text" id="wz-apikeyenv" name="api_key_env" placeholder="e.g. ANTHROPIC_API_KEY" autocomplete="off" /></div>
+        <div class="field"><label for="wz-provider">oauth provider</label><input type="text" id="wz-provider" name="provider" placeholder="codex | grok" autocomplete="off" /></div>
+      </div>
+      <div class="toolbar">
+        <button class="btn btn-primary" type="submit">save model</button>
+        <span class="toolbar-note">the daemon reads the key from the named env var at run time</span>
+      </div>
+      <output class="feedback" data-wz-feedback></output>
+    </form>
+    <div class="toolbar"><button class="btn" data-act="llm-wizard-skip">skip — keep defaults</button></div>
+  </div>`;
+}
+
+function applyWizardOAuth(provider) {
+  const form = document.querySelector("[data-llm-wizard-form]");
+  if (!form) return;
+  form.elements.driver.value = "oauth";
+  form.elements.provider.value = provider;
+  form.elements.model.placeholder =
+    provider === "codex" ? "e.g. gpt-5.6-codex" : "the model name your grok subscription uses";
+  const modelInput = form.elements.model;
+  modelInput.focus();
+  modelInput.select();
+}
+
+async function submitWizard(form) {
+  const feedback = form.querySelector("[data-wz-feedback]");
+  const data = new FormData(form);
+  const driver = String(data.get("driver") || "").trim();
+  const model = String(data.get("model") || "").trim();
+  if (!driver || !model) {
+    if (feedback) feedback.innerHTML = errorInline("driver and model are required");
+    return;
+  }
+  const payload = { driver, model };
+  for (const name of ["base_url", "api_key_env", "provider"]) {
+    const value = String(data.get(name) || "").trim();
+    if (value) payload[name] = value;
+  }
+  if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
+  try {
+    const result = await api("/api/v1/llm/routes/deep_reflection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    finishDreamSetup(`deep reflection → ${result.driver} · ${result.model}`);
+  } catch (error) {
+    if (feedback) feedback.innerHTML = errorInline(`save failed: ${error.message}`);
+  }
+}
+
+function finishDreamSetup(message) {
+  authViewKind = null;
+  state.llm.message = message;
   render();
 }
 
@@ -501,6 +640,7 @@ function parseRoute() {
   if (hash.startsWith("/browse")) return { name: "browse" };
   if (hash.startsWith("/review")) return { name: "review" };
   if (hash.startsWith("/conflicts")) return { name: "conflicts" };
+  if (hash.startsWith("/llm")) return { name: "llm" };
   return { name: "dashboard" };
 }
 
@@ -553,6 +693,9 @@ function render() {
   } else if (route.name === "conflicts") {
     view.innerHTML = '<p class="loading">Loading conflicts inbox…</p>';
     loadConflicts();
+  } else if (route.name === "llm") {
+    view.innerHTML = '<p class="loading">Loading models…</p>';
+    loadLLM();
   } else {
     view.innerHTML = '<p class="loading">Loading detail…</p>';
     if (!route.type || !route.id) {
@@ -629,6 +772,14 @@ async function loadDashboard() {
     state.dreamRuns = runs;
     const view = document.getElementById("view");
     view.innerHTML = dashboardHtml(status, dream, runs);
+    if (state.llm.message) {
+      // First-run dream model result: one banner on the freshly loaded dashboard.
+      view.insertAdjacentHTML(
+        "afterbegin",
+        `<div class="card"><h2>dream model</h2><span class="ok-inline">${esc(state.llm.message)}</span></div>`,
+      );
+      state.llm.message = null;
+    }
     setUpdatedAt();
   } catch (error) {
     const view = document.getElementById("view");
@@ -1518,6 +1669,205 @@ async function resolveConflict(index) {
   }
 }
 
+// ---------------------------------------------------------------- models & routing (FR-6.9)
+async function loadLLM() {
+  const view = document.getElementById("view");
+  try {
+    const loaded = await Promise.all([
+      api("/api/v1/llm/routes"),
+      api("/api/v1/llm/oauth-availability"),
+    ]);
+    state.llm.routes = loaded[0];
+    state.llm.oauth = loaded[1];
+    if (view) view.innerHTML = llmShellHtml(loaded[0], loaded[1], state.llm.message);
+    state.llm.message = null;
+    setUpdatedAt();
+  } catch (error) {
+    state.llm.routes = null;
+    state.llm.oauth = null;
+    if (view) view.innerHTML = errorPanel(`Models request failed: ${error.message}`);
+  }
+}
+
+function llmShellHtml(routes, oauth, message) {
+  const banner = message
+    ? `<div class="card"><h2>models &amp; routing</h2><span class="ok-inline">${esc(message)}</span></div>`
+    : "";
+  const drivers = routes.drivers || [];
+  const roles = routes.roles || [];
+  return `${banner}
+    <div class="toolbar">
+      <button class="btn" data-act="go-home">← dashboard</button>
+      <button class="btn" data-act="llm-refresh">Refresh</button>
+      <span class="spacer"></span>
+      <span class="toolbar-note">routes reference env-var NAMES — key values never leave the machine</span>
+    </div>
+    <div class="card">
+      <h2>models &amp; routing</h2>
+      <p class="toolbar-note">per-role dream routes: driver, model, endpoint, and the api-key env-var chain. The connectivity probe is live but cached briefly on the daemon (checked ${esc(fmtEpoch(routes.checked_at))}).</p>
+      ${oauthHintsHtml(oauth)}
+      <h3>drivers</h3>
+      <p class="badges">${drivers.length ? drivers.map((d) => `<span class="badge" title="${esc(d.description || "")}">${esc(d.name)}</span>`).join(" ") : '<span class="dim">none registered</span>'}</p>
+    </div>
+    ${roles.length ? roles.map((role) => llmRoleCard(role, drivers)).join("") : emptyPanel("No dream roles configured on this daemon.")}`;
+}
+
+function oauthHintsHtml(oauth) {
+  const providers = (oauth && oauth.providers) || [];
+  if (!providers.length) return "";
+  const bits = providers
+    .map((entry) => {
+      const live = entry.present === true && entry.expired !== true;
+      const cls = live ? "badge-ok" : entry.present === true ? "badge-warn" : "";
+      const label = live
+        ? `${entry.provider}: logged in`
+        : entry.present === true
+          ? `${entry.provider}: expired`
+          : `${entry.provider}: not detected`;
+      return `<span class="badge ${cls}">${esc(label)}</span>`;
+    })
+    .join(" ");
+  return `<h3>host OAuth</h3><p>${bits}</p>`;
+}
+
+function llmRoleCard(role, drivers) {
+  const conn = role.connectivity || {};
+  const ok = conn.ok === true;
+  const editing = state.llm.editingRole === role.role;
+  const detail = conn.detail;
+  const detailHtml = detail
+    ? ` <span class="mono">${esc(typeof detail === "string" ? detail : JSON.stringify(detail))}</span>`
+    : "";
+  const probe = ok
+    ? `probe: <span class="badge badge-ok">reachable</span>${detailHtml}`
+    : `probe: <span class="badge badge-err">unreachable</span>${detailHtml}`;
+  const envRows = (role.api_key_env || "").split(",").map((name) => name.trim()).filter(Boolean);
+  const unknownDriver = drivers.some((d) => d.name === role.driver) ? null : role.driver;
+  const driverOptions = []
+    .concat(
+      unknownDriver
+        ? [`<option value="${esc(unknownDriver)}" selected>${esc(unknownDriver)} (unknown)</option>`]
+        : [],
+    )
+    .concat(
+      drivers.map(
+        (d) =>
+          `<option value="${esc(d.name)}" ${d.name === role.driver ? "selected" : ""}>${esc(d.name)}</option>`,
+      ),
+    )
+    .join("");
+  return `<div class="card">
+    <h2>${esc(role.role)} ${role.explicit ? '<span class="badge badge-accent">configured</span>' : ""}</h2>
+    <div class="tiles">
+      ${tile(`<span class="mono">${esc(role.driver || "—")}</span>`, "driver")}
+      ${tile(`<span class="mono">${esc(role.model || "—")}</span>`, "model")}
+      ${tile(esc(role.base_url || "default"), "base URL")}
+      ${tile(esc(envRows.join(", ") || "—"), "api key env")}
+      ${tile(esc(role.provider || "—"), "oauth provider")}
+    </div>
+    <h3>connectivity</h3>
+    <div class="toolbar">
+      <span>${probe}</span>
+      <span class="dim">checked ${esc(fmtEpoch(conn.checked_at))}</span>
+      <span class="spacer"></span>
+      <button class="btn" data-act="llm-test" data-role="${esc(role.role)}" title="probe this saved route now">test connection</button>
+      <button class="btn" data-act="llm-edit" data-role="${esc(role.role)}" title="edit this route's config row">${editing ? "cancel edit" : "edit route"}</button>
+    </div>
+    <output class="feedback" data-llm-feedback data-feedback-role="${esc(role.role)}"></output>
+    ${editing ? llmEditFormHtml(role, driverOptions) : ""}
+  </div>`;
+}
+
+function llmEditFormHtml(role, driverOptions) {
+  return `<form class="card" data-llm-route-form data-role="${esc(role.role)}">
+    <h3>edit route · ${esc(role.role)}</h3>
+    <div class="filter-grid">
+      <div class="field"><label for="llm-driver-${esc(role.role)}">driver</label><select id="llm-driver-${esc(role.role)}" name="driver">${driverOptions}</select></div>
+      <div class="field"><label for="llm-model-${esc(role.role)}">model</label><input type="text" id="llm-model-${esc(role.role)}" name="model" value="${esc(role.model || "")}" required autocomplete="off" /></div>
+      <div class="field"><label for="llm-url-${esc(role.role)}">base URL</label><input type="text" id="llm-url-${esc(role.role)}" name="base_url" value="${esc(role.base_url || "")}" placeholder="blank = default" autocomplete="off" /></div>
+      <div class="field"><label for="llm-env-${esc(role.role)}">api key env var</label><input type="text" id="llm-env-${esc(role.role)}" name="api_key_env" value="${esc(role.api_key_env || "")}" placeholder="MY_API_KEY" autocomplete="off" /></div>
+      <div class="field"><label for="llm-provider-${esc(role.role)}">oauth provider</label><input type="text" id="llm-provider-${esc(role.role)}" name="provider" value="${esc(role.provider || "")}" placeholder="codex | grok" autocomplete="off" /></div>
+    </div>
+    <div class="toolbar">
+      <span class="toolbar-note">blank base URL / env var clears the override, restoring defaults</span>
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-act="llm-test-edit" data-role="${esc(role.role)}">test connection</button>
+      <button class="btn btn-primary" type="submit">save route</button>
+    </div>
+    <output class="feedback" data-llm-feedback></output>
+  </form>`;
+}
+
+function renderLLM() {
+  const view = document.getElementById("view");
+  if (!view) return;
+  if (!state.llm.routes) {
+    loadLLM();
+    return;
+  }
+  view.innerHTML = llmShellHtml(state.llm.routes, state.llm.oauth, null);
+  setUpdatedAt();
+}
+
+function findLLMRoute(role) {
+  const routes = state.llm.routes;
+  return routes && routes.roles ? routes.roles.find((entry) => entry.role === role) : null;
+}
+
+async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feedbackEl) {
+  if (!driver || !model) {
+    if (feedbackEl) feedbackEl.innerHTML = errorInline("driver and model are required to probe");
+    return;
+  }
+  const payload = { role, driver, model, base_url: baseUrl || "" };
+  if (apiKeyEnv && String(apiKeyEnv).trim()) payload.api_key_env = String(apiKeyEnv).trim();
+  if (provider && String(provider).trim()) payload.provider = String(provider).trim();
+  if (feedbackEl) feedbackEl.innerHTML = '<span class="dim">probing…</span>';
+  try {
+    const result = await api("/api/v1/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const detail = String(result.detail && typeof result.detail === "object" ? JSON.stringify(result.detail) : result.detail || "");
+    if (feedbackEl) {
+      feedbackEl.innerHTML = result.ok
+        ? `<span class="ok-inline">reachable — ${esc(detail)}</span>`
+        : errorInline(`unreachable — ${esc(detail)}`);
+    }
+  } catch (error) {
+    if (feedbackEl) feedbackEl.innerHTML = errorInline(`test failed: ${error.message}`);
+  }
+}
+
+async function saveRoute(role, form) {
+  const feedback = form.querySelector("[data-llm-feedback]");
+  const data = new FormData(form);
+  const driver = String(data.get("driver") || "").trim();
+  const model = String(data.get("model") || "").trim();
+  if (!driver || !model) {
+    if (feedback) feedback.innerHTML = errorInline("driver and model are required to save");
+    return;
+  }
+  if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
+  const payload = { driver, model };
+  for (const name of ["base_url", "api_key_env", "provider"]) {
+    payload[name] = String(data.get(name) || "").trim();
+  }
+  try {
+    const result = await api(`/api/v1/llm/routes/${encodeURIComponent(role)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.llm.editingRole = null;
+    state.llm.message = `route ${result.role} saved → ${result.driver} / ${result.model} (audited)`;
+    await loadLLM();
+  } catch (error) {
+    if (feedback) feedback.innerHTML = errorInline(`save failed: ${error.message}`);
+  }
+}
+
 // ---------------------------------------------------------------- events (delegation)
 function handleClick(event) {
   const el = event.target.closest("[data-act]");
@@ -1572,6 +1922,61 @@ function handleClick(event) {
     case "conflict-resolve":
       resolveConflict(Number(el.dataset.index));
       break;
+    case "llm-refresh":
+      loadLLM();
+      break;
+    case "llm-edit": {
+      const editRole = el.dataset.role;
+      state.llm.editingRole = state.llm.editingRole === editRole ? null : editRole;
+      renderLLM();
+      break;
+    }
+    case "llm-test": {
+      const testRole = el.dataset.role;
+      const route = findLLMRoute(testRole);
+      if (!route) break;
+      const feedback = document.querySelector(
+        `[data-llm-feedback][data-feedback-role="${testRole}"]`,
+      );
+      testRoute(
+        testRole,
+        route.driver,
+        route.model,
+        route.base_url || "",
+        route.api_key_env || "",
+        route.provider || "",
+        feedback,
+      );
+      break;
+    }
+    case "llm-test-edit": {
+      const editForm = el.closest("form");
+      const editRole = el.dataset.role;
+      if (!editForm) break;
+      const editData = new FormData(editForm);
+      testRoute(
+        editRole,
+        String(editData.get("driver") || "").trim(),
+        String(editData.get("model") || "").trim(),
+        String(editData.get("base_url") || "").trim(),
+        String(editData.get("api_key_env") || "").trim(),
+        String(editData.get("provider") || "").trim(),
+        editForm.querySelector("[data-llm-feedback]"),
+      );
+      break;
+    }
+    case "llm-wizard-oauth": {
+      const provider = el.dataset.provider;
+      const entry = (state.llm.oauth && state.llm.oauth.providers || []).find(
+        (candidate) => candidate.provider === provider,
+      );
+      if (!entry || entry.present !== true || entry.expired === true) break;
+      applyWizardOAuth(provider);
+      break;
+    }
+    case "llm-wizard-skip":
+      finishDreamSetup("defaults kept — no route was changed; configure one any time in the Models view");
+      break;
     case "retry":
       render();
       break;
@@ -1618,6 +2023,14 @@ function handleSubmit(event) {
     state.browse.filters = readFilters(form);
     state.browse.offset = 0;
     loadBrowse();
+  }
+  if (form.hasAttribute("data-llm-route-form")) {
+    event.preventDefault();
+    saveRoute(form.dataset.role, form);
+  }
+  if (form.hasAttribute("data-llm-wizard-form")) {
+    event.preventDefault();
+    submitWizard(form);
   }
   if (form.dataset && form.dataset.authForm === "setup") {
     event.preventDefault();

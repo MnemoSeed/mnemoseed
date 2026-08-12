@@ -2,10 +2,13 @@
 
 Scope: init / install / doctor / up / serve / embed-sidecar / uninstall /
 version, plus the identity chain (issue #14): ``login`` / ``logout`` /
-``whoami`` / ``auth reset``. ``up`` starts the daemon single-process (embedded
-preset by default — every driver runs in one process with zero external
-services); ``serve`` is kept as an alias. ``install`` / ``uninstall`` /
-``doctor`` are the FR-6.1 / FR-6.7 / FR-6.6 installer surface.
+``whoami`` / ``auth reset``, the dream LLM route manager (issue #23):
+``llm status`` / ``llm set``, and the daemon autostart manager (issue #6):
+``startup enable`` / ``startup disable`` / ``startup status``. ``up`` starts
+the daemon single-process (embedded preset by default — every driver runs in
+one process with zero external services); ``serve`` is kept as an alias.
+``install`` / ``uninstall`` / ``doctor`` are the FR-6.1 / FR-6.7 / FR-6.6
+installer surface.
 """
 
 from __future__ import annotations
@@ -419,6 +422,106 @@ def cmd_auth_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_llm_status(args: argparse.Namespace) -> int:
+    """REST-free dream route table + live connectivity (FR-6.9).
+
+    Reports env-var NAMES only — a token value must never reach the terminal.
+    """
+    from mnemoseed.config import ConfigError, load_config
+    from mnemoseed.llm.admin import LLMAdminError, LLMAdminService
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        body = LLMAdminService(config).routes()
+    except LLMAdminError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if config.source is not None:
+        print(f"routes from: {config.source}")
+    for role in body["roles"]:
+        print(role["role"])
+        probe = role["connectivity"]
+        state = "ok" if probe["ok"] else "FAIL"
+        suffix = f" ({probe['detail']})" if not probe["ok"] else ""
+        for label, value in (
+            ("driver", role["driver"] or "-"),
+            ("model", role["model"] or "-"),
+            ("base_url", role["base_url"] or "-"),
+            ("api_key_env", role["api_key_env"] or "-"),
+            ("connectivity", f"{state}{suffix}"),
+        ):
+            print(f"  {label}: {value}")
+    print("drivers: " + ", ".join(info["name"] for info in body["drivers"]))
+    return 0
+
+
+def cmd_llm_set(args: argparse.Namespace) -> int:
+    """Persist one dream role route (FR-6.9): the same validation + surgical
+    TOML patch the console API runs, offline (no connectivity probe)."""
+    from mnemoseed.config import ConfigError, load_config
+    from mnemoseed.llm.admin import LLMAdminError, LLMAdminService
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = LLMAdminService(config).set_role(
+            args.role,
+            driver=args.driver,
+            model=args.model,
+            base_url=args.base_url,
+            api_key_env=args.api_key_env,
+            provider=args.provider,
+        )
+    except LLMAdminError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{result['role']}: driver={result['driver']} model={result['model']}")
+    print(f"persisted to: {result['persisted_to']}")
+    return 0
+
+
+def cmd_startup_enable(args: argparse.Namespace) -> int:
+    """Register the daemon to launch at login/boot (issue #6)."""
+    from mnemoseed.installer import startup
+
+    for line in startup.enable():
+        print(line)
+    return 0
+
+
+def cmd_startup_disable(args: argparse.Namespace) -> int:
+    """Remove the login/boot registration (issue #6)."""
+    from mnemoseed.installer import startup
+
+    for line in startup.disable():
+        print(line)
+    return 0
+
+
+def cmd_startup_status(args: argparse.Namespace) -> int:
+    """Report registration + whether the daemon is running (issue #6)."""
+    from mnemoseed.installer import startup
+
+    st = startup.status()
+    print(f"platform:    {st.platform}")
+    print(f"target:      {st.target}")
+    print(f"registered:  {st.registered}")
+    print(f"pid:         {st.daemon_pid if st.daemon_pid is not None else 'none'}")
+    print(f"pid alive:   {st.pid_alive}")
+    print(f"/healthz:    {st.healthz_ok}")
+    print(f"baseurl:     {st.baseurl}")
+    print(f"running:     {st.running}")
+    print(f"to change:   {st.change_command}")
+    return 0
+
+
 def _add_serve_parser(
     sub: argparse._SubParsersAction[argparse.ArgumentParser], name: str, help_text: str
 ) -> argparse.ArgumentParser:
@@ -527,6 +630,77 @@ def main(argv: list[str] | None = None) -> int:
         help="new owner password (prompts with confirmation when omitted)",
     )
     p_auth_reset.set_defaults(func=cmd_auth_reset)
+
+    # Dream model routing (FR-6.9): 'status' shows each role's route + live
+    # connectivity; 'set' persists one role through the same validation +
+    # surgical TOML patch the console API runs. The api_key_env field names an
+    # env var; the secret value itself is never stored or echoed (FR-2.14).
+    p_llm = sub.add_parser(
+        "llm",
+        help="manage dream LLM routes (REST-free; writes config.toml)",
+        description=(
+            "Dream model routing (FR-6.9): 'llm status' shows each role's "
+            "driver/model/endpoint/env-var NAME with a live connectivity probe; "
+            "'llm set' persists one role route offline. Env-var NAMES only — "
+            "a token value is never stored or printed."
+        ),
+    )
+    llm_sub = p_llm.add_subparsers(dest="llm_command", required=True)
+    p_llm_status = llm_sub.add_parser("status", help="show each role's route + connectivity")
+    p_llm_status.set_defaults(func=cmd_llm_status)
+    p_llm_set = llm_sub.add_parser(
+        "set",
+        help="update one role route (--driver/--model/--base-url/--api-key-env/--provider)",
+    )
+    p_llm_set.add_argument(
+        "role",
+        metavar="ROLE",
+        help="dream role (deep_reflection, short_increment, local_track)",
+    )
+    p_llm_set.add_argument("--driver", default=None, help="driver name to switch to")
+    p_llm_set.add_argument("--model", default=None, help="model name to switch to")
+    p_llm_set.add_argument(
+        "--base-url", default=None, help="endpoint override (omit to keep; empty to clear)"
+    )
+    p_llm_set.add_argument(
+        "--api-key-env",
+        default=None,
+        help="env-var NAME whose value the router resolves (comma-separated fallback chain)",
+    )
+    p_llm_set.add_argument("--provider", default=None, help="oauth provider (codex|grok) for driver=oauth")
+    p_llm_set.set_defaults(func=cmd_llm_set)
+
+    # Daemon autostart (issue #6): enable registers the daemon to launch at
+    # login/boot via the platform's native per-user surface (Windows Run key,
+    # systemd user unit, launchd agent); disable removes that registration;
+    # status reports registration + running state (pidfile + /healthz) and the
+    # exact command that would change it.
+    p_startup = sub.add_parser(
+        "startup",
+        help="manage daemon autostart (enable / disable / status)",
+        description=(
+            "Cross-platform daemon autostart: 'startup enable' registers the "
+            "daemon to launch at login/boot (Windows HKCU Run key, systemd "
+            "user unit, launchd LaunchAgent); 'startup disable' removes the "
+            "registration; 'startup status' reports whether it is registered "
+            "and whether the daemon is currently running."
+        ),
+    )
+    startup_sub = p_startup.add_subparsers(dest="startup_command", required=True)
+    p_startup_enable = startup_sub.add_parser("enable", help="register the daemon at login/boot")
+    p_startup_enable.set_defaults(func=cmd_startup_enable)
+    p_startup_disable = startup_sub.add_parser("disable", help="remove the login/boot registration")
+    p_startup_disable.set_defaults(func=cmd_startup_disable)
+    p_startup_status = startup_sub.add_parser(
+        "status",
+        help="show whether the daemon is registered and running",
+        description=(
+            "Reports the registration target, whether the daemon is registered, "
+            "and whether it is running (pidfile liveness + /healthz probe), plus "
+            "the exact `mnemoseed startup` command that would change it."
+        ),
+    )
+    p_startup_status.set_defaults(func=cmd_startup_status)
 
     args = parser.parse_args(argv)
     handler: Callable[[argparse.Namespace], int] = args.func

@@ -44,6 +44,8 @@ from mnemoseed.dream import (
 from mnemoseed.identity import IdentityService
 from mnemoseed.identity.routes import router as identity_router
 from mnemoseed.llm import RoleRouter
+from mnemoseed.llm.admin import LLMAdminService
+from mnemoseed.llm.admin_routes import router as llm_admin_router
 from mnemoseed.llm.types import (
     ChatResult,
     DreamLLM,
@@ -327,6 +329,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # memory and console route depends on require_identity, which reads this
     # state; the setup wizard 503s those routes until setup_owner has run.
     app.state.identity = IdentityService(stores.meta)
+    # LLM admin surface (issue #23 / FR-6.9): per-role route reads/writes,
+    # OAuth availability, and the pre-write connectivity probe. It audits
+    # through the same meta store the console writes do and persists surgical
+    # TOML patches into the live config.
+    app.state.llm_admin = LLMAdminService(config, stores.meta)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,
@@ -359,6 +366,7 @@ def create_app() -> FastAPI:
     app.include_router(identity_router)
     app.include_router(memory_router)
     app.include_router(console_router)
+    app.include_router(llm_admin_router)
     # Console SPA shell (PRD-07 T1): served from its own static directory,
     # mounted behind the same localhost/admin-token gate as /api/v1.
     app.mount("/console", GuardedStaticFiles(directory=_CONSOLE_STATIC_DIR), name="console")

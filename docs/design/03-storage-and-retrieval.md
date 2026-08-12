@@ -187,13 +187,18 @@ erDiagram
 
 ---
 
-## 5. Docker Compose Local Ecosystem (inherited from PRD v3.0 Module 4)
+## 5. Docker Compose Ecosystem (issue #5: split by purpose)
 
 ```yaml
 # Schematic — the full file is in the mnemoseed/core repo root docker-compose.yml
+# Default (`docker compose up`) = ONE container running the embedded stack,
+# zero UX difference from local `mnemoseed up`.
 services:
-  mnemoseed-core:    # Python/FastAPI core engine (graph + dream state machine); the MCP server is the same-package stdio entry, pulled up by the host as needed, occupying no compose service slot
-  mnemoseed-vector:  # vector store (the docker preset can swap in pgvector), mounts a local persistent volume
-  mnemoseed-embed:   # bge-m3 embedding (ONNX, CPU-runnable, GPU optional)
-  ollama:            # optional: offline dream synthesis (premium track)
+  core:              # Python/FastAPI core engine; the MCP server is the same-package stdio entry, pulled up by the host as needed, occupying no compose service slot
+                     # MNEMOSEED_HOME=/data (persistent volume); an empty volume resolves the embedded preset
+
+# Developer/enterprise Postgres family (`docker compose --profile pg up`):
+#   vector (pgvector) + pg (postgres, hosts the cortex graph + meta) + embed (dev embedding sidecar)
+# Optional offline dream model: `docker compose --profile ollama up`
+# Cloud/VPS: `docker compose -f docker-compose.cloud.yml up -d` (TLS at a reverse proxy, see design/10)
 ```
