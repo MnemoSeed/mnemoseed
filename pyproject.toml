@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemoseed"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cross-model neutral AI memory layer — five-stage memory pipeline derived from neuroscience"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
