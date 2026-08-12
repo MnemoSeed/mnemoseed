@@ -13,22 +13,21 @@ chosen project as separate approvable items:
 Both items flow through the same plan -> backup -> diff -> per-item confirm ->
 apply path as the MCP registrations, so uninstall can roll them back exactly.
 Template texts live in ``adapters/cursor/templates`` and are located through
-:func:`adapter_templates_dir` (``MNEMOSEED_ADAPTER_TEMPLATES`` overrides it for
-wheels and tests).
+:func:`adapter_templates_dir` (resolved by
+:mod:`mnemoseed.installer.templating`: wheel-shipped package data first, the
+dev-checkout repo tree as fallback).
 """
 
 from __future__ import annotations
 
 import json
-import os
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
 from mnemoseed.installer.hosts import HostConfigError, json_file_text, load_host_json
 from mnemoseed.installer.registration import RegistrationPlan
-
-ENV_ADAPTER_TEMPLATES = "MNEMOSEED_ADAPTER_TEMPLATES"
+from mnemoseed.installer.templating import adapter_templates_dir as _shared_adapter_templates_dir
 
 HOOKS_HOST_KEY = "cursor-hooks"
 RULES_HOST_KEY = "cursor-rules"
@@ -47,14 +46,11 @@ HOOK_SCRIPT_RELS = (
 def adapter_templates_dir() -> Path:
     """The directory holding the Cursor adapter templates.
 
-    Env-overridable (``MNEMOSEED_ADAPTER_TEMPLATES``) so a wheel install or a
-    test can point at an explicit source; otherwise resolved relative to this
-    checkout (``adapters/cursor/templates``).
+    Wheel-shipped package data wins when present (``uv tool install .``);
+    otherwise the dev-checkout repo tree (``adapters/cursor/templates``) is the
+    fallback, and ``MNEMOSEED_ADAPTER_TEMPLATES`` overrides both for tests.
     """
-    raw = os.environ.get(ENV_ADAPTER_TEMPLATES)
-    if raw:
-        return Path(raw).expanduser()
-    return Path(__file__).resolve().parents[3] / "adapters" / "cursor" / "templates"
+    return _shared_adapter_templates_dir("cursor")
 
 
 def _template_source(root: Path, rel: Path) -> Path:

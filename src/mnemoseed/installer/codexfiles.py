@@ -16,21 +16,20 @@ apply path as the host registrations, so uninstall can roll them back exactly:
 hooks.json restores byte-identical from its backup, and the AGENTS.md fragment
 is stripped (never the user's own file). Template texts live in
 ``adapters/codex/templates`` and are located through :func:`adapter_templates_dir`
-(``MNEMOSEED_ADAPTER_TEMPLATES`` overrides it for wheels and tests).
+(resolved by :mod:`mnemoseed.installer.templating`: wheel-shipped package data
+first, the dev-checkout repo tree as fallback).
 """
 
 from __future__ import annotations
 
 import json
-import os
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
 from mnemoseed.installer.hosts import HostConfigError, json_file_text, load_host_json
 from mnemoseed.installer.registration import RegistrationPlan
-
-ENV_ADAPTER_TEMPLATES = "MNEMOSEED_ADAPTER_TEMPLATES"
+from mnemoseed.installer.templating import adapter_templates_dir as _shared_adapter_templates_dir
 
 # Codex runs user-managed hooks only after a `/hooks` trust review by hash
 # (FR-6.3c / AC-8). The installer prints this whenever it plans the hooks.
@@ -61,14 +60,11 @@ HOOK_SCRIPT_RELS = (
 def adapter_templates_dir() -> Path:
     """The directory holding the Codex adapter templates.
 
-    Env-overridable (``MNEMOSEED_ADAPTER_TEMPLATES``) so a wheel install or a
-    test can point at an explicit source; otherwise resolved relative to this
-    checkout (``adapters/codex/templates``).
+    Wheel-shipped package data wins when present (``uv tool install .``);
+    otherwise the dev-checkout repo tree (``adapters/codex/templates``) is the
+    fallback, and ``MNEMOSEED_ADAPTER_TEMPLATES`` overrides both for tests.
     """
-    raw = os.environ.get(ENV_ADAPTER_TEMPLATES)
-    if raw:
-        return Path(raw).expanduser()
-    return Path(__file__).resolve().parents[3] / "adapters" / "codex" / "templates"
+    return _shared_adapter_templates_dir("codex")
 
 
 def _template_source(root: Path, rel: Path) -> Path:
