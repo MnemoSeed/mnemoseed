@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemoseed"
-version = "0.0.1"
+version = "0.1.0"
 description = "Cross-model neutral AI memory layer — five-stage memory pipeline derived from neuroscience"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
@@ -51,7 +51,11 @@ packages = ["src/mnemoseed"]
 # kept as the marketplace-distribution source (design/06 section 2.1); the
 # wheel copy lands under the package at a stable, resolution-known location.
 # The installer resolves them via mnemoseed.installer.templating.
-[tool.hatch.build.force-include]
+# The trees must also ride the sdist, since wheels are rebuilt from it.
+[tool.hatch.build.targets.sdist]
+include = ["src", "adapters", "plugins/claude-code", "tests", "README.md", "LICENSE"]
+
+[tool.hatch.build.targets.wheel.force-include]
 "adapters" = "src/mnemoseed/_templates/adapters"
 "plugins/claude-code" = "src/mnemoseed/_templates/plugins/claude-code"
 
