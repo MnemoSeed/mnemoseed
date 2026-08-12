@@ -405,3 +405,11 @@ tr:last-child td { border-bottom: none; }
 .resolve-row select, .resolve-row input[type="text"] { background: var(--bg-inset); border: 1px solid var(--border-soft); color: var(--text); border-radius: 8px; padding: 0.4rem 0.55rem; font-size: 0.85rem; }
 .resolve-row input[type="text"] { min-width: 280px; flex: 1; }
 .resolve-note { color: var(--text-faint); font-size: 0.78rem; margin-top: 0.4rem; }
+
+/* Identity gate (issue #14): [hidden] must win over the flex rules above so the
+   nav/picker/sign-out can be toggled by the setup/login views. */
+[hidden] { display: none !important; }
+
+.auth-panel { max-width: 460px; margin: 2rem auto; }
+.auth-panel .toolbar { justify-content: flex-end; }
+.auth-panel .error-inline { margin-bottom: 0.6rem; }

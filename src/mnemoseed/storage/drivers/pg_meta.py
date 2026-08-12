@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 import uuid
 from collections.abc import Iterator
@@ -32,7 +33,12 @@ from mnemoseed.storage.drivers._migrations import (
     current_postgres_schema_version,
 )
 from mnemoseed.storage.drivers._time import epoch_from_iso, iso8601_utc
-from mnemoseed.storage.drivers.sqlite_meta import _maybe_epoch, _merge_watermark, _turn_range_or_none
+from mnemoseed.storage.drivers.sqlite_meta import (
+    _maybe_epoch,
+    _merge_watermark,
+    _token_hash,
+    _turn_range_or_none,
+)
 from mnemoseed.storage.ports import (
     AuditEntry,
     AuditFilter,
@@ -41,17 +47,23 @@ from mnemoseed.storage.ports import (
     DreamRun,
     DreamRunFilter,
     DriverInfo,
+    OwnerConflictError,
     Page,
     PageResult,
     PoolState,
     StorageError,
     StoredProfile,
+    StoredUser,
     Token,
     TurnRange,
 )
 from mnemoseed.storage.registry import META_DRIVERS, register
 
 _CAPABILITIES = frozenset({Capability.META_TRANSACTION, Capability.META_CONCURRENT_READERS})
+
+# Advisory xact lock serializing concurrent owner setup across connections
+# (FR-6.1a). Uses the same 9xxxxxxx-id scheme as the migration runner's lock.
+_OWNER_SETUP_LOCK = 936982030
 
 
 @register(META_DRIVERS)
@@ -237,21 +249,29 @@ class PgMetaDriver:
         scopes: CSeq[str],
         expires_at: float | None = None,
     ) -> Token:
+        """Issue a profile token whose bearer secret is returned exactly once.
+
+        Only the sha256 digest is persisted (``tokens.token_hash``) — mirror of
+        the sqlite driver (AC-5 parity); the raw secret never lands in the row.
+        """
         token_id = uuid.uuid4().hex
+        secret = secrets.token_urlsafe(32)
         issued_at = time.time()
         with _transaction(self._conn):
             profile = self._exec_row("SELECT profile_id FROM profiles WHERE profile_id = %s", (profile_id,))
             if profile is None:
                 raise StorageError(f"cannot issue token for unknown profile {profile_id!r}")
             self._conn.execute(
-                "INSERT INTO tokens (token_id, profile_id, scopes, issued_at, expires_at, revoked) "
-                "VALUES (%s, %s, %s, %s, %s, 0)",
+                "INSERT INTO tokens (token_id, profile_id, scopes, issued_at, expires_at, "
+                "revoked, token_hash) "
+                "VALUES (%s, %s, %s, %s, %s, 0, %s)",
                 (
                     token_id,
                     profile_id,
                     Jsonb(list(scopes)),
                     iso8601_utc(issued_at),
                     iso8601_utc(expires_at) if expires_at is not None else None,
+                    _token_hash(secret),
                 ),
             )
         return Token(
@@ -261,11 +281,106 @@ class PgMetaDriver:
             issued_at=issued_at,
             expires_at=expires_at,
             revoked=False,
+            token_secret=secret,
         )
 
     def revoke_token(self, token_id: str) -> None:
         with _transaction(self._conn):
             self._conn.execute("UPDATE tokens SET revoked = 1 WHERE token_id = %s", (token_id,))
+
+    def authenticate_token(self, secret: str) -> Token | None:
+        row = self._exec_row(
+            "SELECT token_id, profile_id, scopes, issued_at, expires_at, revoked "
+            "FROM tokens WHERE token_hash = %s AND revoked = 0 "
+            "AND (expires_at IS NULL OR expires_at >= %s)",
+            (_token_hash(secret), iso8601_utc(time.time())),
+        )
+        if row is None:
+            return None
+        return _decode_token(row)
+
+    # ------------------------------------------------------------ users (FR-6.1a)
+
+    def create_user(self, user: StoredUser) -> None:
+        with _transaction(self._conn):
+            self._conn.execute(
+                "INSERT INTO users (user_id, username, password_hash, role, created_at) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (
+                    user.user_id,
+                    user.username,
+                    user.password_hash,
+                    user.role,
+                    iso8601_utc(user.created_at if user.created_at else time.time()),
+                ),
+            )
+
+    def create_owner(self, owner: StoredUser, profile: StoredProfile, audit: AuditEntry) -> None:
+        """Create the single owner + default profile + audit in one transaction.
+
+        The advisory xact lock serializes concurrent setups across connections
+        (the sqlite analog is BEGIN IMMEDIATE); after the lock the owner count is
+        re-read, so exactly one winner commits and every loser raises the typed
+        ``OwnerConflictError``. The username UNIQUE constraint is a final
+        backstop, translated to the same typed conflict.
+        """
+        with _transaction(self._conn):
+            self._conn.execute(f"SELECT pg_advisory_xact_lock({_OWNER_SETUP_LOCK})")
+            row = self._exec_row("SELECT COUNT(*) FROM users")
+            if _count_value(row) > 0:
+                raise OwnerConflictError("an owner account already exists")
+            try:
+                self._conn.execute(
+                    "INSERT INTO users (user_id, username, password_hash, role, created_at) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        owner.user_id,
+                        owner.username,
+                        owner.password_hash,
+                        owner.role,
+                        iso8601_utc(owner.created_at if owner.created_at else time.time()),
+                    ),
+                )
+                created = profile.created_at if profile.created_at else time.time()
+                self._conn.execute(
+                    "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (%s, %s, %s)",
+                    (profile.profile_id, profile.display_name, iso8601_utc(created)),
+                )
+                self._conn.execute(
+                    "INSERT INTO audit_log (actor, action, detail, at) VALUES (%s, %s, %s, %s)",
+                    (
+                        audit.actor,
+                        audit.action,
+                        audit.detail,
+                        iso8601_utc(audit.at if audit.at else time.time()),
+                    ),
+                )
+            except psycopg.errors.UniqueViolation as exc:
+                raise OwnerConflictError("an owner account already exists") from exc
+
+    def get_user_by_username(self, username: str) -> StoredUser | None:
+        row = self._exec_row(
+            "SELECT user_id, username, password_hash, role, created_at FROM users WHERE username = %s",
+            (username,),
+        )
+        if row is None:
+            return None
+        return _decode_user(row)
+
+    def count_users(self) -> int:
+        row = self._exec_row("SELECT COUNT(*) FROM users")
+        return _count_value(row)
+
+    def list_users(self) -> list[StoredUser]:
+        rows = self._exec_rows("SELECT * FROM users ORDER BY created_at")
+        return [_decode_user(row) for row in rows]
+
+    def update_user_password(self, user_id: str, password_hash: str) -> None:
+        with _transaction(self._conn):
+            self._conn.execute(
+                "UPDATE users SET password_hash = %s WHERE user_id = %s",
+                (password_hash, user_id),
+            )
 
     # ------------------------------------------------------------ config
 
@@ -470,6 +585,30 @@ def _decode_dream_run(row: Any) -> DreamRun:
         cost=float(row["cost"]),
         interrupted=bool(int(row["interrupted"])),
         dropped_count=int(row["dropped_count"]),
+    )
+
+
+def _decode_token(row: Any) -> Token:
+    scopes = row["scopes"]
+    if isinstance(scopes, str):
+        scopes = json.loads(scopes) if scopes else []
+    return Token(
+        token_id=str(row["token_id"]),
+        profile_id=str(row["profile_id"]),
+        scopes=tuple(scopes or ()),
+        issued_at=epoch_from_iso(str(row["issued_at"])),
+        expires_at=_maybe_epoch(row["expires_at"]),
+        revoked=bool(int(row["revoked"])),
+    )
+
+
+def _decode_user(row: Any) -> StoredUser:
+    return StoredUser(
+        user_id=str(row["user_id"]),
+        username=str(row["username"]),
+        password_hash=str(row["password_hash"]),
+        role=str(row["role"]),
+        created_at=epoch_from_iso(str(row["created_at"])),
     )
 
 

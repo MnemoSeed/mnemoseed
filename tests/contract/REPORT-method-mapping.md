@@ -51,7 +51,7 @@ Driver families covered by the `stack` fixture:
 | upsert_node | `test_contract_graph.py::test_upsert_get_roundtrip` |
 | versions | `test_contract_graph.py::test_versions_chain` |
 
-## MetaStore (23 methods)
+## MetaStore (30 methods)
 
 | Method | Contract test |
 |---|---|
@@ -59,13 +59,19 @@ Driver families covered by the `stack` fixture:
 | advance_watermark | `test_contract_meta.py::test_pool_watermark_gap_raises` |
 | audit_append | `test_contract_meta.py::test_audit_append_and_query` |
 | audit_query | `test_contract_meta.py::test_audit_append_and_query` |
+| authenticate_token | `test_contract_meta.py::test_token_secret_hashed_at_rest_and_authenticates` |
 | capabilities | `test_contract_meta.py::test_capabilities` |
+| count_users | `test_contract_meta.py::test_users_crud_and_password_rotation` |
+| create_owner | `test_contract_meta.py::test_create_owner_atomic_and_conflict` |
+| create_user | `test_contract_meta.py::test_users_crud_and_password_rotation` |
 | delete_profile | `test_contract_meta.py::test_profile_crud_and_token_cascade` |
 | get_config | `test_contract_meta.py::test_config_versioned_get_set_rollback` |
 | get_profile | `test_contract_meta.py::test_profile_crud_and_token_cascade` |
+| get_user_by_username | `test_contract_meta.py::test_users_crud_and_password_rotation` |
 | issue_token | `test_contract_meta.py::test_issue_token_and_revoke` |
 | list_dream_runs | `test_contract_meta.py::test_dream_runs_roundtrip` |
 | list_profiles | `test_contract_meta.py::test_profile_crud_and_token_cascade` |
+| list_users | `test_contract_meta.py::test_users_crud_and_password_rotation` |
 | migrate | `test_contract_meta.py::test_schema_version_and_migrate_forward_only` |
 | pool_add | `test_contract_meta.py::test_pool_add_state_advance_watermark` |
 | pool_credit | `test_contract_meta.py::test_pool_credit_upserts_row` |
@@ -77,6 +83,7 @@ Driver families covered by the `stack` fixture:
 | schema_version | `test_contract_meta.py::test_schema_version_and_migrate_forward_only` |
 | set_config | `test_contract_meta.py::test_config_versioned_get_set_rollback` |
 | token_usage | `test_contract_meta.py::test_dream_token_ledger_atomic_increment` |
+| update_user_password | `test_contract_meta.py::test_users_crud_and_password_rotation` |
 | upsert_profile | `test_contract_meta.py::test_profile_crud_and_token_cascade` |
 
 ## Embedder (3 methods)

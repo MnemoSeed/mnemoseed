@@ -261,8 +261,11 @@ def _embedded_config(tmp_path: Path, port: int) -> Path:
 
 
 def test_doctor_live_daemon_all_green(tmp_path) -> None:
-    """End-to-end FR-6.6: a booted daemon + doctor comes out all green and the
-    round-trip probe really writes and reads through /memory."""
+    """End-to-end FR-6.6: a booted, set-up daemon + doctor comes out all green,
+    and the round-trip really ran through /memory -- the login token is exported
+    as MNEMOSEED_TOKEN so the post-setup profile-token gate lets the probe
+    through, and doctor must report write+read+forget ok (proving the probe was
+    not merely skipped)."""
     home = tmp_path / "home"
     data = tmp_path / "data"
     data.mkdir(parents=True, exist_ok=True)
@@ -282,6 +285,7 @@ def test_doctor_live_daemon_all_green(tmp_path) -> None:
         stderr=subprocess.PIPE,
         text=True,
     )
+    doctor: subprocess.CompletedProcess[str] | None = None
     try:
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
@@ -294,6 +298,23 @@ def test_doctor_live_daemon_all_green(tmp_path) -> None:
             time.sleep(0.2)
         else:
             raise AssertionError("daemon did not come up in time")
+
+        base = f"http://127.0.0.1:{port}"
+        setup = httpx.post(
+            base + "/api/v1/setup",
+            json={"username": "owner", "password": "a-strong-test-password"},
+            timeout=10.0,
+        )
+        assert setup.status_code == 201, setup.text
+        login = httpx.post(
+            base + "/api/v1/auth/login",
+            json={"username": "owner", "password": "a-strong-test-password"},
+            timeout=10.0,
+        )
+        assert login.status_code == 200, login.text
+        token = login.json().get("token")
+        assert token and isinstance(token, str)
+        env["MNEMOSEED_TOKEN"] = token
 
         doctor = subprocess.run(
             [*_console_script(), "doctor"],
@@ -311,6 +332,7 @@ def test_doctor_live_daemon_all_green(tmp_path) -> None:
             proc.kill()
 
     assert cfg.exists()
+    assert doctor is not None
     assert doctor.returncode == 0, doctor.stdout + doctor.stderr
     assert "all checks passed" in doctor.stdout
-    assert "round-trip" in doctor.stdout
+    assert "write+read+forget ok" in doctor.stdout

@@ -41,6 +41,8 @@ from mnemoseed.dream import (
     TokenLedger,
     resume_boundary,
 )
+from mnemoseed.identity import IdentityService
+from mnemoseed.identity.routes import router as identity_router
 from mnemoseed.llm import RoleRouter
 from mnemoseed.llm.types import (
     ChatResult,
@@ -321,6 +323,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # /api/v1 routers observe the same trigger instance the /memory and /ingest
     # surfaces drive.
     app.state.console = ConsoleService(stores, config, app.state.dream)
+    # Identity chain (issue #14): the owner account + token surface. Every
+    # memory and console route depends on require_identity, which reads this
+    # state; the setup wizard 503s those routes until setup_owner has run.
+    app.state.identity = IdentityService(stores.meta)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,
@@ -350,6 +356,7 @@ def create_app() -> FastAPI:
     app.state.capture = StrippingPipeline()
     app.state.segmenter = TurnSegmenter(app.state.capture)
     app.include_router(ingest_router)
+    app.include_router(identity_router)
     app.include_router(memory_router)
     app.include_router(console_router)
     # Console SPA shell (PRD-07 T1): served from its own static directory,

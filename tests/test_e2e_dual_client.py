@@ -46,6 +46,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+from _identity_helpers import OWNER_PASSWORD, OWNER_USERNAME
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
@@ -109,6 +110,27 @@ class _DaemonHarness:
         self._server: MnemoseedServer | None = None
         self._task: asyncio.Task[Any] | None = None
         self.base_url: str = ""
+        self.token: str = ""
+
+    async def _attach_owner(self) -> str:
+        """Finish first-run setup and return a profile token (issue #14): the
+        /memory/* surface this suite drives is gated on the owner."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            setup = await client.post(
+                f"{self.base_url}/api/v1/setup",
+                json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+            )
+            assert setup.status_code == 201, setup.text
+            login = await client.post(
+                f"{self.base_url}/api/v1/auth/login",
+                json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+            )
+            assert login.status_code == 200, login.text
+            return login.json()["token"]
+
+    @property
+    def auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"}
 
     async def __aenter__(self) -> _DaemonHarness:
         self._monkeypatch.delenv("STORAGE_MODE", raising=False)
@@ -149,6 +171,7 @@ class _DaemonHarness:
             await asyncio.wait_for(asyncio.to_thread(server.ready.wait), timeout=20)
         except TimeoutError:
             raise RuntimeError("daemon did not become ready") from None
+        self.token = await self._attach_owner()
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -161,17 +184,21 @@ class _DaemonHarness:
 
     async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(f"{self.base_url}{path}", json=payload)
+            response = await client.post(f"{self.base_url}{path}", json=payload, headers=self.auth_headers)
             return {"status": response.status_code, "json": response.json()}
 
 
 @contextlib.asynccontextmanager
-async def _mcp_session(base_url: str) -> AsyncIterator[ClientSession]:
-    """One real ``mnemoseed mcp`` subprocess session against the daemon."""
+async def _mcp_session(base_url: str, token: str) -> AsyncIterator[ClientSession]:
+    """One real ``mnemoseed mcp`` subprocess session against the daemon.
+
+    The gateway holds the profile token via MNEMOSEED_TOKEN (issue #14): the
+    MCP client bearer-attaches it to every /memory/* call, and returns a typed
+    error when no token is configured."""
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "mnemoseed.cli", "mcp"],
-        env={"MNEMOSEED_BASE_URL": base_url},
+        env={"MNEMOSEED_BASE_URL": base_url, "MNEMOSEED_TOKEN": token},
         cwd=_REPO_ROOT,
     )
     async with stdio_client(params) as (read_stream, write_stream):
@@ -267,7 +294,7 @@ async def test_cross_surface_mcp_pin_readable_via_http_and_back(
     http_text = "cursor prefers dependency injection everywhere"
     mcp_text = "cline remembers the sprint demo is on fridays"
     async with _DaemonHarness(tmp_path, monkeypatch) as daemon:
-        async with _mcp_session(daemon.base_url) as session:
+        async with _mcp_session(daemon.base_url, daemon.token) as session:
             pinned = await _mcp_remember(session, profile, mcp_text)
             assert pinned["outcome"] == "new_chunk"
             assert pinned["chunk_id"]
@@ -291,7 +318,7 @@ async def test_profile_isolation_honest_empty_on_both_surfaces(
     honest-empty coverage instead of leaking foreign rows (FR-3.13/D5)."""
     private_text = "keystore rotation happens tuesday"
     async with _DaemonHarness(tmp_path, monkeypatch) as daemon:
-        async with _mcp_session(daemon.base_url) as session:
+        async with _mcp_session(daemon.base_url, daemon.token) as session:
             await _mcp_remember(session, "p1", private_text)
             via_http_p2 = await daemon.post("/memory/recall", {"profile_id": "p2", "query": private_text})
             http_entries = via_http_p2["json"]["memory"]["entries"]
@@ -318,7 +345,7 @@ async def test_forget_this_chunk_hard_delete_seen_by_both_surfaces(
     honest-empty, and both surfaces report the same 404 for the deleted chunk."""
     text = "temporary wifi password was winter-2026"
     async with _DaemonHarness(tmp_path, monkeypatch) as daemon:
-        async with _mcp_session(daemon.base_url) as session:
+        async with _mcp_session(daemon.base_url, daemon.token) as session:
             pinned = await _mcp_remember(session, "p-forget", text)
             chunk_id = pinned["chunk_id"]
             removed = await daemon.post(
@@ -380,7 +407,7 @@ async def test_forget_this_node_tombstone_keeps_history_on_both_surfaces(
     node_id = "node-e2e-tombstone"
     await _seed_graph_node(tmp_path, profile, node_id, statement)
     async with _DaemonHarness(tmp_path, monkeypatch) as daemon:
-        async with _mcp_session(daemon.base_url) as session:
+        async with _mcp_session(daemon.base_url, daemon.token) as session:
             timeline_before_http = await daemon.post(
                 "/memory/timeline", {"profile_id": profile, "node_id": node_id}
             )
@@ -416,7 +443,7 @@ async def test_usage_audit_coherence_both_surfaces_same_profile(
     http_text = "deploy freeze starts on the 15th"
     mcp_text = "code owners must review all prs"
     async with _DaemonHarness(tmp_path, monkeypatch) as daemon:
-        async with _mcp_session(daemon.base_url) as session:
+        async with _mcp_session(daemon.base_url, daemon.token) as session:
             http_pin = await daemon.post("/memory/remember", {"profile_id": profile, "text": http_text})
             http_chunk = http_pin["json"]["chunk_id"]
             mcp_pin = await _mcp_remember(session, profile, mcp_text)
@@ -463,19 +490,26 @@ async def test_concurrent_dual_surface_load_exact_counts_no_errors(
     }
     bag: dict[str, Any] = {"errors": [], "http_written": [], "mcp_written": []}
 
-    async def http_worker(base_url: str, w: int) -> None:
+    async def http_worker(base_url: str, token: str, w: int) -> None:
+        headers = {"Authorization": f"Bearer {token}"}
         async with httpx.AsyncClient(timeout=60) as client:
             for i in range(CONCURRENT_OPS):
                 text = http_texts[f"h{w:02d}-{i:03d}"]
                 response = await client.post(
-                    base_url + "/memory/remember", json={"profile_id": profile, "text": text}, timeout=60
+                    base_url + "/memory/remember",
+                    json={"profile_id": profile, "text": text},
+                    headers=headers,
+                    timeout=60,
                 )
                 if response.status_code >= 500:
                     bag["errors"].append(("http-5xx", response.status_code, text))
                 else:
                     bag["http_written"].append(text)
                 recall = await client.post(
-                    base_url + "/memory/recall", json={"profile_id": profile, "query": text}, timeout=60
+                    base_url + "/memory/recall",
+                    json={"profile_id": profile, "query": text},
+                    headers=headers,
+                    timeout=60,
                 )
                 if recall.status_code >= 500:
                     bag["errors"].append(("http-5xx", recall.status_code, text))
@@ -494,8 +528,10 @@ async def test_concurrent_dual_surface_load_exact_counts_no_errors(
 
     async with _DaemonHarness(tmp_path, monkeypatch) as daemon:
         base_url = daemon.base_url
-        async with _mcp_session(base_url) as session:
-            tasks = [asyncio.create_task(http_worker(base_url, w)) for w in range(CONCURRENT_WORKERS)]
+        async with _mcp_session(base_url, daemon.token) as session:
+            tasks = [
+                asyncio.create_task(http_worker(base_url, daemon.token, w)) for w in range(CONCURRENT_WORKERS)
+            ]
             tasks += [asyncio.create_task(mcp_worker(session, w)) for w in range(CONCURRENT_WORKERS)]
             await asyncio.wait_for(asyncio.gather(*tasks), timeout=240)
             export = await daemon.post("/memory/export", {"profile_id": profile, "limit": 500})

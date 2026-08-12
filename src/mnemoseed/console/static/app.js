@@ -277,9 +277,202 @@ const state = {
   autoRefreshTimer: null,
 };
 
+// ---------------------------------------------------------------- identity (issue #14)
+// The console is owner-only after setup: every /api/v1 call carries the profile
+// token from the login view. Pre-setup the boot gate renders the setup wizard
+// instead; post-setup an absent/expired token renders the login view.
+const AUTH = {
+  token: store.get("mnemoseed.token") || null,
+  username: store.get("mnemoseed.username") || null,
+};
+
+let authViewKind = null; // "setup" | "login" | null while the page is gated
+
+function setAuth(session) {
+  AUTH.token = session ? session.token : null;
+  AUTH.username = session ? session.username : null;
+  store.set("mnemoseed.token", AUTH.token || "");
+  store.set("mnemoseed.username", AUTH.username || "");
+  renderHeaderAuth();
+}
+
+function renderHeaderAuth() {
+  const authed = Boolean(AUTH.token);
+  for (const id of ["auth-nav", "auth-picker"]) {
+    const node = document.getElementById(id);
+    if (node) node.hidden = !authed;
+  }
+  const identity = document.getElementById("auth-identity");
+  if (identity) {
+    identity.hidden = !authed;
+    identity.textContent = authed ? `signed in as ${AUTH.username}` : "";
+  }
+  const signOut = document.getElementById("sign-out");
+  if (signOut) signOut.hidden = !authed;
+}
+
+function flashAuthError(panel, message) {
+  if (!panel) return;
+  panel.querySelectorAll(".error-inline").forEach((node) => node.remove());
+  const node = document.createElement("p");
+  node.className = "error-inline";
+  node.textContent = message;
+  panel.prepend(node);
+}
+
+function showLogin(message) {
+  authViewKind = "login";
+  document.title = "MnemoSeed console — sign in";
+  renderHeaderAuth();
+  const view = document.getElementById("view");
+  view.innerHTML = `<div class="auth-panel card">
+    <h2>sign in</h2>
+    <p class="toolbar-note">Setup is complete. The console is owner-only — sign in with the owner password to obtain a profile token.</p>
+    ${message ? `<p class="error-inline">${esc(message)}</p>` : ""}
+    <form data-auth-form="login">
+      <div class="filter-grid">
+        <div class="field"><label for="login-username">username</label><input type="text" id="login-username" name="username" required autocomplete="username" /></div>
+        <div class="field"><label for="login-password">password</label><input type="password" id="login-password" name="password" required autocomplete="current-password" /></div>
+      </div>
+      <div class="toolbar"><button class="btn btn-primary" type="submit">sign in</button></div>
+    </form>
+  </div>`;
+}
+
+function showSetup(message) {
+  authViewKind = "setup";
+  document.title = "MnemoSeed console — first-run setup";
+  renderHeaderAuth();
+  const view = document.getElementById("view");
+  view.innerHTML = `<div class="auth-panel card">
+    <h2>first-run setup</h2>
+    <p class="toolbar-note">No owner account exists yet. Create the single owner to finish setup — the only account this local daemon will ever have. The password is stored as an argon2 hash, never as plaintext.</p>
+    ${message ? `<p class="error-inline">${esc(message)}</p>` : ""}
+    <form data-auth-form="setup">
+      <div class="filter-grid">
+        <div class="field"><label for="setup-username">username</label><input type="text" id="setup-username" name="username" required autocomplete="username" /></div>
+        <div class="field"><label for="setup-password">password</label><input type="password" id="setup-password" name="password" required minlength="8" autocomplete="new-password" /></div>
+        <div class="field"><label for="setup-confirm">confirm password</label><input type="password" id="setup-confirm" name="confirm" required minlength="8" autocomplete="new-password" /></div>
+      </div>
+      <div class="toolbar"><button class="btn btn-primary" type="submit">create owner</button></div>
+    </form>
+  </div>`;
+}
+
+// Setup + login live outside the profile-token gate, so they never attach the
+// bearer header (a stale token from a previous session must not reach these).
+async function fetchOpen(path, options) {
+  const response = await fetch(path, options || {});
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.json();
+      if (body && body.detail) detail = String(body.detail);
+    } catch (_err) {
+      /* non-JSON error body */
+    }
+    throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+  return response.json();
+}
+
+async function submitSetup(form) {
+  const panel = form.closest(".auth-panel");
+  const data = new FormData(form);
+  const username = String(data.get("username") || "").trim();
+  const password = String(data.get("password") || "");
+  const confirm = String(data.get("confirm") || "");
+  if (!username || !password) return flashAuthError(panel, "username and password are required");
+  if (password.length < 8) return flashAuthError(panel, "password must be at least 8 characters");
+  if (password !== confirm) return flashAuthError(panel, "passwords do not match");
+  try {
+    await fetchOpen("/api/v1/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+  } catch (error) {
+    return flashAuthError(panel, `setup failed: ${error.message}`);
+  }
+  showLogin(`Owner ${username} created — sign in with that password.`);
+}
+
+async function submitLogin(form) {
+  const panel = form.closest(".auth-panel");
+  const data = new FormData(form);
+  const username = String(data.get("username") || "").trim();
+  const password = String(data.get("password") || "");
+  if (!username || !password) return flashAuthError(panel, "username and password are required");
+  let body;
+  try {
+    body = await fetchOpen("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+  } catch (error) {
+    return flashAuthError(panel, `sign in failed: ${error.message}`);
+  }
+  setAuth({ token: body.token, username: body.username });
+  state.profileId = body.profile_id || "default";
+  store.set("mnemoseed.profile", state.profileId);
+  authViewKind = null;
+  render();
+}
+
+async function signOut() {
+  await api("/api/v1/auth/logout", { method: "POST" }).catch(() => null);
+  setAuth(null);
+  showLogin("Signed out.");
+}
+
+// Boot gate: probe setup mode, then render the wizard, the login view, or the
+// app (validating any stored token once so a stale one returns to login).
+async function boot() {
+  clearAutoRefresh();
+  let status;
+  try {
+    status = await fetchOpen("/api/v1/setup/status");
+  } catch (error) {
+    const view = document.getElementById("view");
+    if (view) view.innerHTML = errorPanel(`Console unavailable: ${error.message}`);
+    return;
+  }
+  if (status.setup_required) {
+    showSetup();
+    return;
+  }
+  if (!AUTH.token) {
+    showLogin();
+    return;
+  }
+  try {
+    const me = await api("/api/v1/auth/me");
+    if (!AUTH.token) return; // a 401 cleared the token and deferred the login view
+    AUTH.username = me.username || AUTH.username;
+    store.set("mnemoseed.username", AUTH.username || "");
+    renderHeaderAuth();
+    authViewKind = null;
+    render();
+  } catch (error) {
+    if (!AUTH.token) return;
+    const view = document.getElementById("view");
+    if (view) view.innerHTML = errorPanel(`Console unavailable: ${error.message}`);
+  }
+}
+
 // ---------------------------------------------------------------- API glue
 async function api(path, options) {
-  const response = await fetch(path, options || {});
+  const opts = options || {};
+  const headers = new Headers(opts.headers || {});
+  if (AUTH.token) headers.set("Authorization", `Bearer ${AUTH.token}`);
+  const response = await fetch(path, { ...opts, headers });
+  if (response.status === 401) {
+    setAuth(null);
+    // Defer so an in-flight loader's error panel cannot stomp the login view.
+    setTimeout(() => showLogin("Session expired — sign in again."), 0);
+    throw new Error("HTTP 401: profile token invalid or expired");
+  }
   if (!response.ok) {
     let detail = "";
     try {
@@ -336,6 +529,12 @@ function scheduleAutoRefresh() {
 }
 
 function render() {
+  if (authViewKind) {
+    // A hash change while the setup wizard or login view owns the page: rerun
+    // the gate instead of rendering a client section the server would reject.
+    boot();
+    return;
+  }
   const route = parseRoute();
   updateNav(route.name === "detail" ? "browse" : route.name);
   document.title = route.name === "detail" ? "MnemoSeed console — detail" : "MnemoSeed console";
@@ -1376,6 +1575,9 @@ function handleClick(event) {
     case "retry":
       render();
       break;
+    case "sign-out":
+      signOut();
+      break;
     default:
       break;
   }
@@ -1410,11 +1612,20 @@ function handleChange(event) {
 
 function handleSubmit(event) {
   const form = event.target;
-  if (!form || !form.hasAttribute("data-browse-form")) return;
-  event.preventDefault();
-  state.browse.filters = readFilters(form);
-  state.browse.offset = 0;
-  loadBrowse();
+  if (!form) return;
+  if (form.hasAttribute("data-browse-form")) {
+    event.preventDefault();
+    state.browse.filters = readFilters(form);
+    state.browse.offset = 0;
+    loadBrowse();
+  }
+  if (form.dataset && form.dataset.authForm === "setup") {
+    event.preventDefault();
+    submitSetup(form);
+  } else if (form.dataset && form.dataset.authForm === "login") {
+    event.preventDefault();
+    submitLogin(form);
+  }
 }
 
 // ---------------------------------------------------------------- boot
@@ -1423,5 +1634,7 @@ document.addEventListener("change", handleChange);
 document.addEventListener("submit", handleSubmit);
 window.addEventListener("hashchange", render);
 
-renderProfilePicker();
-render();
+// The identity gate decides the first paint: setup wizard, login view, or the
+// app. A deep link to /console/#/setup (the gate's setup_url) resolves through
+// the same probe: setup mode shows the wizard, otherwise login.
+boot();

@@ -41,6 +41,7 @@ from typing import Any
 
 import pytest
 import uvicorn
+from _identity_helpers import OWNER_PASSWORD, OWNER_USERNAME
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, InitializeResult, TextContent
@@ -149,6 +150,25 @@ class _DaemonHarness:
         self._server: MnemoseedServer | None = None
         self._task: asyncio.Task[Any] | None = None
         self.base_url: str = ""
+        self.token: str = ""
+
+    async def _attach_owner(self) -> str:
+        """Finish first-run setup and return a profile token (issue #14): the
+        /memory/* surface this suite drives is gated on the owner."""
+        import httpx
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            setup = await client.post(
+                f"{self.base_url}/api/v1/setup",
+                json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+            )
+            assert setup.status_code == 201, setup.text
+            login = await client.post(
+                f"{self.base_url}/api/v1/auth/login",
+                json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+            )
+            assert login.status_code == 200, login.text
+            return login.json()["token"]
 
     async def __aenter__(self) -> _DaemonHarness:
         self._monkeypatch.delenv("STORAGE_MODE", raising=False)
@@ -183,6 +203,7 @@ class _DaemonHarness:
             await asyncio.wait_for(asyncio.to_thread(server.ready.wait), timeout=20)
         except TimeoutError:
             raise RuntimeError("daemon did not become ready") from None
+        self.token = await self._attach_owner()
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -195,13 +216,16 @@ class _DaemonHarness:
 
 
 @contextlib.asynccontextmanager
-async def _mcp_session(base_url: str) -> AsyncIterator[tuple[InitializeResult, ClientSession]]:
+async def _mcp_session(base_url: str, token: str) -> AsyncIterator[tuple[InitializeResult, ClientSession]]:
     """One real ``mnemoseed mcp`` subprocess session against the daemon; yields
-    the initialize result (instructions on the wire) alongside the session."""
+    the initialize result (instructions on the wire) alongside the session.
+
+    The gateway bearer-attaches the profile token via MNEMOSEED_TOKEN (issue
+    #14)."""
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "mnemoseed.cli", "mcp"],
-        env={"MNEMOSEED_BASE_URL": base_url},
+        env={"MNEMOSEED_BASE_URL": base_url, "MNEMOSEED_TOKEN": token},
         cwd=_REPO_ROOT,
     )
     async with stdio_client(params) as (read_stream, write_stream):
@@ -295,7 +319,7 @@ async def test_tier2_host_loop_remember_recall_reinforce_forget_only_mcp(
         # "session" one: initialize (read the on-wire degraded-mode guidance),
         # then remember a durable preference.
         pinned: dict[str, Any]
-        async with _mcp_session(daemon.base_url) as (init, session1):
+        async with _mcp_session(daemon.base_url, daemon.token) as (init, session1):
             assert init.instructions is not None
             assert init.instructions == INSTRUCTIONS
             assert "call memory.recall" in init.instructions.lower()
@@ -306,7 +330,7 @@ async def test_tier2_host_loop_remember_recall_reinforce_forget_only_mcp(
         assert first_chunk
 
         # Later "session": a fresh MCP connection against the same daemon.
-        async with _mcp_session(daemon.base_url) as (_init, session2):
+        async with _mcp_session(daemon.base_url, daemon.token) as (_init, session2):
             # The model follows the instructions: recall first.
             recalled = await _mcp_recall(session2, profile, fact)
             assert recalled["memory"]["entries"]

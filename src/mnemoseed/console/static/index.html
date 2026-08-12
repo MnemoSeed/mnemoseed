@@ -13,15 +13,16 @@
 </head>
 <body>
   <header class="app-header">
-    <img class="brand-logo" src="/console/logo.png" alt="MnemoSeed" />
-    <span class="brand-wordmark">MnemoSeed</span>
-    <nav class="app-nav" aria-label="Sections">
+    <img class="brand-logo" src="/console/logo.png" alt="MnemoSeed" /><span class="brand-wordmark">MnemoSeed</span>
+    <nav class="app-nav" id="auth-nav" aria-label="Sections" hidden>
       <a href="#/dashboard" data-nav="dashboard" class="nav-link">Dashboard</a>
       <a href="#/browse" data-nav="browse" class="nav-link">Memory Browser</a>
       <a href="#/review" data-nav="review" class="nav-link">Dream Review</a>
       <a href="#/conflicts" data-nav="conflicts" class="nav-link">Conflicts</a>
     </nav>
-    <label class="profile-picker" title="Active profile (drives every /api/v1 read)">
+    <span class="profile-label" id="auth-identity" hidden></span>
+    <button class="btn" id="sign-out" type="button" hidden>sign out</button>
+    <label class="profile-picker" id="auth-picker" title="Active profile (drives every /api/v1 read)" hidden>
       <span class="profile-label">profile</span>
       <select id="profile-select" aria-label="Active profile"></select>
     </label>
@@ -33,7 +34,7 @@
   </main>
   <footer class="app-footer">
     <span id="updated-at"></span>
-    <span>MnemoSeed console &mdash; a local admin surface. No account, no cloud.</span>
+    <span>MnemoSeed console &mdash; the owner&rsquo;s local admin surface.</span>
   </footer>
   <script src="/console/app.js"></script>
 </body>

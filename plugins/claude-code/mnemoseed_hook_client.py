@@ -215,16 +215,12 @@ class HookBudget:
             return None
         conn = (http.client.HTTPSConnection if secure else http.client.HTTPConnection)(host, port)
         conn.sock = sock
+        headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+        token = os.environ.get("MNEMOSEED_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         try:
-            conn.request(
-                "POST",
-                path,
-                body=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Content-Length": str(len(body)),
-                },
-            )
+            conn.request("POST", path, body=body, headers=headers)
             response = conn.getresponse()
             if not (200 <= response.status < 300):
                 return None

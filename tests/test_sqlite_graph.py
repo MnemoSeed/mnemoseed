@@ -578,6 +578,7 @@ def test_meta_file_contains_only_meta_tables(tmp_path):
             "schema_version",
             "profiles",
             "tokens",
+            "users",
             "score_pool",
             "profile_score_pool",
             "config",
@@ -585,7 +586,8 @@ def test_meta_file_contains_only_meta_tables(tmp_path):
             "dream_runs",
             "dream_token_ledger",
         }
-        assert current_schema_version(conn, "meta") == 4  # v2 is graph-only, v3/v4 are meta
+        # v2/v5 are graph-only; v3/v4/v6 are meta (the identity chain lands in v6)
+        assert current_schema_version(conn, "meta") == 6
     finally:
         conn.close()
 
@@ -593,7 +595,7 @@ def test_meta_file_contains_only_meta_tables(tmp_path):
 def test_migration_sequence_is_shared_and_forward_only():
     versions = [m.version for m in MIGRATIONS]
     assert versions == sorted(versions)
-    assert versions == [1, 2, 3, 4, 5]
+    assert versions == [1, 2, 3, 4, 5, 6]
     stores = {op.store for m in MIGRATIONS for op in m.ops}
     assert stores == {"graph", "meta"}
     # every store-region can reach the tail of the shared sequence independently
