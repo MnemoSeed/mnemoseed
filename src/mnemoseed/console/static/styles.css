@@ -51,6 +51,18 @@ body {
   image-rendering: auto;
 }
 
+.brand-logo {
+  height: 30px;
+  width: 30px;
+  border-radius: 7px;
+}
+
+.brand-wordmark {
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
 .app-nav { display: flex; gap: 0.25rem; }
 
 .nav-link {

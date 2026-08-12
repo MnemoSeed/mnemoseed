@@ -671,6 +671,7 @@ def test_console_static_assets_served_with_content_types(tmp_path, monkeypatch) 
         ("/console/styles.css", "text/css"),
         ("/console/app.js", None),
         ("/console/banner.png", "image/png"),
+        ("/console/logo.png", "image/png"),
     ]
     with _client(tmp_path, monkeypatch, loopback=True) as client:
         for path, ctype in expected:
@@ -689,14 +690,14 @@ def test_console_static_assets_served_with_content_types(tmp_path, monkeypatch) 
         shell = client.get("/console/").text
         assert "/console/styles.css" in shell
         assert "/console/app.js" in shell
-        assert "/console/banner.png" in shell
+        assert "/console/logo.png" in shell
 
 
 def test_console_static_assets_guarded_for_remote(tmp_path, monkeypatch) -> None:
     """NFR-7.1: the static assets sit behind the same admin-token gate as the
     API — a remote request without the token gets 401, never content."""
     with _client(tmp_path, monkeypatch, loopback=False) as client:
-        for path in ("/console/", "/console/styles.css", "/console/app.js", "/console/banner.png"):
+        for path in ("/console/", "/console/styles.css", "/console/app.js", "/console/logo.png"):
             assert client.get(path).status_code == 401, path
         with_token = client.get("/console/styles.css", headers={"X-Admin-Token": _ADMIN_TOKEN})
         assert with_token.status_code == 200
