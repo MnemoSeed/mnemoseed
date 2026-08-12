@@ -668,7 +668,7 @@ def test_console_static_assets_served_with_content_types(tmp_path, monkeypatch) 
             assert response.status_code == 200, path
             content_type = response.headers["content-type"]
             if path.endswith(".js"):
-                assert content_type in (
+                assert content_type.split(";")[0].strip() in (
                     "application/javascript",
                     "text/javascript",
                 ), (path, content_type)
