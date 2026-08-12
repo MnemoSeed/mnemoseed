@@ -75,8 +75,11 @@ class CommandRunner(Protocol):
 
 def _default_registry() -> Registry:
     """The real HKCU Run key. Windows-only: ``import winreg`` raises elsewhere,
-    and this factory is only reached when the current platform is `windows`."""
-    import winreg
+    and this factory is only reached when the current platform is `windows`.
+    The module is absent from Linux type stubs, so the import is typed as Any."""
+    from typing import Any, cast
+
+    winreg = cast(Any, __import__("winreg"))
 
     class _WinregRegistry:
         def __init__(self) -> None:
