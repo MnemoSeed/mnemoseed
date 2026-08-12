@@ -57,7 +57,10 @@ def _serving_config_toml(tmp_path: Path) -> Path:
         f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
         f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
         f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
-        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n',
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
+        # test-only: the deep_reflection role runs the deterministic offline
+        # StubLLM driver so full dream chains stay network-free (issue #4)
+        '[dream.llm.deep_reflection]\ndriver = "stub"\nmodel = "stub"\n',
         encoding="utf-8",
     )
     return cfg
@@ -216,6 +219,28 @@ def _auto_trigger_config_toml(tmp_path: Path) -> Path:
     return cfg
 
 
+def _unreachable_role_config_toml(tmp_path: Path) -> Path:
+    """Embedded serving config whose deep_reflection role points at a closed
+    port (ECONNREFUSED): boot must stay green and a dream attempt must degrade
+    through the typed ``llm_unavailable`` path (FR-2.6)."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'preset = "embedded"\n'
+        f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
+        f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
+        f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
+        "[dream.llm.deep_reflection]\n"
+        'driver = "openai_compatible"\n'
+        'model = "tester"\n'
+        'base_url = "http://127.0.0.1:9"\n'
+        "max_tokens = 16\n"
+        "timeout = 0.5\n",
+        encoding="utf-8",
+    )
+    return cfg
+
+
 def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -> None:
     """With [dream] auto_trigger = true, a fired pool event drives the FULL
     dream chain on the /session/end drain (off the /ingest heat path):
@@ -246,6 +271,51 @@ def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -
     # the reflected durable facts landed in the main graph (read back through a
     # test-thread connection once the app's portal-thread stores closed)
     assert _graph_nodes(tmp_path / "cortex.db") >= 1
+
+
+def test_serving_dream_degrades_typed_when_role_endpoint_unreachable(tmp_path, monkeypatch) -> None:
+    """FR-2.6 (issue #4 scope 3): a deep_reflection role pointed at an endpoint
+    nothing listens on must not break boot — capture keeps working, and a dream
+    attempt reports the typed ``llm_unavailable`` path (reflect defers, the
+    snapshot stays journaled, nothing is purged)."""
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _unreachable_role_config_toml(tmp_path))
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
+    with TestClient(create_app()) as client:
+        trigger = client.app.state.dream
+        pipeline = client.app.state.dream_pipeline
+        stores = client.app.state.stores
+        # boot fast: no snapshot pending, so no reflect attempt at boot
+        assert trigger.status(_PROFILE).state is DreamState.IDLE
+        # the unreachable route still built a driver (no eager network at boot)
+        assert pipeline._reflector is not None
+        # neutralize the FR-2.6 exponential backoff so the assertion runs fast
+        pipeline._reflector._sleep = lambda _seconds: None
+        for index, text in enumerate(_DURABLE_TEXTS):
+            resp = client.post("/ingest", json=_user(text=text, ts=float(index + 1), importance_hint=1.0))
+            assert resp.status_code == 202
+        resp = client.post("/session/end", json={"session_id": _SESSION, "profile_id": _PROFILE})
+        assert resp.status_code == 200
+        assert trigger.status(_PROFILE).pending_manual == 1
+        # capture worked: the durable chunks landed in the vector store
+        assert stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=100)).total == len(
+            _DURABLE_TEXTS
+        )
+        # the manual dream attempt ran the reflect boundary -> typed unavailable
+        assert client.portal.call(trigger.dream_once, _PROFILE) is True
+        status = trigger.status(_PROFILE)
+        assert status.state is DreamState.DREAMING  # deferred: reflect never completed
+        assert status.current_range is not None
+        # nothing was purged: capture stays intact on the typed failure
+        assert stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=100)).total == len(
+            _DURABLE_TEXTS
+        )
+        assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+        active = pipeline._snapshotter.active(_PROFILE)
+        assert active is not None
+        outcome = pipeline._reflector.reflect(active)
+        assert outcome.ok is False
+        assert outcome.llm_unavailable is True  # the typed FR-2.6 flag fired
 
 
 def test_serving_boot_recovery_resumes_preseeded_snapshot(tmp_path, monkeypatch) -> None:

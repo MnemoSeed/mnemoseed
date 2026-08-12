@@ -82,6 +82,10 @@ def _config_toml(tmp_path: Path, *, dream: bool = False) -> Path:
     )
     if dream:
         body += "[dream]\ntoken_budget_usd = 5.0\n"
+    # test-only: the deep_reflection role runs the deterministic offline StubLLM
+    # driver so every manual dream through the console stays network-free (issue
+    # #4); placed under [dream] so the auto_trigger toggle patch stays in-table.
+    body += '[dream.llm.deep_reflection]\ndriver = "stub"\nmodel = "stub"\n'
     cfg.write_text(body, encoding="utf-8")
     return cfg
 
@@ -590,9 +594,15 @@ def test_auto_trigger_toggle_persists_config_and_audits(tmp_path, monkeypatch) -
 
 def test_auto_trigger_in_place_rewrite_and_no_dream_section(tmp_path, monkeypatch) -> None:
     """FR-7.6: an existing ``auto_trigger = false`` line is rewritten in place
-    (never duplicated); a config without a [dream] table gains one."""
+    (never duplicated); a config whose only dream table is the implicit stub
+    ``[dream.llm.deep_reflection]`` section (no explicit ``[dream]`` header)
+    gets the flag persisted under a freshly appended ``[dream]`` table."""
     cfg = _config_toml(tmp_path, dream=True)
-    cfg.write_text(cfg.read_text(encoding="utf-8") + "auto_trigger = false\n", encoding="utf-8")
+    # place the pre-existing flag inside the [dream] table (which now precedes
+    # the [dream.llm.deep_reflection] stub section): an EOF append would land in
+    # the stub table and escape the in-dream rewrite (issue #4 test adjustment)
+    text = cfg.read_text(encoding="utf-8").replace("[dream]\n", "[dream]\nauto_trigger = false\n")
+    cfg.write_text(text, encoding="utf-8")
     with _client(tmp_path, monkeypatch, cfg=cfg, loopback=True) as client:
         client.post("/api/v1/dream/auto_trigger", json={"enabled": True})
         # exactly one TOML key line survives; the in-place line was rewritten,
