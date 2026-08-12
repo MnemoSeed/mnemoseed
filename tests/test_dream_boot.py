@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -42,6 +43,7 @@ from mnemoseed.dream import (
 )
 from mnemoseed.dream import FileSnapshotter as RealSnapshotter
 from mnemoseed.dream.ledger import year_month_for
+from mnemoseed.llm.drivers.openai_compatible import OpenAICompatibleLLM
 from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
 from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_meta
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
@@ -89,6 +91,9 @@ def _serving_config_toml(tmp_path: Path, token_budget_usd: float | None = None) 
     )
     if token_budget_usd is not None:
         body += f"[dream]\ntoken_budget_usd = {token_budget_usd}\n"
+    # test-only: the deep_reflection role runs the deterministic offline
+    # StubLLM driver so boot-recovery reflect stays network-free (issue #4)
+    body += '[dream.llm.deep_reflection]\ndriver = "stub"\nmodel = "stub"\n'
     cfg.write_text(body, encoding="utf-8")
     return cfg
 
@@ -182,7 +187,7 @@ def test_boot_crash_after_snapshot_reflects_merges_purges_and_preserves_overflow
     asyncio.run(seed_meta.close())
 
     _BootCountingStub.count = 0
-    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    monkeypatch.setattr("mnemoseed.dream.reflect.StubReflectLLM", _BootCountingStub)
 
     def low_budget_packer(*_args: object, **_kwargs: object) -> object:
         # any budget override still honors an explicit budget (T5 seam)
@@ -223,7 +228,7 @@ def test_boot_crash_after_reflect_resumes_at_merge_never_reruns_reflect(
     the safe-clear purges exactly once, and the journal terminates so a second
     boot finds nothing to recover."""
     _BootCountingStub.count = 0
-    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    monkeypatch.setattr("mnemoseed.dream.reflect.StubReflectLLM", _BootCountingStub)
 
     store = lancedb_embedded.LanceDbEmbeddedStore(uri=tmp_path / "chunks.lance", dimensions=64)
     embed = SyntheticEmbedder(dimension=64)
@@ -319,7 +324,7 @@ def test_boot_crash_between_merge_commit_and_journal_termination_reinforces_once
     asyncio.run(seed_meta.close())
 
     _BootCountingStub.count = 0
-    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    monkeypatch.setattr("mnemoseed.dream.reflect.StubReflectLLM", _BootCountingStub)
     _shim_config(tmp_path, monkeypatch)
     with TestClient(create_app()) as client:
         trigger = client.app.state.dream
@@ -375,7 +380,7 @@ def test_boot_merge_done_marker_guard_never_repurges_stale_source(
     asyncio.run(seed_meta.close())
 
     _BootCountingStub.count = 0
-    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    monkeypatch.setattr("mnemoseed.dream.reflect.StubReflectLLM", _BootCountingStub)
     _shim_config(tmp_path, monkeypatch)
     with TestClient(create_app()) as client:
         trigger = client.app.state.dream
@@ -411,7 +416,7 @@ def test_boot_dream_budget_cap_defers_capture_only_and_audits(
     asyncio.run(seed_meta.close())
 
     _BootCountingStub.count = 0
-    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    monkeypatch.setattr("mnemoseed.dream.reflect.StubReflectLLM", _BootCountingStub)
     _shim_config(tmp_path, monkeypatch, token_budget_usd=1e-9)
     with TestClient(create_app()) as client:
         # capture-only: the budget gate short-circuits BEFORE any cloud call
@@ -452,7 +457,7 @@ def test_boot_dream_records_ledger_usage_survives_restart(
     asyncio.run(seed_meta.close())
 
     _BootCountingStub.count = 0
-    monkeypatch.setattr("mnemoseed.daemon.app.StubReflectLLM", _BootCountingStub)
+    monkeypatch.setattr("mnemoseed.dream.reflect.StubReflectLLM", _BootCountingStub)
     _shim_config(tmp_path, monkeypatch)  # default token_budget_usd = 5.0
     month = year_month_for(time.time())
     with TestClient(create_app()) as client:
@@ -462,3 +467,95 @@ def test_boot_dream_records_ledger_usage_survives_restart(
     # restart against the same store: a fresh ledger reads the persisted usage
     with TestClient(create_app()) as client:
         assert client.app.state.stores.meta.token_usage(_PROFILE, month) == used
+
+
+# ---------------------------------------------------------------- issue #4 fallback
+# A deep_reflection route that cannot be materialized (unknown driver) must
+# never crash boot (FR-2.14 boot safety): the daemon wires a deferred typed LLM
+# and a reflect attempt reports the existing llm_unavailable path (FR-2.6).
+
+
+def test_boot_defers_typed_when_deep_reflection_route_unbuildable(tmp_path, monkeypatch) -> None:
+    """An unbuildable deep_reflection route (unknown driver) never crashes boot:
+    the dream LLM degrades typed to the deferred capture-only path — capture
+    still works and a reflect attempt reports the typed llm_unavailable flag."""
+    store, _embed = _seed_into(tmp_path / "chunks.lance", ("seed-1", "I prefer dark mode", 0, 1))
+    asyncio.run(store.close())
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'preset = "embedded"\n'
+        f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
+        f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
+        f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
+        '[dream.llm.deep_reflection]\ndriver = "no-such-driver"\nmodel = "x"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", cfg)
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
+    with TestClient(create_app()) as client:
+        pipeline = client.app.state.dream_pipeline
+        # boot survived the unbuildable route: no snapshot was pending, so no
+        # reflect attempt at boot, and the fallback LLM is wired (never a raise)
+        assert client.app.state.health.gate_ok is True
+        pipeline._reflector._sleep = lambda _seconds: None  # the fallback raises instantly anyway
+        result = pipeline._snapshotter.request(_PROFILE, TurnRange(0, 1))
+        assert result.ok
+        assert result.snapshot is not None
+        outcome = pipeline._reflector.reflect(result.snapshot)
+        assert outcome.ok is False
+        assert outcome.llm_unavailable is True  # the typed FR-2.6 flag fired
+        # capture is intact: nothing was purged without a completed reflect
+        assert client.app.state.stores.vector.get_chunk("seed-1") is not None
+    assert len(_graph_rows(tmp_path / "cortex.db")) == 0  # capture-only: never reached the merger
+
+
+# ---------------------------------------------------------------- issue #4 boot neutrality
+# Boot + RoleRouter.resolve must never touch the network: drivers construct lazy
+# HTTP clients, so a role is materialized with zero I/O and any provider/transport
+# failure surfaces only at chat time (FR-2.14 / FR-2.6).
+
+
+def test_boot_and_route_resolution_make_zero_network_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #4 regression: daemon boot resolves the deep_reflection route
+    through RoleRouter with ZERO network I/O. A call-counting tripwire on
+    httpx.Client.request records (and raises on) any HTTP call made while the
+    role is materialized -- an eager ``instance.check()`` injected into resolve
+    (the verifier's mutation) fires it and turns this test red, so the lazy-
+    materialization guarantee is pinned at the full boot + resolve path."""
+    calls: list[Any] = []
+
+    def tripwire(self: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append(args)
+        raise RuntimeError("network tripwire: a dream role performed an HTTP call during boot/resolve")
+
+    monkeypatch.setattr(httpx.Client, "request", tripwire)
+    # deep_reflection routes to the REAL network driver (openai_compatible) at a
+    # closed-loop base_url with no key: the route must materialize WITHOUT any
+    # contact to the provider (a live check here would be the bug).
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'preset = "embedded"\n'
+        f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
+        f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
+        f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
+        "[dream.llm.deep_reflection]\n"
+        'driver = "openai_compatible"\n'
+        'model = "accounts/fireworks/models/kimi-k3"\n'
+        'base_url = "http://127.0.0.1:9"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", cfg)
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
+    with TestClient(create_app()) as client:
+        llm = client.app.state.dream_pipeline._reflector._llm
+        # the real provider driver was materialized (not a stub): the assertion
+        # would be vacuous unless the network-backed route was actually resolved
+        assert isinstance(llm, OpenAICompatibleLLM)
+        assert llm.base_url == "http://127.0.0.1:9"
+    assert calls == []  # zero HTTP calls across the whole boot + resolve path

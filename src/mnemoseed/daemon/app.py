@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from fastapi import FastAPI
 
@@ -38,20 +38,89 @@ from mnemoseed.dream import (
     FileSnapshotter,
     Merger,
     ReflectOrchestrator,
-    StubReflectLLM,
     TokenLedger,
     resume_boundary,
+)
+from mnemoseed.identity import IdentityService
+from mnemoseed.identity.routes import router as identity_router
+from mnemoseed.llm import RoleRouter
+from mnemoseed.llm.types import (
+    ChatResult,
+    DreamLLM,
+    HealthReport,
+    LLMDriverInfo,
+    LLMError,
+    LLMUnavailable,
 )
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.schema.turn import Turn
 from mnemoseed.storage.factory import Stores, build_stores
-from mnemoseed.storage.ports import CapabilityIssue, GraphStore
+from mnemoseed.storage.ports import CapabilityIssue, GraphStore, MetaStore
 
 logger = logging.getLogger("mnemoseed.daemon")
 
 # Console SPA shell directory, served under /console by GuardedStaticFiles.
 # Path: <pkg>/console/static (sibling of the daemon package).
 _CONSOLE_STATIC_DIR = Path(__file__).resolve().parent.parent / "console" / "static"
+
+# The dream role the reflect boundary runs (FR-2.14): the long-background deep
+# reflection digest driven by ReflectOrchestrator (design/02 section 6).
+_REFLECT_ROLE = "deep_reflection"
+
+
+class _UnavailableLLM:
+    """Boot-safe deferred dream LLM (FR-2.6).
+
+    Used when the configured deep_reflection route cannot be materialized at
+    boot (unknown driver name, or a driver construction failure): boot must
+    never crash on a broken route. Dreams stay capture-only — ``chat`` degrades
+    through the typed ``LLMUnavailable`` path the reflect boundary already
+    handles, and ``check`` reports the reason without raising.
+    """
+
+    info: ClassVar[LLMDriverInfo] = LLMDriverInfo(
+        name="unavailable",
+        description="deferred route: the configured deep_reflection driver failed to build",
+    )
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def chat(self, *, system: str, user: str) -> ChatResult:
+        del system
+        raise LLMUnavailable(self._reason)
+
+    def check(self) -> HealthReport:
+        return HealthReport(ok=False, detail={"error": self._reason})
+
+
+def _build_dream_llm(config: Config, meta: MetaStore) -> DreamLLM:
+    """Materialize the dream-pipeline LLM from the configured routes.
+
+    The reflect role is resolved through the RoleRouter exactly like any other
+    consumer: the route's own driver+model+params build the instance, the
+    api-key env-var chain is resolved at materialization time, and the role is
+    audited. Resolution performs no network I/O (drivers construct lazy HTTP
+    clients), so boot stays fast with or without keys. A route that cannot be
+    built (unknown driver, bad params) degrades typed to a deferred LLM instead
+    of crashing boot; the reflect boundary then reports ``llm_unavailable`` and
+    the snapshot stays journaled (FR-2.6).
+    """
+    router = RoleRouter(routes=config.llm, audit=meta)
+    try:
+        return router.resolve(_REFLECT_ROLE)
+    except LLMError as exc:
+        logger.warning(
+            "deep_reflection route unavailable at boot (%s); dreams degrade to capture-only "
+            "until the route is fixed",
+            exc,
+        )
+        return _UnavailableLLM(str(exc))
+
+
+def _reflect_unavailable(reason: str) -> None:
+    """FR-2.6: log each typed provider outage the reflect boundary refuses."""
+    logger.warning("dream reflect model unavailable: %s", reason)
 
 
 @dataclass(frozen=True)
@@ -158,11 +227,15 @@ def _build_capture(
     The trigger binds the real snapshotter (T2): a frozen capture written under
     the config directory and registered in dream_runs, whose completion seam
     runs the T4 dream pipeline (reflect -> merge -> safe-clear commit) off the
-    ingest hot path. Boot recovery (NFR-2.3) resumes interrupted dreams at their
-    exact phase boundary — reflect for a fresh snapshot, merge ONLY for one that
-    already ran reflect — synchronously before serving starts, with no model
-    calls in the stub seam. The safe-clear purger fires exactly once, on
-    merge-commit. FR-2.8 manual-first ``[dream] auto_trigger`` stays honoured.
+    ingest hot path. The reflect LLM is the configured deep_reflection route
+    (FR-2.14) resolved through the RoleRouter — drivers construct lazy HTTP
+    clients, so boot resolves no network, and an unbuildable route degrades
+    typed to a deferred LLM instead of crashing boot (FR-2.6). Boot recovery
+    (NFR-2.3) resumes interrupted dreams at their exact phase boundary —
+    reflect for a fresh snapshot, merge ONLY for one that already ran reflect —
+    synchronously before serving starts. The safe-clear purger fires exactly
+    once, on merge-commit. FR-2.8 manual-first ``[dream] auto_trigger`` stays
+    honoured.
     """
     snapshotter = FileSnapshotter(store=stores.vector, meta=stores.meta)
     trigger = DreamTrigger(
@@ -177,9 +250,12 @@ def _build_capture(
             "(the salvage review channel still captures the entry)"
         )
     reflector = ReflectOrchestrator(
-        llm=StubReflectLLM(),
+        llm=_build_dream_llm(config, stores.meta),
         directory=snapshotter.directory,
         on_done=trigger.on_reflect_complete,
+        # FR-2.6: log every typed provider outage the reflect boundary refuses
+        # (capture-only degradation), off the ingest hot path.
+        on_unavailable=_reflect_unavailable,
         # FR-2.5b: the monthly token ledger binds the real meta store and the
         # config's USD cap, so the budget gate and the meter run on the serving
         # path (capture-only once the projected month spend exceeds the cap).
@@ -247,6 +323,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # /api/v1 routers observe the same trigger instance the /memory and /ingest
     # surfaces drive.
     app.state.console = ConsoleService(stores, config, app.state.dream)
+    # Identity chain (issue #14): the owner account + token surface. Every
+    # memory and console route depends on require_identity, which reads this
+    # state; the setup wizard 503s those routes until setup_owner has run.
+    app.state.identity = IdentityService(stores.meta)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,
@@ -276,6 +356,7 @@ def create_app() -> FastAPI:
     app.state.capture = StrippingPipeline()
     app.state.segmenter = TurnSegmenter(app.state.capture)
     app.include_router(ingest_router)
+    app.include_router(identity_router)
     app.include_router(memory_router)
     app.include_router(console_router)
     # Console SPA shell (PRD-07 T1): served from its own static directory,

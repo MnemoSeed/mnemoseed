@@ -14,9 +14,12 @@ deterministic synthetic driver (same preset as test_memory_endpoints).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from _identity_helpers import attach_token
 from fastapi.testclient import TestClient
 
 from mnemoseed.daemon.app import create_app
@@ -57,17 +60,30 @@ def _config_toml(tmp_path: Path) -> Path:
         f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
         f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
         f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
-        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n',
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
+        # test-only: the deep_reflection role runs the deterministic offline
+        # StubLLM driver so the manual dream chain stays network-free (issue #4)
+        '[dream.llm.deep_reflection]\ndriver = "stub"\nmodel = "stub"\n',
         encoding="utf-8",
     )
     return cfg
 
 
-def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+@contextmanager
+def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """Boot the real daemon (synthetic embedder) with a throwaway config.
+
+    Context manager: enters the TestClient (runs lifespan), finishes first-run
+    setup and stamps the profile token onto default headers (issue #14: the
+    /memory/* routes resolve identity through the profile-token gate; the
+    hook-facing /ingest /flush /session/end capture surface stays open).
+    """
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _config_toml(tmp_path))
     monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
-    return TestClient(create_app())
+    with TestClient(create_app()) as client:
+        attach_token(client)
+        yield client
 
 
 def _user(text: str, ts: float, importance_hint: float | None = None) -> dict:

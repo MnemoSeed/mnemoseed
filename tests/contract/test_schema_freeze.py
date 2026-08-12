@@ -194,6 +194,7 @@ def test_graph_schema_freeze_walk() -> None:
 _FROZEN_META_TABLES = (
     "profiles",
     "tokens",
+    "users",
     "score_pool",
     "profile_score_pool",
     "config",
@@ -201,7 +202,7 @@ _FROZEN_META_TABLES = (
     "dream_runs",
     "dream_token_ledger",
 )
-_FROZEN_META_INDEXES = ("idx_tokens_profile", "idx_audit_at", "idx_dream_session")
+_FROZEN_META_INDEXES = ("idx_tokens_profile", "idx_audit_at", "idx_dream_session", "idx_tokens_hash")
 _FROZEN_TRIGGERS = (("trg_audit_no_update", "UPDATE"), ("trg_audit_no_delete", "DELETE"))
 
 
@@ -209,12 +210,15 @@ def test_meta_schema_freeze_walk() -> None:
     tables: dict[str, CreateTable] = {}
     indexes: set[str] = set()
     triggers: set[tuple[str, str]] = set()
+    added_meta_columns: set[str] = set()
     for migration in MIGRATIONS:
         for op in migration.ops:
             if isinstance(op, CreateTable) and op.store == "meta":
                 tables[op.name] = op
             elif isinstance(op, CreateIndex) and op.store == "meta":
                 indexes.add(op.name)
+            elif isinstance(op, AddColumn) and op.store == "meta":
+                added_meta_columns.add(op.column.name)
             elif isinstance(op, AddTrigger) and op.store == "meta":
                 assert op.table == "audit_log"
                 triggers.add((op.name, op.event))
@@ -225,6 +229,13 @@ def test_meta_schema_freeze_walk() -> None:
     tokens = tables["tokens"]
     profile_fk = next(column.references for column in tokens.columns if column.name == "profile_id")
     assert profile_fk == ("profiles", "profile_id")
+    # v6 identity-delta freeze items: the users table carries the owner account
+    # (username UNIQUE); tokens.token_hash is the bearer-digest AddColumn delta,
+    # never a v1 base column (pre-v6 tokens stop authenticating after upgrade)
+    user_names = {column.name for column in tables["users"].columns}
+    assert {"user_id", "username", "password_hash", "role", "created_at"} <= user_names
+    assert "token_hash" in added_meta_columns
+    assert "token_hash" not in {column.name for column in tokens.columns}
 
 
 # ------------------------------------------------------- D6 named graph instances

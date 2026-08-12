@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import cast
 
@@ -50,13 +51,29 @@ class ThreadLocalConnections:
         # handle from another thread at teardown; each handle is still opened
         # and used solely by one thread (``get`` keeps one per ``threading.local``),
         # so no two threads ever execute on the same connection.
-        conn = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
-        self._open.add(conn)
-        return conn
+        #
+        # The PRAGMAs are ordered so a busy database can never hang a connect:
+        # busy_timeout is armed before journal_mode, and a connect that loses the
+        # brief write-lock contend is retried for a bounded window (the holder
+        # commits quickly). Without this, two threads lazily opening their first
+        # connection at the same time -- e.g. concurrent /api/v1/setup requests
+        # on a Windows host -- could block on ``PRAGMA journal_mode=WAL`` far
+        # past busy_timeout, turning the setup race into a hang.
+        for attempt in range(10):
+            try:
+                conn = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                self._open.add(conn)
+                return conn
+            except sqlite3.OperationalError:
+                if attempt < 9:
+                    time.sleep(0.05)
+                    continue
+                raise
+        raise sqlite3.OperationalError("could not open the database after 10 attempts")
 
     def close_all(self) -> None:
         """Close every connection the pool has opened (safe from any thread)."""

@@ -47,7 +47,7 @@ Every MnemoSeed subsystem is not an engineering shortcut but corresponds to an e
 
 ## 4. Design Principles
 
-1. **Local-Cloud Symmetry** — the DB, vector buffer, and dream engine are all abstracted behind interfaces. Changing a single `.env` variable (`STORAGE_MODE`) switches frictionlessly between "fully local offline (embedded one-click or Docker)" and "cloud-hosted SaaS/TEE".
+1. **Local-Cloud Symmetry** — the DB, vector buffer, and dream engine are all abstracted behind interfaces. One config (`STORAGE_MODE` preset: embedded/docker/custom) switches between fully local offline (embedded one-click or Docker) and a self-hosted server; the official SaaS is a daemon hosted by us (TEE as standard).
 2. **Multilingual Native** — unified bge-m3 (ONNX) embedding; recall holds precision across mixed Chinese-English text, code interleaving, and dialect contexts.
 3. **Capture is Rejection First** — the default action of the pipeline's first gate is "do not record." A system that captures indiscriminately is merely rebuilding the "full replay" problem it set out to solve.
 4. **Complete Read, Split Write** — reflection reviews 100% of the complete scene to ensure no context break; write-back physically isolates by cognitive tier, low-tier noise never pollutes the primary base.
@@ -116,10 +116,10 @@ flowchart TB
 flowchart LR
     subgraph Local["STORAGE_MODE=local (free / development)"]
         L0["embedded one-click install (default):<br/>single-process embedded LanceDB + SQLite-Graph<br/>+ bge-m3 ONNX, zero Docker dependencies"]
-        L1["docker-compose (developer / enterprise option):<br/>core (MCP server is the same-package stdio entry,<br/>occupies no service slot)<br/>+ vector(lance) + embed(bge-m3)<br/>+ ollama (optional)"]
+        L1["docker-compose (developer / enterprise option):<br/>core (MCP server is the same-package stdio entry,<br/>occupies no service slot)<br/>+ pgvector + pg_graph + pg_meta<br/>+ ollama (optional)"]
     end
     subgraph Cloud["STORAGE_MODE=cloud (paid SaaS)"]
-        C1["MnemoSeed Cloud:<br/>Neo4j Aura / managed vector store<br/>AWS Nitro Enclaves dream engine<br/>E2EE multi-device sync"]
+        C1["MnemoSeed Cloud:<br/>hosted daemon (SaaS, TEE as standard)<br/>E2EE transport + encrypted storage<br/>ZDR dream egress"]
     end
     Env["one .env variable"] --> Local
     Env --> Cloud

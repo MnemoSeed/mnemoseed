@@ -180,7 +180,7 @@ sequenceDiagram
 ## 3. Installation Flow (Time-to-First-Memory < 3 minutes)
 
 ```bash
-npx mnemoseed@latest init        # or curl -fsSL mnemoseed.ai/install | bash
+uv tool install mnemoseed && mnemoseed install   # pipx works too
 ```
 
 ```mermaid
@@ -194,7 +194,7 @@ sequenceDiagram
     I->>I: ② storage form selection<br/>default embedded (both databases embedded in one process, zero Docker)<br/>optional docker compose full stack
     I->>I: ③ download bge-m3 ONNX embedding model (~543MiB, int8 quantized, as measured)<br/>(resumable download, size pre-declared)
     I->>D: ④ login to local daemon (passwordless confirm)<br/>→ create/select profile → issue token
-    I->>D: ⑤ dream-model config wizard<br/>① OAuth subscription reuse (Codex/ChatGPT; Chinese users may<br/>choose MiniMax/Kimi, with an explicit data-leaving-the-country notice)<br/>② bring your own API key (OpenAI-compatible endpoint, e.g. Fireworks)<br/>③ advanced offline track Ollama (≤14B, quality warning)<br/>only written to config.toml after a live connectivity test passes
+    I->>D: ⑤ dream-model config wizard<br/>① OAuth reuse of the host's local login state (Codex / Grok,<br/>both ToS-allowed; Anthropic subscriptions not reused; Chinese users may<br/>choose MiniMax/Kimi, with an explicit data-leaving-the-country notice)<br/>② bring your own API key (OpenAI-compatible endpoint, e.g. Fireworks)<br/>③ advanced offline track Ollama (≤14B, quality warning)<br/>only written to config.toml after a live connectivity test passes
     I->>H: ⑥ link: pick a profile per host/agent<br/>write MCP registration + profile_id/token (env)<br/>back up the original config + diff preview + per-item confirmation before writing
     I->>H: ⑦ Claude Code detected → guide plugin install<br/>(marketplace add + install, executed as one command)<br/>Codex detected → guide /hooks trust review<br/>(non-managed hooks silently not executed if not trusted)
     I->>D: ⑧ start the daemon (if not already running)
@@ -224,7 +224,7 @@ sequenceDiagram
     participant M as Model (MCP tools)
 
     CC->>HK: SessionStart
-    HK->>D: GET /digest?budget=800
+    HK->>D: POST /memory/recall (warm-up budget <=800 tokens)
     D-->>HK: recent memory digest + pending-consolidation hints + conflict hints
     HK-->>CC: additionalContext warm-up injection<br/>(reuses the anti-dilution budget ≤800 tokens)
     Note over U,M: the model "remembers" from the opening — no call needed
@@ -234,7 +234,7 @@ sequenceDiagram
         HK->>D: POST /ingest (async, 2s timeout fail-open)
         Note over D: Stripper → three-stage funnel → scoring stamp<br/>Hebbian near-duplicate bounce-back / suspected-contradiction marking
     and read path (per-turn injection, 2s budget)
-        HK->>D: GET /recall?budget=200 (fast path)
+        HK->>D: POST /memory/recall (per-turn budget <=200 tokens, 2s fail-open)
         D-->>HK: 0..n highly relevant memories (with pending annotations)
         HK-->>CC: additionalContext injected side-by-side with the prompt<br/>(no injection on timeout/empty result, fail-open)
     end

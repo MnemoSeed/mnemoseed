@@ -29,7 +29,7 @@ The storage layer is upgraded from "local/cloud either-or" to **interfaces + a d
 
 **M0 scope discipline (finalized by Jinhao)**: fix the interfaces; implement only **two drivers per interface first — the embedded default + a Postgres-family one**. The second driver exists to empirically prove the interface's portability, preventing the interface from being captured by the first implementation; the remaining drivers are open to community contribution.
 
-**The cloud topology is unchanged**: under the `STORAGE_MODE=cloud` preset, each layer points to a managed cluster / Neo4j Aura / an embedding API / the Nitro Enclaves dream routing.
+**The cloud topology is unchanged**: when cloud-hosted, each layer points to managed Postgres (pgvector + pg_graph) / an embedding API / dream routing inside the TEE (valid `STORAGE_MODE` values today: embedded/docker/custom; a cloud preset is reserved).
 
 **Division of responsibilities**:
 - **Hippocampus (VectorStore)**: stores recent raw conversation chunks at high frequency in real time; zero-latency fuzzy recall of "hard fact details and code scenes".

@@ -23,7 +23,7 @@
 | D1 | SQLite-Graph **自建邻接表**（nodes + edges 两表），不引现成图库 | 查询模式固定（1-2 hop 遍历/共现边/版本链），零依赖、schema 自主；将来换库只是加一个驱动 + 一次性导出导入，verbatim 通道不动所以最坏情况也可重建 |
 | D2 | Postgres 图侧**纯关系表模拟**（与 SQLite 版同构），不用 Apache AGE | 任何托管 PG 都能跑，云端不挑供应商；同一接口不维护两套查询逻辑 |
 | D3 | capability flags **最小可用集**（11 个，见 FR-8.6） | 冻结的是校验机制，不是清单；不给未设计的功能提前锁死命名 |
-| D4 | **保持双 repo**（core Python / mcp Node），不切 monorepo | 接入层本来就可替换；独立 CI、独立版本节奏；零代码阶段切结构只有成本没有收益 |
+| D4 | **MCP server 收进本包**（Python stdio 瘦适配器 `mnemoseed mcp`，无 Node、无第二 repo）——原双 repo 决策废止：stdio 瘦壳转调 daemon HTTP 后，独立 Node 包只剩分发成本没有收益 |
 | D5（v2 新增） | **profile 隔离走钢印字段**：chunks 加 `profile_id`，靠 `vector.metadata_filter` 过滤；不引入"每层多实例向量库"的配置复杂度 | 与 nodes 的 `profile_id` 对齐；PRD-06 身份模型每次调用显式携带 profile_id，天然匹配 |
 | D6（v2 新增） | **Tier-3 隔离图谱 = 第二个 GraphStore 命名实例**（embedded 下独立 SQLite 文件，PG 下独立 schema）；注册表支持按层命名多实例（`graph.main` / `graph.isolated`） | design/02 §5 承诺的是物理隔离，分区键降级会破坏"不可反向污染"的叙事；接口不变，只是注册表多一个名字 |
 | D7（v2 新增） | **契约测试用确定性合成 embedder**（固定维度的 hash 伪向量），bge-m3 真实推理单独走带模型缓存的冒烟测试 | CI 不可能每个 PR 拉 ~543MiB 模型（NFR-8.2 ≤5min）；可移植性实证验的是接口行为不是向量质量 |

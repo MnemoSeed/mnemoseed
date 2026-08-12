@@ -71,6 +71,14 @@ COVERAGE: dict[str, dict[str, str]] = {
         "token_usage": "test_contract_meta.py::test_dream_token_ledger_atomic_increment",
         "schema_version": "test_contract_meta.py::test_schema_version_and_migrate_forward_only",
         "migrate": "test_contract_meta.py::test_schema_version_and_migrate_forward_only",
+        # identity chain (issue #14): owner account + hashed bearer secrets
+        "create_user": "test_contract_meta.py::test_users_crud_and_password_rotation",
+        "create_owner": "test_contract_meta.py::test_create_owner_atomic_and_conflict",
+        "get_user_by_username": "test_contract_meta.py::test_users_crud_and_password_rotation",
+        "list_users": "test_contract_meta.py::test_users_crud_and_password_rotation",
+        "count_users": "test_contract_meta.py::test_users_crud_and_password_rotation",
+        "update_user_password": "test_contract_meta.py::test_users_crud_and_password_rotation",
+        "authenticate_token": "test_contract_meta.py::test_token_secret_hashed_at_rest_and_authenticates",
     },
     "Embedder": {
         "capabilities": "test_contract_embed.py::test_capabilities",
@@ -79,10 +87,13 @@ COVERAGE: dict[str, dict[str, str]] = {
     },
 }
 
-# Appendix B reference method counts (prd-08 appendix B.1..B.4).
+# Appendix B reference method counts (prd-08 appendix B.1..B.4). MetaStore
+# grew to 29 with the issue-#14 identity chain surface (create/get/list/count/
+# update_password user + authenticate_token over hashed bearer digests) and to
+# 30 with create_owner (the atomic single-transaction owner setup).
 EXPECTED_METHOD_COUNTS: dict[str, int] = {
     "VectorStore": 12,
     "GraphStore": 19,
-    "MetaStore": 23,
+    "MetaStore": 30,
     "Embedder": 3,
 }

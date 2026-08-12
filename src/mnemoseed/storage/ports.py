@@ -143,6 +143,17 @@ class StoredProfile:
 
 
 @dataclass(frozen=True)
+class StoredUser:
+    """Owner/user account row (PRD-06 FR-6.1a)."""
+
+    user_id: str
+    username: str
+    password_hash: str = ""
+    role: str = "owner"
+    created_at: float = 0.0
+
+
+@dataclass(frozen=True)
 class Token:
     """Issued credential for a profile."""
 
@@ -152,6 +163,11 @@ class Token:
     issued_at: float = 0.0
     expires_at: float | None = None
     revoked: bool = False
+    # One-shot bearer secret materialized only at issue time (PRD-06 FR-6.1b):
+    # the value rides back to the caller exactly once and is never persisted —
+    # only its sha256 digest lands in ``tokens.token_hash``. Every other read
+    # path returns this field empty.
+    token_secret: str = ""
 
 
 @dataclass(frozen=True)
@@ -364,6 +380,15 @@ DEGRADATION_TABLE: tuple[CapabilityPolicy, ...] = (
 
 class StorageError(Exception):
     """Base storage-layer error."""
+
+
+class OwnerConflictError(StorageError):
+    """A second owner account was attempted (FR-6.1a single-user hard limit).
+
+    Raised by ``MetaStore.create_owner`` when the atomic check inside its
+    transaction finds an owner already committed, or when a write constraint
+    (users.username UNIQUE) rejects the insert -- never a bare IntegrityError.
+    """
 
 
 class UnknownDriverError(StorageError):
@@ -590,9 +615,48 @@ class MetaStore(Protocol):
         scopes: Sequence[str],
         expires_at: float | None = None,
     ) -> Token:
+        """Issue a fresh profile token; ``token_secret`` is set only here."""
         raise NotImplementedError
 
     def revoke_token(self, token_id: str) -> None:
+        raise NotImplementedError
+
+    def authenticate_token(self, secret: str) -> Token | None:
+        """Resolve a bearer secret to its live token (revoked/expired => None).
+
+        The secret is hashed and matched against ``tokens.token_hash``; the
+        returned Token never carries ``token_secret``.
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------ users (FR-6.1a)
+
+    def create_user(self, user: StoredUser) -> None:
+        raise NotImplementedError
+
+    def create_owner(self, owner: StoredUser, profile: StoredProfile, audit: AuditEntry) -> None:
+        """Create the single owner + default profile + audit in ONE transaction.
+
+        FR-6.1a exact-once is enforced inside the transaction, never as a
+        check-then-insert: concurrent setups serialize on the write lock
+        (sqlite BEGIN IMMEDIATE; postgres advisory xact lock), re-read the owner
+        count after the wait, and raise ``OwnerConflictError`` for every loser.
+        The users ``username`` UNIQUE constraint is a final backstop -- any
+        IntegrityError on the way in is translated to the same typed conflict,
+        never a bare IntegrityError. All three writes commit together or none do.
+        """
+        raise NotImplementedError
+
+    def get_user_by_username(self, username: str) -> StoredUser | None:
+        raise NotImplementedError
+
+    def count_users(self) -> int:
+        raise NotImplementedError
+
+    def list_users(self) -> list[StoredUser]:
+        raise NotImplementedError
+
+    def update_user_password(self, user_id: str, password_hash: str) -> None:
         raise NotImplementedError
 
     def get_config(self, key: str, version: int | None = None) -> ConfigEntry | None:

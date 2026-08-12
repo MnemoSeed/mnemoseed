@@ -29,7 +29,7 @@ Keep the memory base "still trustworthy after a year of use": unreinforced memor
 | FR-4.6 | Extraction-side reconsolidation: a retrieval hit opens a labile window; a new contradictory fact rewrites the old slot, and the old version enters the history chain (valid_to); never physically deleted | P0 |
 | FR-4.7 | Adjudication criteria: timestamp clarity + source-authority difference (explicit user > Tier 1 inference > Tier 3 inference) | P0 |
 | FR-4.8 | Audit interface: any memory returns its full provenance.history (creation/rewrite chain) | P0 |
-| FR-4.9 | **User-correction negative feedback**: an explicit user correction ("no, actually…") is a first-class signal — the corrected entry is down-weighted + flagged needs_reconcile, and feeds the promotion gate's promotion-precision stats (design/02 §11); retrieval having reinforcement-without-correction is an incomplete feedback loop | P1 |
+| FR-4.10 | **User-correction negative feedback**: an explicit user correction ("no, actually…") is a first-class signal — the corrected entry is down-weighted + flagged needs_reconcile, and feeds the promotion gate's promotion-precision stats (design/02 §11); retrieval having reinforcement-without-correction is an incomplete feedback loop | P1 |
 | FR-4.9 | Conflict surfacing: when flag_conflict reaches a threshold or involves a high-severity constraint, proactively ask the user for a two-way confirmation | P1 |
 
 ## 4. Non-Functional Requirements

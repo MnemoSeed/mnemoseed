@@ -21,6 +21,7 @@ from mnemoseed.storage.ports import (
     PoolState,
     StorageError,
     StoredProfile,
+    StoredUser,
     TurnRange,
 )
 from mnemoseed.storage.registry import META_DRIVERS, register
@@ -205,6 +206,55 @@ def test_delete_profile_cascades_tokens(driver):
     assert row is None
 
 
+def test_users_crud_and_password_rotation(driver):
+    assert driver.count_users() == 0
+    driver.create_user(
+        StoredUser(
+            user_id="u-owner",
+            username="owner",
+            password_hash="argon2-stub",
+            role="owner",
+            created_at=100.0,
+        )
+    )
+    assert driver.count_users() == 1
+    got = driver.get_user_by_username("owner")
+    assert got is not None
+    assert got.user_id == "u-owner"
+    assert got.role == "owner"
+    assert got.password_hash == "argon2-stub"
+    assert driver.get_user_by_username("ghost") is None
+    driver.update_user_password("u-owner", "argon2-rotated")
+    assert driver.get_user_by_username("owner").password_hash == "argon2-rotated"
+    assert [user.user_id for user in driver.list_users()] == ["u-owner"]
+
+
+def test_token_secret_hashed_authenticates_and_revokes(driver):
+    """The bearer secret is stored as its sha256 digest only; authenticate
+    resolves the digest back to the live (unrevoked, unexpired) token."""
+    driver.upsert_profile(StoredProfile(profile_id="u1", display_name="Uma"))
+    token = driver.issue_token("u1", ("graph:read",))
+    assert token.token_secret, "issue_token must return the one-shot bearer secret"
+    row = driver._conn.execute(
+        "SELECT token_hash FROM tokens WHERE token_id = ?", (token.token_id,)
+    ).fetchone()
+    assert row is not None and str(row["token_hash"])
+    assert str(row["token_hash"]) != token.token_secret  # plaintext never persisted
+    found = driver.authenticate_token(token.token_secret)
+    assert found is not None
+    assert found.token_id == token.token_id
+    assert found.profile_id == "u1"
+    assert driver.authenticate_token("unknown-secret") is None
+    driver.revoke_token(token.token_id)
+    assert driver.authenticate_token(token.token_secret) is None
+
+
+def test_authenticate_respects_expiry(driver):
+    driver.upsert_profile(StoredProfile(profile_id="u1", display_name="Uma"))
+    expired = driver.issue_token("u1", ("graph:read",), expires_at=time.time() - 1.0)
+    assert driver.authenticate_token(expired.token_secret) is None
+
+
 # ---------------------------------------------------------------- config
 
 
@@ -332,14 +382,15 @@ def test_meta_migration_preserves_data_and_is_forward_only(tmp_path):
     driver = SqliteMetaDriver(path=path)
     try:
         # graph-tagged v2 is not applied to a meta-only file; v3 adds the
-        # per-profile score pool and v4 the dream token ledger, so meta lands at
-        # 4 (the legacy singleton score_pool is neither dropped nor migrated).
-        assert driver.schema_version() == 4
+        # per-profile score pool, v4 the dream token ledger and v6 the identity
+        # users table + hashed token column, so meta lands at 6 (the legacy
+        # singleton score_pool is neither dropped nor migrated).
+        assert driver.schema_version() == 6
         got = driver.get_profile("u1")
         assert got is not None
         assert got.display_name == "survivor"
         driver.migrate()  # idempotent re-run
-        assert driver.schema_version() == 4
+        assert driver.schema_version() == 6
     finally:
         asyncio.run(driver.close())
 
@@ -348,7 +399,7 @@ def test_schema_version_equals_latest_new_install(tmp_path):
     db = SqliteMetaDriver(path=tmp_path / "fresh.db")
     try:
         assert db.schema_version() == db.migrate()
-        assert db.schema_version() == 4
+        assert db.schema_version() == 6
         # a profile row written after init survives a migrate() no-op
         db.upsert_profile(StoredProfile(profile_id="u1", display_name="Uma"))
         db.migrate()

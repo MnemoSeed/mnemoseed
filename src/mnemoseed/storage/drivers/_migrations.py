@@ -558,6 +558,39 @@ _V5_ADD_PROMOTION_STATUS = AddColumn(
     column=Column("promotion_status", "TEXT", not_null=True, default="promoted"),
 )
 
+# v6 (PRD-06 FR-6.1a/b, issue #14): identity chain. The users table carries the
+# local owner account (username UNIQUE, password_hash = argon2id digest computed
+# by the identity service — the port only stores what it is given); tokens gain
+# a nullable ``token_hash`` column holding the sha256 digest of the bearer
+# secret. Nullable because v1-era tokens predate hashing: pre-v6 bearer values
+# were plaintext token_ids, so after the upgrade they simply stop authenticating
+# (the digest never matches) — re-login re-issues. No data rewrite, born empty.
+_USERS_TABLE = CreateTable(
+    store="meta",
+    name="users",
+    columns=(
+        Column("user_id", "TEXT", primary_key=True),
+        Column("username", "TEXT", not_null=True),
+        Column("password_hash", "TEXT", not_null=True),
+        Column("role", "TEXT", not_null=True, default="owner"),
+        Column("created_at", "TEXT", not_null=True),
+    ),
+    unique=(("username",),),
+)
+
+_V6_ADD_TOKEN_HASH = AddColumn(
+    store="meta",
+    table="tokens",
+    column=Column("token_hash", "TEXT"),
+)
+
+_V6_TOKEN_HASH_INDEX = CreateIndex(
+    store="meta",
+    name="idx_tokens_hash",
+    table="tokens",
+    columns=("token_hash",),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -617,6 +650,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=5,
         description="promotion-gate status carrier on graph.nodes (default promoted, back-compat)",
         ops=(_V5_ADD_PROMOTION_STATUS,),
+    ),
+    Migration(
+        version=6,
+        description=(
+            "identity chain: users table (owner account, username UNIQUE) + "
+            "nullable tokens.token_hash digest column + lookup index"
+        ),
+        ops=(_USERS_TABLE, _V6_ADD_TOKEN_HASH, _V6_TOKEN_HASH_INDEX),
     ),
 )
 

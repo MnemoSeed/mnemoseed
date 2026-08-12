@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemoseed"
-version = "0.0.1"
+version = "0.1.0"
 description = "Cross-model neutral AI memory layer — five-stage memory pipeline derived from neuroscience"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
@@ -28,6 +28,8 @@ dependencies = [
     "pgvector>=0.3",
     # MCP stdio memory gateway (PRD-03 FR-3.1): official MCP SDK, pinned to 2.x.
     "mcp>=2.0,<3",
+    # local owner passwords are argon2id-hashed at rest (issue #14, PRD-06 FR-6.1e)
+    "argon2-cffi>=23.1",
 ]
 
 [dependency-groups]
@@ -43,6 +45,19 @@ mnemoseed = "mnemoseed.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mnemoseed"]
+
+# Ship the host adapter/plugin template trees as package data so `mnemoseed
+# install` works from an installed wheel (issue #9). The repo-root layout is
+# kept as the marketplace-distribution source (design/06 section 2.1); the
+# wheel copy lands under the package at a stable, resolution-known location.
+# The installer resolves them via mnemoseed.installer.templating.
+# The trees must also ride the sdist, since wheels are rebuilt from it.
+[tool.hatch.build.targets.sdist]
+include = ["src", "adapters", "plugins/claude-code", "tests", "README.md", "LICENSE"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"adapters" = "src/mnemoseed/_templates/adapters"
+"plugins/claude-code" = "src/mnemoseed/_templates/plugins/claude-code"
 
 [tool.ruff]
 line-length = 110

@@ -1,11 +1,11 @@
 """mnemoseed CLI entry point.
 
-M0/M1 scope: init / install / doctor / up / serve / embed-sidecar / uninstall /
-version. ``up`` starts the daemon single-process (embedded preset by default —
-every driver runs in one process with zero external services); ``serve`` is
-kept as an alias. ``install`` / ``uninstall`` / ``doctor`` are the FR-6.1 /
-FR-6.7 / FR-6.6 installer surface. Account, profile, link and console commands
-land later in M1 with the identity layer.
+Scope: init / install / doctor / up / serve / embed-sidecar / uninstall /
+version, plus the identity chain (issue #14): ``login`` / ``logout`` /
+``whoami`` / ``auth reset``. ``up`` starts the daemon single-process (embedded
+preset by default — every driver runs in one process with zero external
+services); ``serve`` is kept as an alias. ``install`` / ``uninstall`` /
+``doctor`` are the FR-6.1 / FR-6.7 / FR-6.6 installer surface.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import asyncio
 import os
 import sys
 from collections.abc import Callable
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +219,206 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return run_server()
 
 
+# ------------------------------------------------------------ identity (issue #14)
+
+
+def _base_url(args: argparse.Namespace, fallback: str | None = None) -> str:
+    """Daemon base URL: --baseurl, then fallback, then the config baseurl."""
+    from mnemoseed.config import load_config
+
+    if args.baseurl:
+        return str(args.baseurl).rstrip("/")
+    if fallback:
+        return fallback.rstrip("/")
+    return load_config().baseurl.rstrip("/")
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """POST /api/v1/auth/login and persist the profile token (0600 session file)."""
+    import getpass
+
+    import httpx
+
+    from mnemoseed.identity.session import AuthSession, save_session
+
+    base_url = _base_url(args)
+    username = (args.username or "").strip()
+    if not username:
+        username = input("username: ").strip()
+    password = args.password
+    if password is None:
+        password = getpass.getpass("password: ")
+    try:
+        response = httpx.post(
+            f"{base_url}/api/v1/auth/login",
+            json={"username": username, "password": password},
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        print(f"error: cannot reach {base_url}: {exc}", file=sys.stderr)
+        return 1
+    if response.status_code == 401:
+        print("error: invalid username or password", file=sys.stderr)
+        return 1
+    if response.status_code == 503:
+        print(
+            "error: setup required - no owner account exists yet (open the console setup wizard)",
+            file=sys.stderr,
+        )
+        return 1
+    if response.status_code >= 400:
+        print(f"error: login failed ({response.status_code})", file=sys.stderr)
+        return 1
+    body = response.json()
+    session = AuthSession(
+        base_url=base_url,
+        username=str(body["username"]),
+        profile_id=str(body["profile_id"]),
+        token=str(body["token"]),
+        expires_at=float(body["expires_at"]) if body.get("expires_at") is not None else None,
+    )
+    path = save_session(session)
+    prefix = f"logged in as {session.username} (profile {session.profile_id}"
+    if session.expires_at is not None:
+        import time
+
+        days = max(0, int((session.expires_at - time.time()) // 86400))
+        prefix += f", token expires in ~{days}d"
+    print(f"{prefix})")
+    print(f"session: {path}")
+    return 0
+
+
+def cmd_logout(args: argparse.Namespace) -> int:
+    """Revoke the token server-side (best-effort) and delete the local session."""
+    import httpx
+
+    from mnemoseed.identity import session as auth_session
+
+    existing = auth_session.load_session()
+    if existing is None:
+        print("not logged in (no stored session to revoke)")
+        return 0
+    base_url = _base_url(args, existing.base_url)
+    # Server-side revocation is best-effort; the local file is the source of
+    # truth for a logged-out state (the token may already be revoked/expired).
+    try:
+        httpx.post(
+            f"{base_url}/api/v1/auth/logout",
+            headers=auth_session.bearer_headers(existing.token),
+            timeout=30.0,
+        )
+    except httpx.HTTPError:
+        pass
+    auth_session.delete_session()
+    print("logged out")
+    return 0
+
+
+def cmd_whoami(args: argparse.Namespace) -> int:
+    """Report the stored session identity and validate the token against the daemon."""
+    import httpx
+
+    from mnemoseed.identity import session as auth_session
+
+    existing = auth_session.load_session()
+    if existing is None:
+        print("not logged in (run `mnemoseed login`)", file=sys.stderr)
+        return 1
+    base_url = _base_url(args, existing.base_url)
+    try:
+        response = httpx.get(
+            f"{base_url}/api/v1/auth/me",
+            headers=auth_session.bearer_headers(existing.token),
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        print(f"error: cannot reach {base_url}: {exc}", file=sys.stderr)
+        return 1
+    if response.status_code == 401:
+        print("error: token invalid or expired (run `mnemoseed login`)", file=sys.stderr)
+        return 1
+    if response.status_code == 503:
+        print("error: setup required - no owner account exists yet", file=sys.stderr)
+        return 1
+    if response.status_code >= 400:
+        print(f"error: whoami failed ({response.status_code})", file=sys.stderr)
+        return 1
+    body = response.json()
+    print(f"daemon:   {base_url}")
+    print(f"username: {body['username']}")
+    print(f"profile:  {body['profile_id']}")
+    print(f"role:     {body['role']}")
+    if existing.expires_at is not None:
+        from datetime import datetime
+
+        when = datetime.fromtimestamp(existing.expires_at, tz=UTC).astimezone()
+        print(f"expires:  {when.isoformat(timespec='minutes')}")
+    return 0
+
+
+def cmd_auth_reset(args: argparse.Namespace) -> int:
+    """Local-only owner password reset (design/06 2.7): direct meta-store access."""
+    import asyncio
+    import getpass
+
+    from mnemoseed.config import ConfigError, load_config
+    from mnemoseed.identity import IdentityService
+    from mnemoseed.storage.registry import DRIVER_REGISTRIES
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    password = args.password
+    if password is None:
+        password = getpass.getpass("new password: ")
+        confirm = getpass.getpass("confirm new password: ")
+        if password != confirm:
+            print("error: passwords do not match", file=sys.stderr)
+            return 1
+    if not password or not password.strip():
+        print("error: password must not be empty", file=sys.stderr)
+        return 1
+
+    # Build ONLY the meta layer (never the heavy embed model): a local password
+    # reset needs the same store the daemon uses, nothing else.
+    try:
+        built = {
+            name: DRIVER_REGISTRIES["meta"].build(spec.driver, spec.params)
+            for name, spec in config.layer_instances("meta").items()
+        }
+    except (ValueError, KeyError) as exc:
+        print(f"error: storage stack failed to build: {exc}", file=sys.stderr)
+        return 1
+    meta = built.get("main") if "main" in built else next(iter(built.values()), None)
+    if meta is None:
+        print("error: meta layer resolved to no instance", file=sys.stderr)
+        return 1
+    try:
+        IdentityService(meta).set_owner_password(password)
+    except Exception as exc:
+        from mnemoseed.identity.service import InvalidCredentialsError
+
+        if isinstance(exc, InvalidCredentialsError):
+            print("error: no owner account exists (run the setup wizard first)", file=sys.stderr)
+            return 1
+        print(f"error: password reset failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        for instance in built.values():
+            closer = getattr(instance, "close", None)
+            if closer is not None:
+                try:
+                    asyncio.run(closer())
+                except Exception:
+                    pass
+    print("owner password updated (re-login to obtain a new token)")
+    return 0
+
+
 def _add_serve_parser(
     sub: argparse._SubParsersAction[argparse.ArgumentParser], name: str, help_text: str
 ) -> argparse.ArgumentParser:
@@ -291,6 +492,41 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_mcp.set_defaults(func=cmd_mcp)
+
+    # Identity chain (issue #14): login persists a 0600 profile-token session
+    # file under the config dir; logout revokes and deletes it; whoami reports
+    # the stored identity against the running daemon; auth reset is the
+    # local-only owner password reset (direct meta-store access).
+    p_login = sub.add_parser("login", help="log in to the daemon and persist the profile token")
+    p_login.add_argument("--baseurl", default=None, help="daemon base URL (default: config baseurl)")
+    p_login.add_argument("--username", default=None, help="owner username (prompts when omitted)")
+    p_login.add_argument(
+        "--password",
+        default=None,
+        help="owner password (prompts when omitted; prefer the prompt over the argv flag)",
+    )
+    p_login.set_defaults(func=cmd_login)
+
+    p_logout = sub.add_parser("logout", help="revoke the token and clear the stored session")
+    p_logout.add_argument("--baseurl", default=None, help="daemon base URL (default: stored base_url)")
+    p_logout.set_defaults(func=cmd_logout)
+
+    p_whoami = sub.add_parser("whoami", help="show the logged-in identity and token validity")
+    p_whoami.add_argument("--baseurl", default=None, help="daemon base URL (default: stored base_url)")
+    p_whoami.set_defaults(func=cmd_whoami)
+
+    p_auth = sub.add_parser("auth", help="identity management (owner account)")
+    auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)
+    p_auth_reset = auth_sub.add_parser(
+        "reset",
+        help="reset the owner password (local-only, requires daemon data-dir access)",
+    )
+    p_auth_reset.add_argument(
+        "--password",
+        default=None,
+        help="new owner password (prompts with confirmation when omitted)",
+    )
+    p_auth_reset.set_defaults(func=cmd_auth_reset)
 
     args = parser.parse_args(argv)
     handler: Callable[[argparse.Namespace], int] = args.func

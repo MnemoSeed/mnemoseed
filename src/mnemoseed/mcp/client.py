@@ -24,6 +24,12 @@ ENV_BASE_URL = "MNEMOSEED_BASE_URL"
 ENV_PROFILE_ID = "MNEMOSEED_PROFILE_ID"
 ENV_TIMEOUT_SECONDS = "MNEMOSEED_MCP_TIMEOUT_SECONDS"
 
+#: Bearer profile token for the /memory surface once setup has run (issue #14).
+#: When unset the request goes out without credentials (fail-open; the daemon's
+#: require_identity gate answers 503 pre-setup / 401 post-setup, which the MCP
+#: layer surfaces as a typed tool error rather than a hang).
+ENV_TOKEN = "MNEMOSEED_TOKEN"
+
 
 class MemoryDaemonError(Exception):
     """Base class for the typed daemon connectivity / config errors."""
@@ -82,8 +88,17 @@ class MemoryDaemonClient:
         self.timeout = resolve_timeout_seconds(timeout)
 
     def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        headers: dict[str, str] = {}
+        from_env = os.environ.get(ENV_TOKEN)
+        if from_env and from_env.strip():
+            headers["Authorization"] = f"Bearer {from_env.strip()}"
         try:
-            response = httpx.post(f"{self.base_url}{path}", json=payload, timeout=self.timeout)
+            response = httpx.post(
+                f"{self.base_url}{path}",
+                json=payload,
+                headers=headers,
+                timeout=self.timeout,
+            )
         except httpx.HTTPError as exc:
             raise MemoryDaemonUnreachableError(f"memory daemon unreachable: {exc}") from exc
         if response.status_code >= 400:

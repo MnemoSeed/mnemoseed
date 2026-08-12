@@ -32,9 +32,10 @@ class FakeDaemon:
     echoes back the remembered probe text on recall, and can simulate a down
     daemon or a recall that misses the probe."""
 
-    def __init__(self, *, down: bool = False, recall_matches: bool = True) -> None:
+    def __init__(self, *, down: bool = False, recall_matches: bool = True, reinforced: bool = False) -> None:
         self.down = down
         self.recall_matches = recall_matches
+        self.reinforced = reinforced
         self.remembered: str | None = None
         self.calls: list[tuple[str, str]] = []
 
@@ -54,11 +55,19 @@ class FakeDaemon:
             )
         if url.endswith("/memory/remember"):
             self.remembered = (json or {}).get("text")
+            if self.reinforced:
+                # near-duplicate hit: no new chunk; the surviving id differs
+                # from what a fresh write would have produced
+                return FakeResponse(200, {"outcome": "reinforced", "chunk_id": "probe-old"})
             return FakeResponse(200, {"outcome": "new_chunk", "chunk_id": "probe-1"})
         if url.endswith("/memory/recall"):
             entries = []
             if self.recall_matches and self.remembered:
-                entries = [{"kind": "chunk", "id": "probe-1", "text": self.remembered}]
+                if self.reinforced:
+                    # the stored text is the earlier probe's, not this marker's
+                    entries = [{"kind": "chunk", "id": "probe-old", "text": "older probe text"}]
+                else:
+                    entries = [{"kind": "chunk", "id": "probe-1", "text": self.remembered}]
             return FakeResponse(200, {"memory": {"entries": entries}})
         if url.endswith("/memory/forget_this"):
             return FakeResponse(200, {"removed": {"chunks": ["probe-1"], "nodes": []}})
@@ -127,6 +136,18 @@ def test_doctor_round_trip_surfaces_probe_write(tmp_path, monkeypatch) -> None:
     round_trip = next(check for check in report.failed if check.name == "round-trip")
     assert "did not surface" in round_trip.detail
     assert round_trip.fix
+
+
+def test_doctor_round_trip_accepts_reinforced_probe(tmp_path, monkeypatch) -> None:
+    """A probe text near-identical to a stored one reinforces instead of
+    creating a chunk; the surviving chunk_id still surfaces in recall, and
+    the round-trip must accept that (issue #11)."""
+    daemon = FakeDaemon(reinforced=True)
+    _mark_ports(monkeypatch, open_port=True)
+    report = run_doctor(Config(baseurl="http://127.0.0.1:7788"), home=tmp_path, request=daemon)
+
+    round_trip = next(check for check in report.checks if check.name == "round-trip")
+    assert round_trip.ok, round_trip.detail
 
 
 def test_doctor_reports_host_registration_presence(tmp_path, monkeypatch) -> None:
@@ -240,8 +261,11 @@ def _embedded_config(tmp_path: Path, port: int) -> Path:
 
 
 def test_doctor_live_daemon_all_green(tmp_path) -> None:
-    """End-to-end FR-6.6: a booted daemon + doctor comes out all green and the
-    round-trip probe really writes and reads through /memory."""
+    """End-to-end FR-6.6: a booted, set-up daemon + doctor comes out all green,
+    and the round-trip really ran through /memory -- the login token is exported
+    as MNEMOSEED_TOKEN so the post-setup profile-token gate lets the probe
+    through, and doctor must report write+read+forget ok (proving the probe was
+    not merely skipped)."""
     home = tmp_path / "home"
     data = tmp_path / "data"
     data.mkdir(parents=True, exist_ok=True)
@@ -261,6 +285,7 @@ def test_doctor_live_daemon_all_green(tmp_path) -> None:
         stderr=subprocess.PIPE,
         text=True,
     )
+    doctor: subprocess.CompletedProcess[str] | None = None
     try:
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
@@ -273,6 +298,23 @@ def test_doctor_live_daemon_all_green(tmp_path) -> None:
             time.sleep(0.2)
         else:
             raise AssertionError("daemon did not come up in time")
+
+        base = f"http://127.0.0.1:{port}"
+        setup = httpx.post(
+            base + "/api/v1/setup",
+            json={"username": "owner", "password": "a-strong-test-password"},
+            timeout=10.0,
+        )
+        assert setup.status_code == 201, setup.text
+        login = httpx.post(
+            base + "/api/v1/auth/login",
+            json={"username": "owner", "password": "a-strong-test-password"},
+            timeout=10.0,
+        )
+        assert login.status_code == 200, login.text
+        token = login.json().get("token")
+        assert token and isinstance(token, str)
+        env["MNEMOSEED_TOKEN"] = token
 
         doctor = subprocess.run(
             [*_console_script(), "doctor"],
@@ -290,6 +332,7 @@ def test_doctor_live_daemon_all_green(tmp_path) -> None:
             proc.kill()
 
     assert cfg.exists()
+    assert doctor is not None
     assert doctor.returncode == 0, doctor.stdout + doctor.stderr
     assert "all checks passed" in doctor.stdout
-    assert "round-trip" in doctor.stdout
+    assert "write+read+forget ok" in doctor.stdout

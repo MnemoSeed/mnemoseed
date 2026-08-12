@@ -12,7 +12,7 @@
 | [01-memory-pipeline](design/01-memory-pipeline.md) | Capture / Consolidate / Retrieve / Reconcile / Decay + Provenance pipeline |
 | [02-dream-engine](design/02-dream-engine.md) | Trigger state machine, snapshot isolation, interrupt protection, dual-track split writes, incremental dehydration |
 | [03-storage-and-retrieval](design/03-storage-and-retrieval.md) | Hybrid dual-store bus, STORAGE_MODE routing matrix, hybrid retrieval, anti-dilution policy |
-| [04-isolation-and-privacy](design/04-isolation-and-privacy.md) | Cognitive grading isolation, encrypted transport/at-rest privacy architecture, optional TEE tier |
+| [04-isolation-and-privacy](design/04-isolation-and-privacy.md) | Cognitive grading isolation, encrypted transport/at-rest privacy architecture, TEE as standard on the official SaaS |
 | [05-industry-landscape](design/05-industry-landscape.md) | Stanford/Microsoft/Anthropic/Nvidia lenses, Claude-Mem, MemPalace teardowns and adoption decisions |
 | [06-host-integration](design/06-host-integration.md) | Three-layer adapter architecture (daemon/MCP/plugin), profile credential identity model (login/link), host capability matrix, 3-minute install flow, disconnect/uninstall semantics |
 | [07-console](design/07-console.md) | MnemoSeed Console: profiles, memory browser, graph view, per-memory full dossier, dream panel and token usage, model routing settings |
@@ -31,7 +31,7 @@
 | [PRD-05 cloud sync & TEE](prd/PRD-05-cloud-tee.md) | E2EE sync, Nitro Enclaves, billing arbitrage gateway |
 | [PRD-06 host integration & install](prd/PRD-06-host-integration.md) | daemon embedded mode, installer, login/link identity binding, Claude Code plugin (hooks), MCP degraded mode, uninstall |
 | [PRD-07 console](prd/PRD-07-console.md) | Console SPA: Dashboard/Profiles/memory browser/dream review/conflict inbox (M1 read-only core, M2 completes) |
-| [PRD-08 M0 foundation](prd/PRD-08-m0-foundation.md) | Repo skeleton + CI, four storage interfaces with dual drivers, capability checks, Schema v1 freeze (blocks all later PRDs) |
+| [PRD-08 M0 foundation](prd/PRD-08-m0-foundation.md) | Repo skeleton + CI, four storage interfaces with dual drivers, capability checks, schema freeze + forward-only migrations (blocks all later PRDs) |
 
 ## Theory & Literature Registry
 
