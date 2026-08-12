@@ -32,9 +32,10 @@ class FakeDaemon:
     echoes back the remembered probe text on recall, and can simulate a down
     daemon or a recall that misses the probe."""
 
-    def __init__(self, *, down: bool = False, recall_matches: bool = True) -> None:
+    def __init__(self, *, down: bool = False, recall_matches: bool = True, reinforced: bool = False) -> None:
         self.down = down
         self.recall_matches = recall_matches
+        self.reinforced = reinforced
         self.remembered: str | None = None
         self.calls: list[tuple[str, str]] = []
 
@@ -54,11 +55,19 @@ class FakeDaemon:
             )
         if url.endswith("/memory/remember"):
             self.remembered = (json or {}).get("text")
+            if self.reinforced:
+                # near-duplicate hit: no new chunk; the surviving id differs
+                # from what a fresh write would have produced
+                return FakeResponse(200, {"outcome": "reinforced", "chunk_id": "probe-old"})
             return FakeResponse(200, {"outcome": "new_chunk", "chunk_id": "probe-1"})
         if url.endswith("/memory/recall"):
             entries = []
             if self.recall_matches and self.remembered:
-                entries = [{"kind": "chunk", "id": "probe-1", "text": self.remembered}]
+                if self.reinforced:
+                    # the stored text is the earlier probe's, not this marker's
+                    entries = [{"kind": "chunk", "id": "probe-old", "text": "older probe text"}]
+                else:
+                    entries = [{"kind": "chunk", "id": "probe-1", "text": self.remembered}]
             return FakeResponse(200, {"memory": {"entries": entries}})
         if url.endswith("/memory/forget_this"):
             return FakeResponse(200, {"removed": {"chunks": ["probe-1"], "nodes": []}})
@@ -127,6 +136,18 @@ def test_doctor_round_trip_surfaces_probe_write(tmp_path, monkeypatch) -> None:
     round_trip = next(check for check in report.failed if check.name == "round-trip")
     assert "did not surface" in round_trip.detail
     assert round_trip.fix
+
+
+def test_doctor_round_trip_accepts_reinforced_probe(tmp_path, monkeypatch) -> None:
+    """A probe text near-identical to a stored one reinforces instead of
+    creating a chunk; the surviving chunk_id still surfaces in recall, and
+    the round-trip must accept that (issue #11)."""
+    daemon = FakeDaemon(reinforced=True)
+    _mark_ports(monkeypatch, open_port=True)
+    report = run_doctor(Config(baseurl="http://127.0.0.1:7788"), home=tmp_path, request=daemon)
+
+    round_trip = next(check for check in report.checks if check.name == "round-trip")
+    assert round_trip.ok, round_trip.detail
 
 
 def test_doctor_reports_host_registration_presence(tmp_path, monkeypatch) -> None:
