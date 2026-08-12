@@ -44,6 +44,15 @@ mnemoseed = "mnemoseed.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mnemoseed"]
 
+# Ship the host adapter/plugin template trees as package data so `mnemoseed
+# install` works from an installed wheel (issue #9). The repo-root layout is
+# kept as the marketplace-distribution source (design/06 section 2.1); the
+# wheel copy lands under the package at a stable, resolution-known location.
+# The installer resolves them via mnemoseed.installer.templating.
+[tool.hatch.build.force-include]
+"adapters" = "src/mnemoseed/_templates/adapters"
+"plugins/claude-code" = "src/mnemoseed/_templates/plugins/claude-code"
+
 [tool.ruff]
 line-length = 110
 target-version = "py312"
