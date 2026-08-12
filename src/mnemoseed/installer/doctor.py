@@ -132,7 +132,12 @@ def _round_trip(request: HttpFn, baseurl: str) -> tuple[bool, str]:
         if body is None:
             return False, "read ok but the response was not a JSON object"
         entries = (body.get("memory") or {}).get("entries") or []
-        if not isinstance(entries, list) or not any(marker in (entry.get("text") or "") for entry in entries):
+        # Near-duplicate reinforcement means a repeat probe text may not create
+        # a new chunk; the write returns the surviving chunk_id either way, so
+        # assert on the id landing in recall, not on the marker text.
+        if not isinstance(entries, list) or not any(
+            chunk_id and chunk_id == entry.get("id") for entry in entries
+        ):
             return False, "write ok but recall did not surface the probe"
         if chunk_id:
             cleanup = request(
