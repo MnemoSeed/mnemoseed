@@ -7,7 +7,7 @@
 
 ## 1. Positioning & Principles
 
-- **Bundled with the daemon, zero extra install**: FastAPI directly hosts the static SPA (`http://localhost:7788/console`); `mnemoseed console` opens the browser with one click;
+- **Bundled with the daemon, zero extra install**: FastAPI directly hosts the static SPA (`http://localhost:7788/console`); just open it in a browser;
 - **Local-first, no account**: listens on localhost only by default; remote access must be explicitly enabled + admin token;
 - **The same frontend, direct-to-cloud in the future**: console is just a client of the daemon API — once cloud goes live, the same interface switches baseurl to manage cloud profiles, fully isomorphic with the login/baseurl identity model ([design/06](06-host-integration.md));
 - **Read-oriented; every write leaves a trace**: browsing is free; modifying operations (delete memory, change weights, resolve conflicts, switch models) all go into the audit log.

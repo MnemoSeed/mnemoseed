@@ -35,7 +35,7 @@ Everything is local-first. A typical dream run costs about $0.001 against cloud 
 
 **Shipped:** capture pipeline, dream engine, hybrid retrieval, six MCP tools (`memory.recall` / `remember` / `audit` / `timeline` / `export` / `forget_this`), installer + doctor + uninstall, Claude Code plugin, Cursor / Codex / Gemini adapters. ~1,100 tests green on every push.
 
-**Roadmap:** management console, hosted cloud daemon (with an optional TEE-backed tier), the anima personality module (spec in `docs/design/09`).
+**Roadmap:** management console, hosted cloud daemon (running in a TEE as standard), the anima personality module (spec in `docs/design/09`).
 
 Design docs live in `docs/design/` (English) and `docs/zh/` (中文工作稿).
 

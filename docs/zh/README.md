@@ -13,7 +13,7 @@
 | [01-记忆管线五阶段](design/01-记忆管线五阶段.md) | Capture / Consolidate / Retrieve / Reconcile / Decay + Provenance 全管线设计 |
 | [02-梦境引擎](design/02-梦境引擎.md) | 触发状态机、快照隔离、中断保护、双轨分流写入、增量脱水 |
 | [03-存储与检索](design/03-存储与检索.md) | 混合双库总线、STORAGE_MODE 路由矩阵、混合检索、抗稀释策略 |
-| [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、E2EE 传输+加密存储隐私架构、TEE 可选档位 |
+| [04-隔离解耦与隐私](design/04-隔离解耦与隐私.md) | 认知分级隔离、E2EE 传输+加密存储隐私架构、官方 SaaS 标配 TEE |
 | [09-anima与偏好动力学](design/09-anima与偏好动力学.md) | **进阶模块（不在 M1 首发）**：Anima 灵魂模型（三层一体/无损切换）、偏好贝叶斯后验更新、特质雷达可视化 |
 | [10-云端部署与远程接入](design/10-云端部署与远程接入.md) | daemon 上云/VPS 部署指南：拓扑、TLS 与鉴权、宿主远程接入、验证清单 |
 | [05-业界对标与精华提取](design/05-业界对标与精华提取.md) | Stanford/Microsoft/Anthropic/Nvidia 四透镜、Claude-Mem、MemPalace 拆解与取舍决策记录 |
@@ -33,7 +33,7 @@
 | [PRD-05 云端同步与 TEE](prd/PRD-05-云端同步与TEE.md) | E2EE 同步、Nitro Enclaves、计费套利网关 |
 | [PRD-06 宿主接入与安装](prd/PRD-06-宿主接入与安装.md) | daemon embedded 模式、installer、login/link 身份绑定、Claude Code plugin（hooks）、MCP 降级模式、uninstall |
 | [PRD-07 管理控制台](prd/PRD-07-管理控制台.md) | Console SPA：Dashboard/Profiles/记忆浏览/梦境审查/冲突收件箱（M1 只读核心，M2 补全） |
-| [PRD-08 M0 地基](prd/PRD-08-M0地基.md) | repo 骨架 + CI、四存储接口双驱动、capability 校验、Schema v1 冻结（阻塞全部后续 PRD） |
+| [PRD-08 M0 地基](prd/PRD-08-M0地基.md) | repo 骨架 + CI、四存储接口双驱动、capability 校验、schema 冻结 + 纯前向迁移（阻塞全部后续 PRD） |
 
 ## 理论文献备案
 
