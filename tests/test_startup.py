@@ -85,8 +85,10 @@ def test_daemon_argv_falls_back_to_python_module(monkeypatch: pytest.MonkeyPatch
 
 def test_daemon_command_quotes_spaces_keep_up() -> None:
     command = startup.daemon_command()
-    assert "up" in command
-    assert ('"' in command) == (" " in command)
+    assert command.endswith(" up")
+    exe = command[: -len(" up")]
+    # quoting applies iff the executable path itself contains spaces
+    assert ('"' in exe) == (" " in exe)
 
 
 # ------------------------------------------------------ unit / plist builders
