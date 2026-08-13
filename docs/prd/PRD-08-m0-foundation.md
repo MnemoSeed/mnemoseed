@@ -4,6 +4,7 @@
 > Milestone: M0 (m0a + m0b of roadmap PRD-00) · Estimate 16 days (revised by v2 blind review)
 > Nature: pure foundation with zero user-visible functionality — but what it freezes (schema, interface contracts) hurts every time it changes later, so this PRD has the strictest review standard of all PRDs.
 > v2 revision: after independent blind-reviewer review (15 findings), added the interface method list (Appendix B), the degradation behavior table (Appendix C), and completed the schema-freeze fields (profile isolation / structured turn boundaries / flag bits / usage counters / sparse-vector representation).
+> v1.1 amendment (2026-08-13): Appendix B.2 adds GraphStore `list_edges(filter, page)` (bulk edge read for the console Graph View), the capability-flag set grows to 12 (FR-8.6) with the new `GRAPH_EDGE_LIST`, and Appendix C gains the corresponding degrade row. This is a numbered amendment, not a rewrite — all previously frozen language stands unchanged.
 
 ## 1. Goals
 
@@ -22,7 +23,7 @@
 |---|---|---|
 | D1 | SQLite-Graph uses its **own adjacency tables** (two tables: nodes + edges), without pulling in an off-the-shelf graph library | Query patterns are fixed (1-2 hop traversal / co-occurrence edges / version chains); zero dependencies, schema autonomy; switching databases later is only a matter of adding a driver + one-time export/import, and since the verbatim channel is untouched, even the worst case is rebuildable |
 | D2 | The Postgres graph side uses **pure relational table emulation** (isomorphic to the SQLite version), not Apache AGE | Runs on any managed PG, so the cloud is not picky about vendors; a single interface does not maintain two sets of query logic |
-| D3 | capability flags are a **minimal viable set** (11, see FR-8.6) | What is frozen is the validation mechanism, not the list; no premature name-locking of features that haven't been designed |
+| D3 | capability flags are a **minimal viable set** (12, see FR-8.6) | What is frozen is the validation mechanism, not the list; no premature name-locking of features that haven't been designed |
 | D4 | **MCP server lives inside this package** (Python stdio thin adapter, `mnemoseed mcp`; no Node, no second repo) — the earlier dual-repo decision is superseded: once the stdio shell just forwards to the daemon over HTTP, a separate Node package buys nothing |
 | D5 (new in v2) | **Profile isolation goes through the stamp fields**: chunks add `profile_id`, filtered via `vector.metadata_filter`; without introducing the config complexity of "multi-instance vector store per layer" | Aligns with the `profile_id` on nodes; the PRD-06 identity model carries profile_id explicitly on every call, a natural match |
 | D6 (new in v2) | **The Tier-3 isolated graph = a second-named GraphStore instance** (a separate SQLite file in embedded mode, a separate schema under PG); the registry supports named multi-instance per layer (`graph.main` / `graph.isolated`) | What design/02 §5 promises is physical isolation; a partition-key downgrade would break the "no back-contamination" narrative; the interface stays unchanged, just one more name in the registry |
@@ -37,7 +38,7 @@
 | FR-8.3 | The four embedded drivers: `lancedb_embedded` / `sqlite_graph` (self-built adjacency tables) / `sqlite_meta` / `bge_m3_onnx` (model file downloaded on first run, ~543MiB (int8-quantized ONNX, as measured), with visible progress; plus a `synthetic` test embedder) | P0 |
 | FR-8.4 | Second drivers: `pgvector` / `pg_graph` (pure relational tables, same schema and same queries as sqlite_graph) / `pg_meta`; the Embedder second driver = `openai_compatible` (any compatible endpoint, **dense-only output**, declaring the absence of `embed.sparse_output`) | P0 |
 | FR-8.5 | **Interface contract test suite**: driver-agnostic behavior tests covering every method in Appendix B (with a "method ↔ contract test" mapping table), run once against each of the embedded and pg driver sets; also includes SQLite/PG **migration reconciliation assertions** (same schema_version sequence, same field definitions, byte-for-byte comparison with zero difference on both sides) | P0 |
-| FR-8.6 | capability flags minimal set (11): `vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`. Driver combinations missing a capability: refuse to start or go through **explicit degradation**, with the degradation behavior table governed by Appendix C (code and config docs kept in sync) | P0 |
+| FR-8.6 | capability flags minimal set (12): `vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `GRAPH_EDGE_LIST` / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`. Driver combinations missing a capability: refuse to start or go through **explicit degradation**, with the degradation behavior table governed by Appendix C (code and config docs kept in sync) | P0 |
 | FR-8.7 | **Schema v1 freeze** (list: see Appendix A): all structures land as migration files (one set for SQLite and one for PG, under the same schema_version sequence); `schema_version` table + a purely forward-only `up` migration mechanism; stamp `cues.host` / `cues.task` as well as `profile_id` / `session_id` / `turn_start` / `turn_end` fields are **nullable but never absent** | P0 |
 | FR-8.8 | docker-compose skeleton (docker preset: four services `core + vector(pgvector) + pg + embed`, with ollama as an optional profile), each service with `/healthz`; embedded single-process `mnemoseed up` starts the daemon skeleton with one command (all drivers embedded, no external dependencies, no business logic) | P0 |
 
@@ -168,9 +169,12 @@ Total 15.5d (+0.5d integration buffer ≈ **16d**, so roadmap m0b adjusted to 9d
 | as_of(timestamp, filter) | point-in-time replay query (bitemporal) | retrieval FR-3.9 |
 | batch_update_weights(updates[]) | batch decay recompute (~100k < 60s, NFR-4.1) | Decay |
 | query_intentions(status, due_before) | due pending INTENTION query | scheduler FR-3.15 |
+| list_edges(filter, page) | **bulk edge listing** (v1.1 amendment, 2026-08-13) backing the console Graph View; filter fields: profile_id / node types / time window / Tier / min edge weight; paginated with a stable order; each item returns edge id, endpoints, kind (`relation` / `cooccurrence`), weight, timestamps | console Graph View |
 | capabilities() | self-reported capability set | startup validation |
 
 Note: graph centrality (the δ term in the rerank formula) is computed client-side by the retrieval side from traverse results; M0 does not introduce a standalone centrality query.
+
+Note (v1.1 amendment, 2026-08-13): `list_edges` is required in **both** `sqlite_graph` and `pg_graph`, each with contract tests (AC-3). The new capability flag `GRAPH_EDGE_LIST` follows the Appendix C degrade semantics: a driver lacking it degrades the console graph to per-node edge fetching via `traverse()` (bulk edge view unavailable) with an explicit startup warning.
 
 ### B.3 MetaStore
 
@@ -209,6 +213,7 @@ Note: graph centrality (the δ term in the rerank formula) is computed client-si
 | `vector.hybrid_search` | same as above (dense-only) | degrade + startup warning |
 | `vector.snapshot` | dream snapshot degrades to turn_range logical isolation, isolation-strength downgrade warning | degrade + startup warning |
 | `graph.cooccurrence_edges` | rerank drops the ε co-occurrence term, retrieval-quality warning | degrade + startup warning |
+| `GRAPH_EDGE_LIST` | console Graph View bulk edge list degrades to per-node edge fetching via `traverse()`, console-graph performance warning | degrade + startup warning |
 | `meta.concurrent_readers` | console reads serialize, concurrency-performance warning | degrade + startup warning |
 | `embed.batch` | vectorization runs item by item, throughput warning | degrade + startup warning |
 

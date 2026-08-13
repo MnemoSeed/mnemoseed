@@ -180,33 +180,46 @@ sequenceDiagram
 ## 3. Installation Flow (Time-to-First-Memory < 3 minutes)
 
 ```bash
-uv tool install mnemoseed && mnemoseed install   # pipx works too
+uv tool install mnemoseed && mnemoseed onboard   # pipx works too
 ```
+
+`mnemoseed onboard` is the **guided shell**: an interactive, step-by-step aggregate over the existing primitives. `mnemoseed init` / `mnemoseed install` stay **headless, scriptable primitives** that onboard drives one step at a time — onboard never carries a parallel implementation of any step, and each onboard step maps 1:1 to a primitive (setup / storage / wizard / link / autostart / doctor).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant I as installer
+    participant U as User
+    participant O as onboard (guided shell over headless primitives)
     participant H as installed hosts
     participant D as daemon
-    I->>H: ① probe hosts<br/>scan ~/.claude.json, ~/.cursor/, ~/.codex/,<br/>~/.gemini/, ~/.config/opencode/
-    Note over I: list discovered hosts, ask the user which to integrate
-    I->>I: ② storage form selection<br/>default embedded (both databases embedded in one process, zero Docker)<br/>optional docker compose full stack
-    I->>I: ③ download bge-m3 ONNX embedding model (~543MiB, int8 quantized, as measured)<br/>(resumable download, size pre-declared)
-    I->>D: ④ login to local daemon (passwordless confirm)<br/>→ create/select profile → issue token
-    I->>D: ⑤ dream-model config wizard<br/>① OAuth reuse of the host's local login state (Codex / Grok,<br/>both ToS-allowed; Anthropic subscriptions not reused; Chinese users may<br/>choose MiniMax/Kimi, with an explicit data-leaving-the-country notice)<br/>② bring your own API key (OpenAI-compatible endpoint, e.g. Fireworks)<br/>③ advanced offline track Ollama (≤14B, quality warning)<br/>only written to config.toml after a live connectivity test passes
-    I->>H: ⑥ link: pick a profile per host/agent<br/>write MCP registration + profile_id/token (env)<br/>back up the original config + diff preview + per-item confirmation before writing
-    I->>H: ⑦ Claude Code detected → guide plugin install<br/>(marketplace add + install, executed as one command)<br/>Codex detected → guide /hooks trust review<br/>(non-managed hooks silently not executed if not trusted)
-    I->>D: ⑧ start the daemon (if not already running)
-    I->>D: ⑨ mnemoseed doctor self-check
+    U->>O: mnemoseed onboard
+    O->>D: ① owner account setup<br/>daemon first start, no owner → setup state<br/>create owner account (username + password, argon2)<br/>POST /api/v1/setup (exact-once; the endpoint stays permanently closed afterward)
+    O->>O: ② storage preset choice<br/>default embedded (both databases embedded in one process, zero Docker)<br/>optional docker compose full stack<br/>download bge-m3 ONNX embedding model (~543MiB, int8 quantized, as measured)<br/>(resumable download, size pre-declared)
+    O->>D: ③ dream-model config wizard (post-setup step of onboard)<br/>① OAuth reuse of the host's local login state (Codex / Grok,<br/>both ToS-allowed; Anthropic subscriptions not reused; Chinese users may<br/>choose MiniMax/Kimi, with an explicit data-leaving-the-country notice)<br/>② bring your own API key (OpenAI-compatible endpoint, e.g. Fireworks)<br/>③ advanced offline track Ollama (≤14B, quality warning)<br/>only written to config.toml after a live connectivity test passes;<br/>skippable — skipping it leaves a bootable capture-only daemon (documented in the wizard)
+    O->>H: ④ probe hosts<br/>scan ~/.claude.json, ~/.cursor/, ~/.codex/,<br/>~/.gemini/, ~/.config/opencode/
+    Note over O: list discovered hosts, ask the user which to integrate
+    O->>H: ⑤ link: pick a profile per host/agent<br/>login (passwordless confirm) → create/select profile → issue token<br/>write MCP registration + profile_id/token (env)<br/>back up the original config + diff preview + per-item confirmation before writing<br/>Claude Code detected → guide plugin install (marketplace add + install,<br/>one command); Codex detected → guide /hooks trust review
+    O->>O: ⑥ autostart<br/>register the daemon to start on login
+    O->>D: ⑦ mnemoseed doctor self-check
     Note over D: daemon alive / port / embedding loaded<br/>/ round-trip store-test / each host's registration active
-    Note over I: all green → "Done. The next time you're in a meeting,<br/>it'll already be there."<br/>any step fails → give a one-line fix command
+    Note over O: all green → "Done. The next time you're in a meeting,<br/>it'll already be there."<br/>any step fails → give a one-line fix command;<br/>every step is skippable + resumable, and steps are timeboxed<br/>(TTFM < 3 min happy path)
 ```
 
 **Iron rules**:
 - **Zero-account startup** — fully usable locally; cloud sync is a later explicit action via `mnemoseed cloud login`;
 - **Backup + diff preview + confirmation before touching any user config** — the people installing a memory system fear most that a tool messes with their environment;
 - **embedded mode by default** — do not let Docker become a barrier for individual users (docker compose is kept for developers and enterprises).
+
+### 3.1 `mnemoseed onboard` — the Guided Shell
+
+`mnemoseed onboard` is a guided, step-by-step aggregate over the existing primitives — it exists so a first-time user is walked through the whole path once, and nothing more. The console setup wizard drives the **same** backend onboard service (`/api/v1/setup`): there is exactly one implementation, used by both surfaces — **no parallel logic**. Rules:
+
+1. **One backend onboard service** shared with the console setup wizard; the `/api/v1/setup` endpoint stays exact-once;
+2. **The LLM wizard is a POST-setup step** — it runs after the owner account exists, keeps its connectivity-test-before-persist behavior (config.toml written only after a live test passes), and is governed by the FR-6.9 order (OAuth reuse → BYOK → offline track);
+3. **Every step is skippable + resumable** — onboard state persists between runs; **skipping the LLM step yields a bootable capture-only daemon** (capture works, dreaming is disabled until a model is configured — this is stated in the wizard, not discovered later);
+4. **The host-link step reuses the install's discipline unchanged** — backup + diff preview + per-item confirmation before any user config is touched;
+5. **TTFM < 3 min remains the happy-path target**; each step is timeboxed so a single slow step cannot blow the whole budget;
+6. **Config operations are loopback-only** — against a non-loopback baseurl they fail with a clear error (§6).
 
 **Uninstall**: `mnemoseed uninstall` deregisters host by host (restore from backup or strip precisely), stops the daemon, keeps the data directory by default and states its path, and only `--purge` deletes data. **The uninstall experience is part of trust.**
 
@@ -256,13 +269,16 @@ sequenceDiagram
 
 | Command | Purpose |
 |---|---|
-| `mnemoseed init` | install wizard (§3) |
+| `mnemoseed init` | headless install primitive (driven step by step by `mnemoseed onboard`; scriptable) |
+| `mnemoseed onboard` | guided shell (§3.1): owner setup → storage → LLM wizard → host link → autostart → doctor all-green; every step skippable + resumable |
 | `mnemoseed doctor` | self-check checklist + round-trip test |
 | `mnemoseed status` | memory scale / score pool / pending-consolidation count / conflict queue |
 | `mnemoseed login [--baseurl …]` | identity entry: select daemon, authenticate, list profiles |
 | `mnemoseed link` / `unlink` | bind/unbind a profile per agent (writes into the agent's native config) |
 | `mnemoseed whoami` | which profile / daemon / token state the current environment hits |
 | `mnemoseed console` | open the management console ([design/07](07-console.md)) |
+| `mnemoseed config set|get|rollback` | versioned config read/write/rollback over daemon REST (§6); loopback-only |
+| `mnemoseed audit` | audit-log query — who/what/when across every write surface (actor attribution: cli/console/mcp; [design/07 §5](07-console.md)) |
 | `mnemoseed recall "<query>"` | command-line retrieval (usable from scripts / any host) |
 | `mnemoseed remember "<fact>"` | command-line explicit memorization |
 | `mnemoseed dream --once` | manual consolidation (M1 discipline) |
@@ -276,4 +292,4 @@ sequenceDiagram
 
 ## 6. Configuration Single Source of Truth
 
-`~/.mnemoseed/config.toml` is the only config file (STORAGE_MODE, scoring weights, decay λ, host manifest, cloud account). The host side holds only a **thin registration** (one line for the MCP endpoint + the hook script path); upgrading the daemon never touches host configs. Change config with `mnemoseed config set`; hand-editing host-side files is forbidden.
+`~/.mnemoseed/config.toml` is the only config file (STORAGE_MODE, scoring weights, decay λ, host manifest, cloud account). The host side holds only a **thin registration** (one line for the MCP endpoint + the hook script path); upgrading the daemon never touches host configs. Change config with `mnemoseed config set|get|rollback` — CLI config operations go through the daemon REST API (`config set|get|rollback` verbs), the same backend the console Settings page uses; every change is actor-attributed (`cli` / `console` / `mcp`), lands in the versioned config, and is recorded in the audit log. **Config operations are loopback-only**: against a non-loopback baseurl they fail with a clear error rather than mutating a remote instance's config. Hand-editing host-side files is forbidden.

@@ -4,6 +4,7 @@
 > 里程碑：M0（路线图 PRD-00 的 m0a + m0b）· 预估 16 天（v2 盲审修订）
 > 性质：纯地基，零用户可见功能——但它冻结的东西（schema、接口契约）之后改一次疼一次，所以本 PRD 的审查标准是全部 PRD 里最严的。
 > v2 修订：经 blind-reviewer 独立审查（15 项发现），增补接口方法清单（附录 B）、降级行为表（附录 C）、schema 冻结字段补全（profile 隔离 / 结构化 turn 边界 / 标记位 / 用量计数 / 稀疏向量表示）。
+> v1.1 修订（2026-08-13）：附录 B.2 新增 GraphStore `list_edges(filter, page)`（console Graph View 的批量边读取），能力旗标集扩至 12 个（FR-8.6）并新增 `GRAPH_EDGE_LIST`，附录 C 增加对应降级行。这是编号修订而非重写——此前冻结的语言全部原样成立。
 
 ## 1. 目标
 
@@ -22,7 +23,7 @@
 |---|---|---|
 | D1 | SQLite-Graph **自建邻接表**（nodes + edges 两表），不引现成图库 | 查询模式固定（1-2 hop 遍历/共现边/版本链），零依赖、schema 自主；将来换库只是加一个驱动 + 一次性导出导入，verbatim 通道不动所以最坏情况也可重建 |
 | D2 | Postgres 图侧**纯关系表模拟**（与 SQLite 版同构），不用 Apache AGE | 任何托管 PG 都能跑，云端不挑供应商；同一接口不维护两套查询逻辑 |
-| D3 | capability flags **最小可用集**（11 个，见 FR-8.6） | 冻结的是校验机制，不是清单；不给未设计的功能提前锁死命名 |
+| D3 | capability flags **最小可用集**（12 个，见 FR-8.6） | 冻结的是校验机制，不是清单；不给未设计的功能提前锁死命名 |
 | D4 | **MCP server 收进本包**（Python stdio 瘦适配器 `mnemoseed mcp`，无 Node、无第二 repo）——原双 repo 决策废止：stdio 瘦壳转调 daemon HTTP 后，独立 Node 包只剩分发成本没有收益 |
 | D5（v2 新增） | **profile 隔离走钢印字段**：chunks 加 `profile_id`，靠 `vector.metadata_filter` 过滤；不引入"每层多实例向量库"的配置复杂度 | 与 nodes 的 `profile_id` 对齐；PRD-06 身份模型每次调用显式携带 profile_id，天然匹配 |
 | D6（v2 新增） | **Tier-3 隔离图谱 = 第二个 GraphStore 命名实例**（embedded 下独立 SQLite 文件，PG 下独立 schema）；注册表支持按层命名多实例（`graph.main` / `graph.isolated`） | design/02 §5 承诺的是物理隔离，分区键降级会破坏"不可反向污染"的叙事；接口不变，只是注册表多一个名字 |
@@ -37,7 +38,7 @@
 | FR-8.3 | embedded 驱动四件：`lancedb_embedded` / `sqlite_graph`（自建邻接表）/ `sqlite_meta` / `bge_m3_onnx`（模型文件首次运行下载 ~543MiB（int8 量化 ONNX，实测），进度可见；另有 `synthetic` 测试 embedder） | P0 |
 | FR-8.4 | 第二驱动：`pgvector` / `pg_graph`（纯关系表，与 sqlite_graph 同 schema 同查询）/ `pg_meta`；Embedder 第二驱动 = `openai_compatible`（任意兼容端点，**只出 dense**，声明缺 `embed.sparse_output`） | P0 |
 | FR-8.5 | **接口契约测试套件**：与驱动无关的行为测试，覆盖附录 B 每个方法（附"方法 ↔ 契约测试"映射表），对 embedded 与 pg 两套驱动各跑一遍；另含 SQLite/PG **迁移对账断言**（同一 schema_version 序列、同字段定义，两侧比对零差异） | P0 |
-| FR-8.6 | capability flags 最小集（11 个）：`vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`。缺能力的驱动组合：启动拒绝或走**明示降级**，降级行为表以附录 C 为准（代码与 config 文档同步） | P0 |
+| FR-8.6 | capability flags 最小集（12 个）：`vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `GRAPH_EDGE_LIST` / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`。缺能力的驱动组合：启动拒绝或走**明示降级**，降级行为表以附录 C 为准（代码与 config 文档同步） | P0 |
 | FR-8.7 | **Schema v1 冻结**（清单见附录 A）：全部结构落地为迁移文件（SQLite 与 PG 各一套，同一 schema_version 序列）；`schema_version` 表 + 纯前向 up 迁移机制；钢印 `cues.host` / `cues.task` 及 `profile_id` / `session_id` / `turn_start` / `turn_end` 字段**可空不可缺席** | P0 |
 | FR-8.8 | docker-compose 骨架（docker preset：`core + vector(pgvector) + pg + embed` 四服务，ollama 可选 profile），每服务 `/healthz`；embedded 单进程 `mnemoseed up` 一条命令起 daemon 骨架（全部驱动内嵌，无外部依赖，无业务逻辑） | P0 |
 
@@ -168,9 +169,12 @@
 | as_of(timestamp, filter) | 时间点回放查询（双时态） | 检索 FR-3.9 |
 | batch_update_weights(updates[]) | 批量衰减重算（10 万级 < 60s，NFR-4.1） | Decay |
 | query_intentions(status, due_before) | pending INTENTION 到期查询 | 调度器 FR-3.15 |
+| list_edges(filter, page) | **批量边列举**（v1.1 修订，2026-08-13）支撑 console Graph View；过滤字段：profile_id / 节点类型 / 时间窗 / Tier / 最小边权；分页 + 稳定排序；每项返回边 id、端点、类型（`relation` / `cooccurrence`）、权重、时间戳 | console Graph View |
 | capabilities() | 自报能力集 | 启动校验 |
 
 注：图谱中心性（重排公式 δ 项）由检索侧基于 traverse 结果端侧计算，M0 不引入独立中心性查询。
+
+注（v1.1 修订，2026-08-13）：`list_edges` 在 `sqlite_graph` 与 `pg_graph` **两者都要求实现**，各配契约测试（AC-3）。新能力旗标 `GRAPH_EDGE_LIST` 遵循附录 C 的降级语义：缺该能力的驱动将 console 图谱降级为经 `traverse()` 逐节点取边（批量边视图不可用），并打显式启动警告。
 
 ### B.3 MetaStore
 
@@ -209,6 +213,7 @@
 | `vector.hybrid_search` | 同上（dense-only） | 降级 + 启动警告 |
 | `vector.snapshot` | 梦境快照退化为 turn_range 逻辑隔离，隔离强度降级警告 | 降级 + 启动警告 |
 | `graph.cooccurrence_edges` | 重排丢 ε 共现项，检索质量警告 | 降级 + 启动警告 |
+| `GRAPH_EDGE_LIST` | console Graph View 批量边列表降级为经 `traverse()` 逐节点取边，console 图谱性能警告 | 降级 + 启动警告 |
 | `meta.concurrent_readers` | console 读取串行化，并发性能警告 | 降级 + 启动警告 |
 | `embed.batch` | 向量化逐条执行，吞吐警告 | 降级 + 启动警告 |
 

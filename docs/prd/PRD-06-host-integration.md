@@ -1,7 +1,7 @@
 # PRD-06 · Host Integration & Install Experience (daemon + installer + Tier 1 host adapters)
 
 > Design doc: [06-host-integration](../design/06-host-integration.md)
-> Milestone: M1 · Estimate 9.5 days (revised after the 2026-08-08 empirical host research)
+> Milestone: M1 · Estimate 9.5 days (revised after the 2026-08-08 empirical host research) · v1.1 · 2026-08-13
 
 ## 1. Goals
 
@@ -34,7 +34,8 @@ One command, three minutes, zero accounts: install MnemoSeed into every AI host 
 | FR-6.6 | `mnemoseed doctor`: daemon alive / port / embedding load / round-trip read-write test / host registration in effect; each failed item gets a one-line fix command | P0 |
 | FR-6.7 | `mnemoseed uninstall`: per-host deregistration (backup restoration or precise removal), stop the daemon, keep data by default with the path made explicit, delete only with --purge | P1 |
 | FR-6.8 | Single source of truth for configuration: `~/.mnemoseed/config.toml`; host side keeps only a thin registration | P0 |
-| FR-6.9 | First-time LLM setup wizard (within the setup flow): guides dream-model configuration in the recommended order ① OAuth (reuse the host's local login state: Codex / Grok, both ToS-allowed; Anthropic subscriptions not reused; Chinese users may choose CLI providers such as MiniMax/Kimi, with an explicit data-residency-exit notice shown when selected) ② bring-your-own API key (any OpenAI-compatible endpoint, e.g. Fireworks) ③ the advanced offline track (Ollama, ≤14B quantized model, with a distillation-quality warning); config.toml is written only after connectivity passes; implements the PRD-02 FR-2.14 role routing | P0 |
+| FR-6.9 | First-time LLM setup wizard (a post-setup step of `mnemoseed onboard`, FR-6.10): guides dream-model configuration in the recommended order ① OAuth (reuse the host's local login state: Codex / Grok, both ToS-allowed; Anthropic subscriptions not reused; Chinese users may choose CLI providers such as MiniMax/Kimi, with an explicit data-residency-exit notice shown when selected) ② bring-your-own API key (any OpenAI-compatible endpoint, e.g. Fireworks) ③ the advanced offline track (Ollama, ≤14B quantized model, with a distillation-quality warning); config.toml is written only after connectivity passes; implements the PRD-02 FR-2.14 role routing | P0 |
+| FR-6.10 | `mnemoseed onboard`: a guided, step-by-step aggregate over the existing primitives — ① owner account setup → ② storage preset choice → ③ dream LLM wizard (FR-6.9) → ④ host link → ⑤ autostart → ⑥ doctor all-green. Rules: ① shares **one** backend onboard service with the console setup wizard — no parallel logic (the `/api/v1/setup` endpoint stays exact-once); ② the LLM wizard is a POST-setup step (the wizard keeps its connectivity-test-before-persist behavior); ③ every step is skippable and resumable — skipping the LLM step yields a bootable capture-only daemon, documented in the wizard; ④ the host-link step reuses the install backup + diff preview + per-item confirmation discipline unchanged (FR-6.1); ⑤ TTFM < 3 min remains the happy-path target and each step is timeboxed; ⑥ config operations are loopback-only — against a non-loopback baseurl they fail with a clear error | P0 |
 
 ## 4. Non-Functional Requirements
 
