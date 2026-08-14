@@ -113,7 +113,7 @@ Paired with the server-side **idempotent dedup** of `memory.remember` (Hebbian n
 
 ---
 
-## 2.6 Profile Identity Model: Credentials Carried Explicitly (finalized by Jinhao, 2026-08-08)
+## 2.6 Profile Identity Model: Credentials Carried Explicitly (finalized 2026-08-08)
 
 **Principle: explicit credentials > runtime inference. The daemon only verifies; it never guesses.**
 
@@ -141,7 +141,7 @@ flowchart LR
 
 ---
 
-## 2.7 Account Layer (User) & First-Registration Flow (finalized by Jinhao, 2026-08-08)
+## 2.7 Account Layer (User) & First-Registration Flow (finalized 2026-08-08)
 
 The full hierarchy of the identity model: **User (account) → Profiles → agent tokens**.
 

@@ -157,7 +157,7 @@ The visualization and management UI for the soul model (for the model itself, se
 - sequencing: **W1** (ConfigWriteService + console write ops + Audit + Settings + ⑧) and **W2** (CLI parity verbs) run **in parallel with PRD-04**; **W3** (GraphStore port extension + Graph View build + demo-seeding) starts **after PRD-04 lands**. The M1 read-only core (Dashboard / Memory Browser / Dream panel / Conflicts) ships first because M1's `dream --once` review discipline cannot wait for the write side;
 - **console-COMPLETE (read + write, pages ①–⑩) is a hard pre-marketing gate**: no marketing demo-video production until console-COMPLETE + CLI parity + onboard all pass ([PRD-07 G-AC1..7](../prd/PRD-07-console.md)).
 
-## 4. Cloud Admin Plane (finalized by Jinhao, 2026-08-08)
+## 4. Cloud Admin Plane (finalized 2026-08-08)
 
 The official cloud adds one more layer, the **system administrator** (the operator themselves), a fully separate interface from the user console (`admin.` subdomain + separate admin credentials, outside the user account system).
 

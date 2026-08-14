@@ -5,7 +5,7 @@
 
 ---
 
-## 1. Storage Layer: Ports & Adapters Pluggable Architecture (2026-08-08 upgrade, finalized by Jinhao)
+## 1. Storage Layer: Ports & Adapters Pluggable Architecture (2026-08-08 upgrade, finalized)
 
 The storage layer is upgraded from "local/cloud either-or" to **interfaces + a driver registry**: four port interfaces are defined, each backed by a driver registry; the user picks a driver per layer in config.toml.
 
@@ -16,7 +16,7 @@ The storage layer is upgraded from "local/cloud either-or" to **interfaces + a d
 | `MetaStore` | Config, score pool, watermark, audit | SQLite | Postgres |
 | `Embedder` | Embedding | **bge-m3 (ONNX runtime, ~543MiB int8-quantized as measured, MIT license)** | embeddinggemma-300m (the gemma_local driver is kept; users must accept the Gemma ToU themselves) / any OpenAI-compatible embedding API / Ollama |
 
-**Default-stack selection record (finalized by Jinhao on 2026-08-08)**:
+**Default-stack selection record (finalized 2026-08-08)**:
 - **LanceDB**: purely embedded single-file, Rust kernel, columnar + metadata filtering + native hybrid-retrieval support, light dependencies; Chroma's dependency chain is too heavy and conflicts with TTFM<3min, so it is kept as a backup driver;
 - **bge-m3**: MIT license with zero copyleft obligations, publicly downloadable on HF (not gated), strong on both Chinese and English among 100+ languages, 8192-token context, and emits dense+sparse in one pass (a free bonus hybrid-retrieval channel). embeddinggemma-300m is slightly better performing (MTEB Multilingual v2 61.15, official figures) but has three product-level vetoes: HF gated download kills TTFM, the Gemma ToU §3.1 license-copyleft obligation, and §3.2 Google reserving remote-restriction usage rights — contradicting the "you own your memories" narrative;
 - **SQLite-Graph**: the current query patterns (1-2 hop expansion + version-chain backtracking) are within SQLite's reach; re-evaluate once real-scale data such as Kùzu exists;
@@ -27,7 +27,7 @@ The storage layer is upgraded from "local/cloud either-or" to **interfaces + a d
 1. **Capability flags**: backends are not equal — Freshness Guard depends on metadata time filtering, and dream snapshots depend on MVCC/snapshots. Each driver declares its capability set; the daemon validates at startup, and missing capabilities take **explicitly-marked degraded paths** (e.g., for backends without snapshots, the dream falls back to `turn_range` logical isolation with a warning); never fail silently;
 2. **preset + per-layer override**: `embedded` (fully embedded, zero dependencies; the personal default) / `docker` (compose full stack) / `custom` (geek per-layer self-selection). The original `STORAGE_MODE` environment variable is preserved as the preset shortcut.
 
-**M0 scope discipline (finalized by Jinhao)**: fix the interfaces; implement only **two drivers per interface first — the embedded default + a Postgres-family one**. The second driver exists to empirically prove the interface's portability, preventing the interface from being captured by the first implementation; the remaining drivers are open to community contribution.
+**M0 scope discipline (finalized 2026-08-08)**: fix the interfaces; implement only **two drivers per interface first — the embedded default + a Postgres-family one**. The second driver exists to empirically prove the interface's portability, preventing the interface from being captured by the first implementation; the remaining drivers are open to community contribution.
 
 **The cloud topology is unchanged**: when cloud-hosted, each layer points to managed Postgres (pgvector + pg_graph) / an embedding API / dream routing inside the TEE (valid `STORAGE_MODE` values today: embedded/docker/custom; a cloud preset is reserved).
 
