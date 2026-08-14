@@ -28,7 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from mnemoseed.config import LLM_ROLES, Config
+from mnemoseed.config import LEGACY_LOCAL_TRACK_ROLE, LLM_ROLES, LOCAL_TRACK_DEPRECATION, Config
 from mnemoseed.configwrite.service import ConfigWriteError, ConfigWriteService
 from mnemoseed.llm.drivers.oauth import SUPPORTED_PROVIDERS, OAuthLLM
 from mnemoseed.llm.registry import LLM_DRIVERS, LLMRegistry
@@ -102,8 +102,16 @@ class LLMAdminService:
     # ---------------------------------------------------------------- read
 
     def routes(self) -> dict[str, Any]:
-        """Per-role route + connectivity + the driver catalog, for the wire."""
+        """Per-role route + connectivity + the driver catalog, for the wire.
+
+        ``roles`` keeps the backward-compatible descriptor list; the new
+        ``routes`` map adds the RESOLVED defaults chain per role: top-level
+        fields are explicit-only (None when the file pins nothing) and
+        ``effective`` carries the merged values a fresh load would apply
+        (E1-1 hot-apply readiness).
+        """
         roles: list[dict[str, Any]] = []
+        routes: dict[str, Any] = {}
         for role in LLM_ROLES:
             cfg = self._config.llm.get(role)
             if cfg is None:
@@ -121,8 +129,23 @@ class LLMAdminService:
                     "connectivity": self._connectivity(role),
                 }
             )
+            routes[role] = {
+                "driver": table.get("driver"),
+                "model": table.get("model"),
+                "base_url": table.get("base_url"),
+                "api_key_env": table.get("api_key_env"),
+                "provider": table.get("provider"),
+                "effective": {
+                    "driver": cfg.driver,
+                    "model": cfg.model,
+                    "base_url": cfg.params.get("base_url"),
+                    "api_key_env": cfg.params.get("api_key_env"),
+                    "provider": cfg.params.get("provider"),
+                },
+            }
         return {
             "roles": roles,
+            "routes": routes,
             "drivers": [
                 {"name": info.name, "description": info.description} for info in self._registry.catalog()
             ],
@@ -177,6 +200,8 @@ class LLMAdminService:
         signature (driver + model + base_url + api_key_env + provider) passed
         within the grace window (see :class:`LLMTestRequiredError`).
         """
+        if role == LEGACY_LOCAL_TRACK_ROLE:
+            raise LLMAdminError(LOCAL_TRACK_DEPRECATION)
         if role not in LLM_ROLES:
             raise LLMAdminError(f"unknown llm role {role!r} (choose from: {', '.join(LLM_ROLES)})")
         current = self._config.llm[role]
@@ -279,6 +304,8 @@ class LLMAdminService:
         a failed HealthReport instead) so the console test buttons always
         render a typed inline result.
         """
+        if role == LEGACY_LOCAL_TRACK_ROLE:
+            return HealthReport(ok=False, detail={"error": LOCAL_TRACK_DEPRECATION})
         if role not in LLM_ROLES:
             return HealthReport(ok=False, detail={"error": f"unknown llm role {role!r}"})
         try:

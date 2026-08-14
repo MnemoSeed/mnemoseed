@@ -428,3 +428,20 @@ tr:last-child td { border-bottom: none; }
 .auth-panel { max-width: 460px; margin: 2rem auto; }
 .auth-panel .toolbar { justify-content: flex-end; }
 .auth-panel .error-inline { margin-bottom: 0.6rem; }
+
+/* Models & Routing (模型路由配置-UX §11): provider picker cards + wizard steps */
+.wizard-provider-card {
+  display: block;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+  cursor: pointer;
+}
+.wizard-provider-card.selected { border-color: var(--accent); }
+.wizard-provider-card input { accent-color: var(--accent); margin-right: 0.4rem; }
+.wizard-provider-title { display: block; font-weight: 600; margin-bottom: 0.15rem; }
+.wizard-step-active { font-weight: 600; color: var(--accent); }
+.key-teaching { margin-top: 0.45rem; }
+.wizard-share { display: block; margin: 0.8rem 0; }
+.wizard-share input { accent-color: var(--accent); margin-right: 0.4rem; }
+details.key-teaching > summary { cursor: pointer; color: var(--text-dim); }

@@ -274,7 +274,15 @@ const state = {
   },
   review: { runId: null, data: null },
   conflicts: { data: null },
-  llm: { routes: null, oauth: null, config: null, editingRole: null, message: null, probeOk: {} },
+  llm: {
+    routes: null,
+    oauth: null,
+    config: null,
+    editingRole: null,
+    message: null,
+    probeOk: {},
+    wizard: null,
+  },
   profilesPage: { tokens: {} },
   settings: { config: null, versions: null, message: null },
   audit: { filters: {}, offset: 0, limit: 50, data: null },
@@ -448,6 +456,155 @@ async function setupLoginAndDreamModels(credentials) {
   await showDreamSetup();
 }
 
+// ---------------------------------------------------------------- models & routing (模型路由配置-UX §11)
+// The five provider cards shared by the first-run wizard and the ⑧ editor.
+// Curated model suggestions exist only where the ids were verified against the
+// live catalog (Fireworks) — never publish unverified ids (D9). Key values
+// never appear on this page: only env-var NAMES.
+const LLM_PROVIDERS = [
+  {
+    id: "fireworks",
+    label: "Fireworks (recommended)",
+    driver: "openai_compatible",
+    baseUrl: "https://api.fireworks.ai/inference/v1",
+    keyEnv: "FIREWORKS_API_KEY",
+    keyUrl: "https://app.fireworks.ai/settings/users/api-keys",
+    note: "Recommended starting point — MnemoSeed's default models run here.",
+    suggestions: {
+      deep_reflection: "accounts/fireworks/models/kimi-k3",
+      short_increment: "accounts/fireworks/models/deepseek-v4-flash-0731",
+    },
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    driver: "openai_compatible",
+    baseUrl: "https://openrouter.ai/api/v1",
+    keyEnv: "OPENROUTER_API_KEY",
+    keyUrl: "https://openrouter.ai/settings/keys",
+    note: "One API key, hundreds of models from many labs.",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic (Claude)",
+    driver: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    keyEnv: "ANTHROPIC_API_KEY",
+    keyUrl: "https://platform.claude.com/settings/keys",
+    note: "Requires an Anthropic API key from platform.claude.com.",
+  },
+  {
+    id: "ollama",
+    label: "Ollama on this computer",
+    driver: "ollama",
+    baseUrl: "http://localhost:11434",
+    keyEnv: "",
+    note: "Free and offline. Runs entirely on this machine; lower synthesis quality.",
+  },
+  {
+    id: "other",
+    label: "Another OpenAI-compatible API",
+    driver: "openai_compatible",
+    baseUrl: "",
+    keyEnv: "",
+    note: "Point at any other endpoint that speaks the OpenAI chat API.",
+  },
+];
+
+// The env-var NAME each dream role falls back to when no provider default is in
+// play (only names — the values live in the daemon's own environment).
+const LLM_ROLE_KEY_ENV = {
+  deep_reflection: "MNEMOSEED_DEEP_REFLECTION_API_KEY",
+  short_increment: "MNEMOSEED_SHORT_INCREMENT_API_KEY",
+};
+
+const LLM_ROLE_SUBTITLES = {
+  deep_reflection:
+    "The careful model. Reads your recent sessions and writes the distilled facts into long-term memory. Use the strongest model you can afford here.",
+  short_increment:
+    "The quick model. Handles the frequent small consolidation passes. Use a fast, low-cost model.",
+};
+
+function llmProviderById(id) {
+  return LLM_PROVIDERS.find((provider) => provider.id === id) || null;
+}
+
+function llmProviderFor(driver, providerName) {
+  if (providerName) {
+    const byName = llmProviderById(providerName);
+    if (byName) return byName;
+  }
+  return (
+    LLM_PROVIDERS.find((provider) => provider.driver === driver && provider.id !== "other") || null
+  );
+}
+
+function llmEffectiveBaseUrl(role) {
+  // The daemon may soon carry an `effective` field per role; until then the
+  // explicit route wins, then the provider default (defensive).
+  if (role.effective && role.effective.base_url) return role.effective.base_url;
+  if (role.base_url) return role.base_url;
+  const provider = llmProviderFor(role.driver, role.provider);
+  return provider ? provider.baseUrl : "";
+}
+
+function llmEffectiveKeyEnv(role) {
+  if (role.effective && role.effective.api_key_env) return role.effective.api_key_env;
+  if (role.api_key_env) return role.api_key_env;
+  const provider = llmProviderFor(role.driver, role.provider);
+  if (provider && provider.keyEnv) return provider.keyEnv;
+  return LLM_ROLE_KEY_ENV[role.role] || "";
+}
+
+// "fully offline" is a derived state, never a stored flag (§6.5): it holds only
+// when every dream role serves from the local ollama driver. The effective
+// driver (resolved defaults) wins when the route payload carries it.
+function isFullyOffline(roles) {
+  const dreamRoles = (roles || []).filter((role) => LLM_ROLE_SUBTITLES[role.role]);
+  return (
+    dreamRoles.length > 0 &&
+    dreamRoles.every((role) => {
+      const driver = role.effective && role.effective.driver ? role.effective.driver : role.driver;
+      return driver === "ollama";
+    })
+  );
+}
+
+function cap(word) {
+  return word ? word[0].toUpperCase() + word.slice(1) : word;
+}
+
+// The plain-language connectivity-probe mapper (§7.1). The fallback always
+// carries the raw driver error so a typed failure is never hidden.
+function llmProbeMessage(probe, payload, provider) {
+  if (probe.ok) {
+    return `Connected — key in ${payload.api_key_env || "your environment"} works.`;
+  }
+  const detail = probe.detail;
+  const errorText =
+    detail && typeof detail === "object" && !Array.isArray(detail)
+      ? String(detail.error || JSON.stringify(detail))
+      : String(detail || "");
+  const name = provider ? provider.label.replace(" (recommended)", "") : "the endpoint";
+  const base = payload.base_url || (provider ? provider.baseUrl : "");
+  const keyEnv = payload.api_key_env || "";
+  if (/401|403/.test(errorText)) {
+    const where = provider && provider.keyUrl ? provider.keyUrl : "the provider's site";
+    return `The provider rejected the key in ${keyEnv} — it's missing, wrong, or expired. Create a new one at ${where}, set ${keyEnv}, and restart MnemoSeed, then test again.`;
+  }
+  if (payload.driver === "ollama") {
+    return `Can't reach Ollama at ${base} — is the Ollama app running? Install from ollama.com, then pull a model (ollama pull llama3.1:8b).`;
+  }
+  if (/timeout|timed out/i.test(errorText)) {
+    return `Timed out talking to ${name}. The endpoint may be slow or blocked — check ${base} and try again.`;
+  }
+  if (/unknown llm driver|no such driver|not built in/i.test(errorText)) {
+    return `That connection type isn't built in — go back and pick a provider.`;
+  }
+  return `Couldn't reach ${name}. Check your internet connection or firewall, then try again. (${errorText})`;
+}
+
+// ---------------------------------------------------------------- first-run dream wizard (§11.1)
 async function showDreamSetup() {
   authViewKind = "dream";
   document.title = "MnemoSeed console — dream model";
@@ -468,115 +625,300 @@ async function showDreamSetup() {
   }
   state.llm.routes = routes;
   state.llm.oauth = oauth;
-  if (view) view.innerHTML = dreamSetupHtml(routes, oauth);
+  state.llm.wizard = {
+    step: 1,
+    providerId: null,
+    oauthProvider: null,
+    model: "",
+    baseUrl: "",
+    keyEnv: "",
+    share: false,
+    probeOk: false,
+    models: [],
+  };
+  if (view) view.innerHTML = wizardStep1Html(state.llm.wizard);
 }
 
-function dreamSetupHtml(routes, oauth) {
+function renderWizardPanel() {
+  const view = document.getElementById("view");
+  const wizard = state.llm.wizard;
+  if (!view || !wizard) return;
+  if (wizard.step <= 1) view.innerHTML = wizardStep1Html(wizard);
+  else if (wizard.step === 2) view.innerHTML = wizardStep2Html(wizard);
+  else view.innerHTML = wizardStep3Html(wizard);
+}
+
+function wizardStepBar(current) {
+  const steps = ["provider", "key + model", "test & save"];
+  return `<p class="toolbar-note">${steps
+    .map((name, index) =>
+      index + 1 === current
+        ? `<span class="wizard-step-active">step ${index + 1} · ${name}</span>`
+        : `<span class="dim">step ${index + 1} · ${name}</span>`,
+    )
+    .join(" → ")}</p>`;
+}
+
+function wizardOAuthRows(oauth) {
   const providers = (oauth && oauth.providers) || [];
-  const oauthRows = providers.length
-    ? providers
-        .map((entry) => {
-          const live = entry.present === true && entry.expired !== true;
-          const mark = live
-            ? '<span class="badge badge-ok">logged in</span>'
-            : entry.present === true
-              ? '<span class="badge badge-warn">expired</span>'
-              : '<span class="badge">not detected</span>';
-          return `<div class="resolve-row">
-            ${mark} <span class="mono">${esc(entry.provider)}</span>${entry.expires_at ? ` <span class="dim">· ${esc(fmtEpoch(entry.expires_at))}</span>` : ""}
-            <span class="spacer"></span>
-            <button class="btn btn-primary" data-act="llm-wizard-oauth" data-provider="${esc(entry.provider)}" ${live ? "" : "disabled"} title="fill the route below with ${esc(entry.provider)} OAuth">use ${esc(entry.provider)} oauth</button>
-          </div>`;
-        })
-        .join("")
-    : "";
-  const drivers = routes.drivers || [];
-  const driverOptions = drivers
-    .map((d) => `<option value="${esc(d.name)}">${esc(d.name)}</option>`)
+  if (!providers.length) return "";
+  const rows = providers
+    .map((entry) => {
+      const live = entry.present === true && entry.expired !== true;
+      const providerName = cap(entry.provider);
+      const mark = live
+        ? `<span class="badge badge-ok">${providerName} login found — sign in is current.</span>`
+        : entry.present === true
+          ? `<span class="badge badge-warn">${providerName} login found but expired — sign in again with the ${providerName} CLI, then return here.</span>`
+          : `<span class="badge">No ${providerName} login detected on this machine.</span>`;
+      return `<div class="resolve-row">
+        ${mark}
+        <span class="spacer"></span>
+        <button class="btn btn-primary" data-act="wz-oauth" data-provider="${esc(entry.provider)}" ${live ? "" : "disabled"}>Use ${providerName} login</button>
+      </div>`;
+    })
     .join("");
-  return `<div class="auth-panel card">
-    <h2>dream model</h2>
-    <p class="toolbar-note">Owner created. Pick the model the dream pipeline uses to distill memories — or skip and keep the defaults. Routes are editable any time from the Models view.</p>
-    <h3>host OAuth</h3>
-    <p class="toolbar-note">The console only detects whether this machine is already signed in to a provider CLI. Picking one fills the route below — enter the model name your subscription uses, then save. No key value is read, sent, or stored.</p>
-    ${oauthRows || emptyPanel("No host OAuth login detected (~/.codex or ~/.grok).")}
-    <h3>bring your own key</h3>
-    <form data-llm-wizard-form>
-      <div class="filter-grid">
-        <div class="field"><label for="wz-driver">driver</label><select id="wz-driver" name="driver">${driverOptions}</select></div>
-        <div class="field"><label for="wz-model">model</label><input type="text" id="wz-model" name="model" required placeholder="e.g. claude-opus-5" autocomplete="off" /></div>
-        <div class="field"><label for="wz-base-url">base URL</label><input type="text" id="wz-base-url" name="base_url" placeholder="blank = driver default" autocomplete="off" /></div>
-        <div class="field"><label for="wz-apikeyenv">api key env var</label><input type="text" id="wz-apikeyenv" name="api_key_env" placeholder="e.g. ANTHROPIC_API_KEY" autocomplete="off" /></div>
-        <div class="field"><label for="wz-provider">oauth provider</label><input type="text" id="wz-provider" name="provider" placeholder="codex | grok" autocomplete="off" /></div>
-      </div>
-      <div class="toolbar">
-        <button class="btn btn-primary" type="submit">save model</button>
-        <span class="toolbar-note">the daemon reads the key from the named env var at run time</span>
-      </div>
-      <output class="feedback" data-wz-feedback></output>
-    </form>
-    <div class="toolbar"><button class="btn" data-act="llm-wizard-skip">skip — keep defaults</button></div>
+  return `<div data-oauth-panel>
+    <h3>Or reuse a login already on this computer</h3>
+    <p class="toolbar-note">MnemoSeed uses that login's access — you don't paste a key. No key value is read, sent, or stored.</p>
+    ${rows}
   </div>`;
 }
 
-function applyWizardOAuth(provider) {
-  const form = document.querySelector("[data-llm-wizard-form]");
-  if (!form) return;
-  form.elements.driver.value = "oauth";
-  form.elements.provider.value = provider;
-  form.elements.model.placeholder =
-    provider === "codex" ? "e.g. gpt-5.6-codex" : "the model name your grok subscription uses";
-  const modelInput = form.elements.model;
-  modelInput.focus();
-  modelInput.select();
+function wizardProviderCard(provider, wizard) {
+  const active = wizard.providerId === provider.id;
+  return `<label class="wizard-provider-card ${active ? "selected" : ""}">
+    <input type="radio" name="wizard-provider" value="${esc(provider.id)}" ${active ? "checked" : ""} />
+    <span class="wizard-provider-title">${esc(provider.label)}</span>
+    <span class="toolbar-note">${esc(provider.note)}</span>
+  </label>`;
 }
 
-async function submitWizard(form) {
-  const feedback = form.querySelector("[data-wz-feedback]");
+// §4 / §11.1: the Ollama quality hint, shown on every wizard step while the
+// role being configured is served by the local ollama driver.
+function wizardQualityHint(wizard) {
+  if (!wizard || wizard.oauthProvider) return "";
+  const provider = llmProviderById(wizard.providerId);
+  if (!provider || provider.driver !== "ollama") return "";
+  return '<p class="toolbar-note">Lower synthesis quality than cloud models — you accept this for privacy or cost.</p>';
+}
+
+function wizardStep1Html(wizard) {
+  return `<div class="auth-panel card" data-wizard-panel>
+    <h2>dream model</h2>
+    <p class="toolbar-note">Pick the model that distills your sessions into long-term memory. One model gets you started — you can change any role later in Models.</p>
+    ${wizardStepBar(1)}
+    ${wizardOAuthRows(state.llm.oauth)}
+    <h3>Which provider do you use?</h3>
+    <div class="filter-grid">${LLM_PROVIDERS.map((provider) => wizardProviderCard(provider, wizard)).join("")}</div>
+    ${wizardQualityHint(wizard)}
+    <div class="toolbar">
+      <button class="btn" data-act="wz-skip">Skip for now — capture-only (dreaming stays off)</button>
+      <span class="spacer"></span>
+      <button class="btn btn-primary" data-act="wz-next" ${wizard.providerId ? "" : "disabled"}>continue</button>
+    </div>
+  </div>`;
+}
+
+function wizardKeyHint(provider) {
+  if (provider.id === "other") {
+    return `Point at any OpenAI-compatible endpoint. Your memories leave this machine to the provider's servers. Set the key env var — on macOS/Linux: export ${LLM_ROLE_KEY_ENV.deep_reflection}=…; on Windows: setx ${LLM_ROLE_KEY_ENV.deep_reflection} ….`;
+  }
+  return `Create the key at ${provider.keyUrl}, then set ${provider.keyEnv} — on macOS/Linux: export ${provider.keyEnv}=…; on Windows: setx ${provider.keyEnv} …. Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.`;
+}
+
+function wizardKeyField(provider, wizard) {
+  const roleEnv = LLM_ROLE_KEY_ENV.deep_reflection;
+  const value = wizard.keyEnv || provider.keyEnv || "";
+  const placeholder = provider.keyEnv || roleEnv;
+  return `<div class="field"><label for="wz-keyenv">api key env var</label>
+    <input type="text" id="wz-keyenv" name="api_key_env" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off" />
+    <details class="key-teaching">
+      <summary>Your key lives in an environment variable. MnemoSeed reads it from there — you never paste the key here and it is never stored.</summary>
+      <p class="toolbar-note">${esc(wizardKeyHint(provider))}</p>
+    </details>
+  </div>`;
+}
+
+function wizardEndpointField(provider, wizard) {
+  if (provider.id === "other") {
+    return `<div class="field"><label for="wz-base-url">endpoint</label>
+      <input type="text" id="wz-base-url" name="base_url" value="${esc(wizard.baseUrl || "")}" placeholder="https://…/v1" required autocomplete="off" />
+    </div>`;
+  }
+  return `<details class="key-teaching">
+    <summary>Advanced: endpoint</summary>
+    <div class="field"><label for="wz-base-url">endpoint</label>
+      <input type="text" id="wz-base-url" name="base_url" value="${esc(wizard.baseUrl || provider.baseUrl)}" autocomplete="off" />
+      <button class="btn" type="button" data-act="wz-endpoint-reset">${provider.id === "fireworks" ? "reset to Fireworks default" : "reset to default"}</button>
+    </div>
+  </details>`;
+}
+
+function wizardModelOptions(provider, wizard) {
+  const curated = provider.suggestions ? Object.values(provider.suggestions) : [];
+  const catalog = (wizard.models || []).filter((model) => !curated.includes(model));
+  return curated
+    .concat(catalog)
+    .map((model) => `<option value="${esc(model)}"></option>`)
+    .join("");
+}
+
+function wizardStep2Html(wizard) {
+  const provider = llmProviderById(wizard.providerId);
+  const oauthMode = wizard.oauthProvider !== null;
+  const oauthName = cap(wizard.oauthProvider);
+  return `<div class="auth-panel card" data-wizard-panel>
+    <h2>dream model</h2>
+    <p class="toolbar-note">Pick the model that distills your sessions into long-term memory. One model gets you started — you can change any role later in Models.</p>
+    ${wizardStepBar(2)}
+    ${oauthMode ? `<p class="toolbar-note"><span class="badge badge-ok">Using the ${oauthName} login on this machine — no key needed. It refreshes itself while you're signed in.</span></p>` : ""}
+    <form data-llm-wizard-form>
+      ${oauthMode ? "" : provider && provider.driver !== "ollama" ? wizardKeyField(provider, wizard) : ""}
+      ${oauthMode ? "" : provider ? wizardEndpointField(provider, wizard) : ""}
+      ${wizardQualityHint(wizard)}
+      <div class="field"><label for="wz-model">model</label>
+        <input type="text" id="wz-model" name="model" list="wz-models" value="${esc(wizard.model || (provider && provider.suggestions ? provider.suggestions.deep_reflection : ""))}" placeholder="type or pick a model" required autocomplete="off" />
+        <datalist id="wz-models">${provider ? wizardModelOptions(provider, wizard) : ""}</datalist>
+        ${provider && provider.id === "ollama" ? '<span class="toolbar-note">If the model is missing, pull it first: ollama pull llama3.1:8b</span>' : ""}
+        ${provider && !oauthMode && !provider.suggestions ? '<span class="toolbar-note">No models listed — pick a suggestion or type the exact model id.</span>' : ""}
+      </div>
+      <div class="toolbar">
+        <button class="btn" type="button" data-act="wz-back">back</button>
+        <span class="spacer"></span>
+        <button class="btn btn-primary" type="submit">continue</button>
+      </div>
+      <output class="feedback" data-wz-feedback></output>
+    </form>
+  </div>`;
+}
+
+function wizardStep3Html(wizard) {
+  const provider = llmProviderById(wizard.providerId);
+  const oauthMode = wizard.oauthProvider !== null;
+  const summary = oauthMode
+    ? `<span class="badge badge-ok">${cap(wizard.oauthProvider)} login on this machine</span>`
+    : `<span class="badge">${esc(provider ? provider.label : "")}</span>`;
+  return `<div class="auth-panel card" data-wizard-panel>
+    <h2>dream model</h2>
+    <p class="toolbar-note">Pick the model that distills your sessions into long-term memory. One model gets you started — you can change any role later in Models.</p>
+    ${wizardStepBar(3)}
+    <p>${summary} · <span class="mono">${esc(wizard.model)}</span></p>
+    ${wizardQualityHint(wizard)}
+    <form data-llm-wizard-form>
+      <label class="wizard-share">
+        <input type="checkbox" name="wizard-share" ${wizard.share ? "checked" : ""} />
+        <span>also apply to short_increment</span>
+        <span class="toolbar-note">Uses the same provider and key for the quick consolidation model.</span>
+      </label>
+      <div class="toolbar">
+        <button class="btn" type="button" data-act="wz-back">back</button>
+        <span class="spacer"></span>
+        <button class="btn" type="button" data-act="wz-test">Test connection</button>
+        <button class="btn btn-primary" type="submit" ${wizard.probeOk ? "" : "disabled"}>save</button>
+      </div>
+      <output class="feedback" data-wz-feedback></output>
+    </form>
+  </div>`;
+}
+
+function wizardPayload(wizard) {
+  const provider = llmProviderById(wizard.providerId);
+  const oauthMode = wizard.oauthProvider !== null;
+  const payload = {
+    driver: oauthMode ? "oauth" : provider ? provider.driver : "",
+    model: wizard.model.trim(),
+    provider: oauthMode ? wizard.oauthProvider : provider ? provider.id : "",
+  };
+  if (!oauthMode && provider) {
+    const baseUrl = (wizard.baseUrl || provider.baseUrl || "").trim();
+    if (baseUrl) payload.base_url = baseUrl;
+    // ollama needs no key (the field is hidden); every other provider falls
+    // back to its standard env-var name, or the role's when none is in play.
+    const keyEnv =
+      provider.driver === "ollama"
+        ? ""
+        : (wizard.keyEnv || provider.keyEnv || LLM_ROLE_KEY_ENV.deep_reflection).trim();
+    if (keyEnv) payload.api_key_env = keyEnv;
+  }
+  return payload;
+}
+
+function wizardCollect(form, wizard) {
   const data = new FormData(form);
-  const driver = String(data.get("driver") || "").trim();
-  const model = String(data.get("model") || "").trim();
-  if (!driver || !model) {
-    if (feedback) feedback.innerHTML = errorInline("driver and model are required");
-    return;
-  }
-  const payload = { driver, model };
-  for (const name of ["base_url", "api_key_env", "provider"]) {
-    const value = String(data.get(name) || "").trim();
-    if (value) payload[name] = value;
-  }
-  if (feedback) feedback.innerHTML = '<span class="dim">testing connectivity…</span>';
+  wizard.model = String(data.get("model") || "").trim();
+  wizard.baseUrl = String(data.get("base_url") || "").trim();
+  wizard.keyEnv = String(data.get("api_key_env") || "").trim();
+  wizard.probeOk = false;
+}
+
+async function wizardTest(form) {
+  const wizard = state.llm.wizard;
+  if (!wizard) return;
+  const feedback = form.querySelector("[data-wz-feedback]");
+  const payload = wizardPayload(wizard);
+  const provider = llmProviderById(wizard.providerId);
+  const probeLabel = provider ? provider.label.replace(" (recommended)", "") : "the endpoint";
+  if (feedback) feedback.innerHTML = `<span class="dim">Testing connection to ${esc(probeLabel)}…</span>`;
   try {
-    // MUST-FIX 2: connectivity-test-before-persist. The route endpoint rejects
-    // a persist that was not probed first, so probe the exact signature and
-    // refuse to save a failed route.
     const probe = await api("/api/v1/llm/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role: "deep_reflection", ...payload }),
     });
-    if (!probe.ok) {
-      const detail = probe.detail || {};
-      const message =
-        detail && typeof detail === "object" && !Array.isArray(detail)
-          ? detail.error
-          : String(detail || "");
-      if (feedback) {
-        feedback.innerHTML = errorInline(
-          `connectivity test failed${message ? `: ${message}` : ""}`
-        );
-      }
-      return;
+    const message = llmProbeMessage(probe, payload, provider);
+    if (probe.ok) {
+      wizard.probeOk = true;
+      if (probe.detail && Array.isArray(probe.detail.models)) wizard.models = probe.detail.models;
+    } else {
+      wizard.probeOk = false;
     }
-    if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
-    const result = await api("/api/v1/llm/routes/deep_reflection", {
+    if (feedback) {
+      feedback.innerHTML = probe.ok
+        ? `<span class="ok-inline">${esc(message)}</span>`
+        : errorInline(esc(message));
+    }
+  } catch (error) {
+    wizard.probeOk = false;
+    if (feedback) feedback.innerHTML = errorInline(`test failed: ${error.message}`);
+  }
+}
+
+async function wizardSave(form) {
+  const wizard = state.llm.wizard;
+  if (!wizard) return;
+  const feedback = form.querySelector("[data-wz-feedback]");
+  const payload = wizardPayload(wizard);
+  if (!wizard.probeOk) {
+    if (feedback) feedback.innerHTML = errorInline("Test the connection first — a route can only be saved after a passing probe of these exact values.");
+    return;
+  }
+  if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
+  try {
+    await api("/api/v1/llm/routes/deep_reflection", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    finishDreamSetup(`deep reflection → ${result.driver} · ${result.model}`);
+    if (wizard.share) {
+      await api("/api/v1/llm/routes/short_increment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    }
+    const model = wizard.model.trim();
+    finishDreamSetup(
+      wizard.share
+        ? `dream model configured: deep reflection + short increment → ${model}`
+        : `dream model configured: deep reflection → ${model}`,
+    );
   } catch (error) {
-    if (feedback) feedback.innerHTML = errorInline(`save failed: ${error.message}`);
+    if (feedback) {
+      feedback.innerHTML = /HTTP 409/.test(error.message)
+        ? errorInline("Test the connection first — a route can only be saved after a passing probe of these exact values.")
+        : errorInline(`save failed: ${error.message}`);
+    }
   }
 }
 
@@ -2300,16 +2642,18 @@ function llmShellHtml(routes, oauth, message) {
     : "";
   const drivers = routes.drivers || [];
   const roles = routes.roles || [];
+  const offline = isFullyOffline(roles);
   return `${banner}
     <div class="toolbar">
       <button class="btn" data-act="go-home">← dashboard</button>
       <button class="btn" data-act="llm-refresh">Refresh</button>
       <span class="spacer"></span>
-      <span class="toolbar-note">routes reference env-var NAMES — key values never leave the machine</span>
+      <span class="toolbar-note">What each role does, and which model serves it. Key values never appear here — only the env-var names MnemoSeed reads them from.</span>
     </div>
     <div class="card">
       <h2>models &amp; routing</h2>
-      <p class="toolbar-note">per-role dream routes: driver, model, endpoint, and the api-key env-var chain. The connectivity probe is live but cached briefly on the daemon (checked ${esc(fmtEpoch(routes.checked_at))}).</p>
+      ${offline ? '<p><span class="badge badge-ok">fully offline — nothing leaves this machine</span></p>' : ""}
+      <p class="toolbar-note">Model routing is system-scoped — set by the owner/admin and applies to every user.</p>
       ${oauthHintsHtml(oauth)}
       <h3>drivers</h3>
       <p class="badges">${drivers.length ? drivers.map((d) => `<span class="badge" title="${esc(d.description || "")}">${esc(d.name)}</span>`).join(" ") : '<span class="dim">none registered</span>'}</p>
@@ -2323,84 +2667,181 @@ function oauthHintsHtml(oauth) {
   const bits = providers
     .map((entry) => {
       const live = entry.present === true && entry.expired !== true;
-      const cls = live ? "badge-ok" : entry.present === true ? "badge-warn" : "";
-      const label = live
-        ? `${entry.provider}: logged in`
-        : entry.present === true
-          ? `${entry.provider}: expired`
-          : `${entry.provider}: not detected`;
-      return `<span class="badge ${cls}">${esc(label)}</span>`;
+      const state = live ? "logged in" : entry.present === true ? "expired" : "not detected";
+      return `${esc(entry.provider)} — ${state}`;
     })
-    .join(" ");
-  return `<h3>host OAuth</h3><p>${bits}</p>`;
+    .join(" · ");
+  return `<p class="toolbar-note">host logins: ${bits}</p>`;
+}
+
+function llmDriverLabel(role) {
+  if (role.driver === "oauth") return `oauth · ${esc(role.provider || "")}`;
+  return esc(role.driver || "—");
 }
 
 function llmRoleCard(role, drivers) {
   const conn = role.connectivity || {};
   const ok = conn.ok === true;
   const editing = state.llm.editingRole === role.role;
-  const detail = conn.detail;
-  const detailHtml = detail
-    ? ` <span class="mono">${esc(typeof detail === "string" ? detail : JSON.stringify(detail))}</span>`
-    : "";
+  const subtitle = LLM_ROLE_SUBTITLES[role.role] || "";
+  const baseUrl = llmEffectiveBaseUrl(role);
+  const keyEnv = llmEffectiveKeyEnv(role);
+  const roleFallback = LLM_ROLE_KEY_ENV[role.role] || "";
+  const keyLine =
+    roleFallback && roleFallback !== keyEnv ? `key: ${roleFallback} → ${keyEnv}` : `key: ${keyEnv || "—"}`;
   const probe = ok
-    ? `probe: <span class="badge badge-ok">reachable</span>${detailHtml}`
-    : `probe: <span class="badge badge-err">unreachable</span>${detailHtml}`;
-  const envRows = (role.api_key_env || "").split(",").map((name) => name.trim()).filter(Boolean);
-  const unknownDriver = drivers.some((d) => d.name === role.driver) ? null : role.driver;
-  const driverOptions = []
-    .concat(
-      unknownDriver
-        ? [`<option value="${esc(unknownDriver)}" selected>${esc(unknownDriver)} (unknown)</option>`]
-        : [],
-    )
-    .concat(
-      drivers.map(
-        (d) =>
-          `<option value="${esc(d.name)}" ${d.name === role.driver ? "selected" : ""}>${esc(d.name)}</option>`,
-      ),
-    )
-    .join("");
+    ? '<span class="badge badge-ok">connected</span>'
+    : '<span class="badge badge-err">needs attention</span>';
   return `<div class="card">
-    <h2>${esc(role.role)} ${role.explicit ? '<span class="badge badge-accent">configured</span>' : ""}</h2>
+    <h2>${esc(role.role)} ${!role.explicit ? '<span class="badge">defaults</span>' : ""}</h2>
+    ${subtitle ? `<p class="toolbar-note">${esc(subtitle)}</p>` : ""}
+    ${role.driver === "ollama" ? '<p class="toolbar-note">lower synthesis quality than cloud models — you accept this for privacy or cost.</p>' : ""}
     <div class="tiles">
-      ${tile(`<span class="mono">${esc(role.driver || "—")}</span>`, "driver")}
+      ${tile(`<span class="mono">${llmDriverLabel(role)}</span>`, "driver")}
       ${tile(`<span class="mono">${esc(role.model || "—")}</span>`, "model")}
-      ${tile(esc(role.base_url || "default"), "base URL")}
-      ${tile(esc(envRows.join(", ") || "—"), "api key env")}
-      ${tile(esc(role.provider || "—"), "oauth provider")}
+      ${tile(esc(baseUrl || "default"), "endpoint")}
+      ${tile(esc(keyLine), "api key env")}
       ${tile(esc(fmtNum(configRoleMaxTokens(role.role))), "max tokens")}
     </div>
-    <h3>connectivity</h3>
     <div class="toolbar">
       <span>${probe}</span>
       <span class="dim">checked ${esc(fmtEpoch(conn.checked_at))}</span>
       <span class="spacer"></span>
-      <button class="btn" data-act="llm-test" data-role="${esc(role.role)}" title="probe this saved route now">test connection</button>
-      <button class="btn" data-act="llm-edit" data-role="${esc(role.role)}" title="edit this route's config row">${editing ? "cancel edit" : "edit route"}</button>
+      <button class="btn" data-act="llm-test" data-role="${esc(role.role)}" title="probe this saved route now">Test connection</button>
+      <button class="btn" data-act="llm-edit" data-role="${esc(role.role)}" title="edit this route's config row">${editing ? "Cancel edit" : "Edit route"}</button>
     </div>
     <output class="feedback" data-llm-feedback data-feedback-role="${esc(role.role)}"></output>
-    ${editing ? llmEditFormHtml(role, driverOptions) : ""}
+    ${editing ? llmEditFormHtml(role, drivers) : ""}
   </div>`;
 }
 
-function llmEditFormHtml(role, driverOptions) {
+function llmEditorModels(role) {
+  const provider = llmProviderFor(role.driver, role.provider);
+  const curated = provider && provider.suggestions ? Object.values(provider.suggestions) : [];
+  const detail = role.connectivity && role.connectivity.detail;
+  const catalog =
+    detail && Array.isArray(detail.models)
+      ? detail.models.filter((model) => typeof model === "string" && !curated.includes(model))
+      : [];
+  return curated
+    .concat(catalog)
+    .map((model) => `<option value="${esc(model)}"></option>`)
+    .join("");
+}
+
+function llmEditorProviderCard(role, provider, activeProvider) {
+  const selected = activeProvider && activeProvider.id === provider.id;
+  return `<label class="wizard-provider-card ${selected ? "selected" : ""}">
+    <input type="radio" name="llm-provider" value="${esc(provider.id)}" ${selected ? "checked" : ""} />
+    <span class="wizard-provider-title">${esc(provider.label)}</span>
+    <span class="toolbar-note">${esc(provider.note)}</span>
+  </label>`;
+}
+
+// §6.3: in the editor "Reuse <login>" is a provider CARD (only when a live host
+// login was detected) — never a free-text provider field.
+function llmEditorOAuthCard(role, liveOAuth, activeId) {
+  if (!liveOAuth) return "";
+  const providerName = cap(liveOAuth.provider);
+  const cardId = `oauth:${liveOAuth.provider}`;
+  const selected = activeId === cardId;
+  return `<label class="wizard-provider-card ${selected ? "selected" : ""}">
+    <input type="radio" name="llm-provider" value="${esc(cardId)}" ${selected ? "checked" : ""} />
+    <span class="wizard-provider-title">Reuse ${providerName} login</span>
+    <span class="toolbar-note">No key needed — uses the ${providerName} login already on this machine.</span>
+  </label>`;
+}
+
+// The provider card id currently in play for a role: a saved oauth route maps to
+// its "oauth:<provider>" card, a driver/provider route to its matching card.
+function llmActiveProviderId(role) {
+  const route = findLLMRoute(role);
+  if (!route) return "";
+  if (route.driver === "oauth") return `oauth:${route.provider || ""}`;
+  const provider = llmProviderFor(route.driver, route.provider);
+  return provider ? provider.id : "";
+}
+
+// §3.2 morphing: the editor form's fields follow the picked provider card.
+// ollama hides the key block; oauth mode hides key + endpoint; the residency
+// note is "Other"-only. ``morphValues`` (user switched cards) also rewrites the
+// field values to the provider defaults; a plain re-render only enforces the
+// oauth clearing so a save can never pin a key/endpoint to an oauth route.
+function llmApplyEditorProvider(form, activeId, morphValues) {
+  if (!form) return;
+  const isOAuth = String(activeId).startsWith("oauth:");
+  const provider = isOAuth ? null : llmProviderById(activeId);
+  const role = form.dataset.role || "";
+  const driverInput = form.elements.driver;
+  if (driverInput) driverInput.value = isOAuth ? "oauth" : provider ? provider.driver : "";
+  const needsKey = Boolean(provider && provider.keyEnv);
+  const keyField = form.querySelector("[data-key-field]");
+  const keyInput = form.elements.api_key_env;
+  if (keyField) keyField.hidden = isOAuth || !needsKey;
+  if (keyInput) {
+    if (isOAuth || (morphValues && !needsKey)) keyInput.value = "";
+    else if (morphValues && needsKey) keyInput.value = provider.keyEnv || LLM_ROLE_KEY_ENV[role] || "";
+  }
+  const endpointField = form.querySelector("[data-endpoint-field]");
+  const urlInput = form.elements.base_url;
+  if (endpointField) endpointField.hidden = isOAuth;
+  if (isOAuth && urlInput) urlInput.value = "";
+  else if (morphValues && urlInput) urlInput.value = provider ? provider.baseUrl || "" : "";
+  const tokensField = form.querySelector("[data-tokens-field]");
+  if (tokensField) tokensField.hidden = Boolean(provider && provider.driver === "ollama");
+  const residency = form.querySelector("[data-residency-note]");
+  if (residency) residency.hidden = !(provider && provider.id === "other");
+  const teaching = form.querySelector("[data-key-teaching]");
+  if (teaching) teaching.hidden = isOAuth || !needsKey;
+}
+
+// §5: the env-var teaching block under the key field (per-provider commands).
+function llmKeyTeachingHtml(provider, role) {
+  const keyEnv = provider.keyEnv || LLM_ROLE_KEY_ENV[role] || "";
+  if (!keyEnv) return "";
+  const where = provider.keyUrl ? `Create the key at ${provider.keyUrl}, then ` : "";
+  return `<details class="key-teaching" data-key-teaching>
+    <summary>Your key lives in an environment variable. MnemoSeed reads it from there — you never paste the key here and it is never stored.</summary>
+    <p class="toolbar-note">${esc(where)}set ${esc(keyEnv)} — on macOS/Linux: export ${esc(keyEnv)}=…; on Windows: setx ${esc(keyEnv)} …. Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.</p>
+  </details>`;
+}
+
+function llmEditFormHtml(role, drivers) {
   const maxTokens = configRoleMaxTokens(role.role);
+  const isOAuth = role.driver === "oauth";
+  const activeProvider = isOAuth ? null : llmProviderFor(role.driver, role.provider);
+  const activeId = llmActiveProviderId(role);
+  const liveOAuth = (state.llm.oauth && state.llm.oauth.providers || []).find(
+    (entry) => entry.present === true && entry.expired !== true,
+  );
+  const baseUrl = llmEffectiveBaseUrl(role);
+  const keyEnv = llmEffectiveKeyEnv(role);
+  const roleFallback = LLM_ROLE_KEY_ENV[role.role] || "";
+  const keyProvider = activeProvider && activeProvider.keyEnv ? activeProvider : null;
+  const cards =
+    LLM_PROVIDERS.map((provider) => llmEditorProviderCard(role, provider, activeProvider)).join("") +
+    llmEditorOAuthCard(role, liveOAuth, activeId);
   return `<form class="card" data-llm-route-form data-role="${esc(role.role)}">
-    <h3>edit route · ${esc(role.role)}</h3>
+    <h3>Edit route — ${esc(role.role)}</h3>
+    ${isOAuth ? `<p class="toolbar-note">This route uses the ${esc(role.provider || "host")} login on this machine — no key needed. Pick a provider below to change it.</p>` : ""}
+    <input type="hidden" name="driver" value="${isOAuth ? "" : esc(role.driver)}" />
+    <h4>Which provider?</h4>
+    <div class="filter-grid">${cards}</div>
     <div class="filter-grid">
-      <div class="field"><label for="llm-driver-${esc(role.role)}">driver</label><select id="llm-driver-${esc(role.role)}" name="driver">${driverOptions}</select></div>
-      <div class="field"><label for="llm-model-${esc(role.role)}">model</label><input type="text" id="llm-model-${esc(role.role)}" name="model" value="${esc(role.model || "")}" required autocomplete="off" /></div>
-      <div class="field"><label for="llm-url-${esc(role.role)}">base URL</label><input type="text" id="llm-url-${esc(role.role)}" name="base_url" value="${esc(role.base_url || "")}" placeholder="blank = default" autocomplete="off" /></div>
-      <div class="field"><label for="llm-env-${esc(role.role)}">api key env var</label><input type="text" id="llm-env-${esc(role.role)}" name="api_key_env" value="${esc(role.api_key_env || "")}" placeholder="MY_API_KEY" autocomplete="off" /></div>
-      <div class="field"><label for="llm-provider-${esc(role.role)}">oauth provider</label><input type="text" id="llm-provider-${esc(role.role)}" name="provider" value="${esc(role.provider || "")}" placeholder="codex | grok" autocomplete="off" /></div>
-      <div class="field"><label for="llm-tokens-${esc(role.role)}">max tokens</label><input type="number" id="llm-tokens-${esc(role.role)}" name="max_tokens" value="${esc(maxTokens === null ? "" : String(maxTokens))}" min="1" placeholder="blank = role default" autocomplete="off" /></div>
+      <div class="field"><label for="llm-model-${esc(role.role)}">model</label>
+        <input type="text" id="llm-model-${esc(role.role)}" name="model" list="llm-models-${esc(role.role)}" value="${esc(role.model || "")}" placeholder="type or pick a model" required autocomplete="off" />
+        <datalist id="llm-models-${esc(role.role)}">${llmEditorModels(role)}</datalist>
+      </div>
+      <div class="field" data-endpoint-field><label for="llm-url-${esc(role.role)}">endpoint</label><input type="text" id="llm-url-${esc(role.role)}" name="base_url" value="${esc(baseUrl)}" placeholder="blank = provider default" autocomplete="off" /></div>
+      <div class="field" data-key-field><label for="llm-env-${esc(role.role)}">api key env var</label><input type="text" id="llm-env-${esc(role.role)}" name="api_key_env" value="${esc(keyEnv)}" placeholder="${esc(roleFallback || "MY_API_KEY")}" autocomplete="off" />${keyProvider ? llmKeyTeachingHtml(keyProvider, role.role) : ""}</div>
+      <div class="field" data-tokens-field><label for="llm-tokens-${esc(role.role)}">max tokens</label><input type="number" id="llm-tokens-${esc(role.role)}" name="max_tokens" value="${esc(maxTokens === null ? "" : String(maxTokens))}" min="1" placeholder="blank = role default" autocomplete="off" /></div>
     </div>
+    <p class="toolbar-note" data-residency-note hidden>Your memories leave this machine to the provider's servers.</p>
     <div class="toolbar">
-      <span class="toolbar-note">blank base URL / env var / max tokens clears the override, restoring defaults</span>
+      <span class="toolbar-note">Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.</span>
       <span class="spacer"></span>
-      <button class="btn" type="button" data-act="llm-test-edit" data-role="${esc(role.role)}">test connection</button>
-      <button class="btn btn-primary" type="submit">save route</button>
+      <button class="btn" type="button" data-act="llm-test-edit" data-role="${esc(role.role)}">Test connection</button>
+      <button class="btn btn-primary" type="submit">Save route</button>
     </div>
     <output class="feedback" data-llm-feedback></output>
   </form>`;
@@ -2414,6 +2855,12 @@ function renderLLM() {
     return;
   }
   view.innerHTML = llmShellHtml(state.llm.routes, state.llm.oauth, null);
+  if (state.llm.editingRole) {
+    const form = Array.from(view.querySelectorAll("[data-llm-route-form]")).find(
+      (candidate) => candidate.dataset.role === state.llm.editingRole,
+    );
+    if (form) llmApplyEditorProvider(form, llmActiveProviderId(state.llm.editingRole), false);
+  }
   setUpdatedAt();
 }
 
@@ -2443,24 +2890,38 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
   const payload = { role, driver, model, base_url: baseUrl || "" };
   if (apiKeyEnv && String(apiKeyEnv).trim()) payload.api_key_env = String(apiKeyEnv).trim();
   if (provider && String(provider).trim()) payload.provider = String(provider).trim();
-  if (feedbackEl) feedbackEl.innerHTML = '<span class="dim">probing…</span>';
+  const providerMeta = llmProviderFor(driver, provider);
+  const probeLabel = providerMeta ? providerMeta.label.replace(" (recommended)", "") : driver;
+  if (feedbackEl) {
+    feedbackEl.innerHTML = `<span class="dim">Testing connection to ${esc(probeLabel)}…</span>`;
+  }
   try {
     const result = await api("/api/v1/llm/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const detail = String(result.detail && typeof result.detail === "object" ? JSON.stringify(result.detail) : result.detail || "");
     if (result.ok) {
       // A passing probe for the exact current form values arms the save gate.
       state.llm.probeOk[role] = llmProbeSignature(driver, model, baseUrl || "", apiKeyEnv || "", provider || "");
+      // §7.2: the model combobox catalog refreshes from the probe's models list.
+      const models = result.detail && Array.isArray(result.detail.models) ? result.detail.models : null;
+      if (models && models.length) {
+        const datalist = document.querySelector(`datalist[id="llm-models-${role}"]`);
+        if (datalist) {
+          datalist.innerHTML = models
+            .filter((candidate) => typeof candidate === "string")
+            .map((candidate) => `<option value="${esc(candidate)}"></option>`)
+            .join("");
+        }
+      }
     } else {
       delete state.llm.probeOk[role];
     }
     if (feedbackEl) {
       feedbackEl.innerHTML = result.ok
-        ? `<span class="ok-inline">reachable — ${esc(detail)}</span>`
-        : errorInline(`unreachable — ${esc(detail)}`);
+        ? '<span class="badge badge-ok">connected</span>'
+        : errorInline(esc(llmProbeMessage(result, payload, providerMeta)));
     }
   } catch (error) {
     delete state.llm.probeOk[role];
@@ -2490,12 +2951,13 @@ async function saveRoute(role, form) {
   const driver = String(data.get("driver") || "").trim();
   const model = String(data.get("model") || "").trim();
   if (!driver || !model) {
-    if (feedback) feedback.innerHTML = errorInline("driver and model are required to save");
+    if (feedback) feedback.innerHTML = errorInline("pick a provider and model to save — the oauth login route needs no key; choose a provider to change it");
     return;
   }
   const baseUrl = String(data.get("base_url") || "").trim();
   const apiKeyEnv = String(data.get("api_key_env") || "").trim();
-  const provider = String(data.get("provider") || "").trim();
+  const providerRadio = form.querySelector('input[name="llm-provider"]:checked');
+  const provider = providerRadio ? String(providerRadio.value).replace(/^oauth:/, "") : "";
   const rawTokens = String(data.get("max_tokens") || "").trim();
   let maxTokens = null;
   if (rawTokens) {
@@ -2506,7 +2968,7 @@ async function saveRoute(role, form) {
     }
   }
   if (state.llm.probeOk[role] !== llmProbeSignature(driver, model, baseUrl, apiKeyEnv, provider)) {
-    if (feedback) feedback.innerHTML = errorInline("test connection first — a route may only be saved after a passing probe of these exact values");
+    if (feedback) feedback.innerHTML = errorInline("Test the connection first — a route can only be saved after a passing probe of these exact values.");
     return;
   }
   const current = llmRoleConfig(role);
@@ -2632,28 +3094,66 @@ function handleClick(event) {
       const editRole = el.dataset.role;
       if (!editForm) break;
       const editData = new FormData(editForm);
+      const editRadio = editForm.querySelector('input[name="llm-provider"]:checked');
       testRoute(
         editRole,
         String(editData.get("driver") || "").trim(),
         String(editData.get("model") || "").trim(),
         String(editData.get("base_url") || "").trim(),
         String(editData.get("api_key_env") || "").trim(),
-        String(editData.get("provider") || "").trim(),
+        editRadio ? String(editRadio.value).replace(/^oauth:/, "") : "",
         editForm.querySelector("[data-llm-feedback]"),
       );
       break;
     }
-    case "llm-wizard-oauth": {
-      const provider = el.dataset.provider;
-      const entry = (state.llm.oauth && state.llm.oauth.providers || []).find(
-        (candidate) => candidate.provider === provider,
-      );
-      if (!entry || entry.present !== true || entry.expired === true) break;
-      applyWizardOAuth(provider);
+    case "wz-next": {
+      const wizard = state.llm.wizard;
+      if (!wizard || !wizard.providerId) break;
+      wizard.step = 2;
+      renderWizardPanel();
       break;
     }
-    case "llm-wizard-skip":
-      finishDreamSetup("defaults kept — no route was changed; configure one any time in the Models view");
+    case "wz-back": {
+      const wizard = state.llm.wizard;
+      if (!wizard) break;
+      if (wizard.step === 2 && wizard.oauthProvider) {
+        wizard.oauthProvider = null;
+        wizard.step = 1;
+      } else {
+        wizard.step = Math.max(1, wizard.step - 1);
+      }
+      wizard.probeOk = false;
+      renderWizardPanel();
+      break;
+    }
+    case "wz-oauth": {
+      const wizard = state.llm.wizard;
+      if (!wizard) break;
+      const entry = (state.llm.oauth && state.llm.oauth.providers || []).find(
+        (candidate) => candidate.provider === el.dataset.provider,
+      );
+      if (!entry || entry.present !== true || entry.expired === true) break;
+      wizard.oauthProvider = entry.provider;
+      wizard.step = 2;
+      renderWizardPanel();
+      break;
+    }
+    case "wz-test": {
+      const wizardForm = el.closest("form") || document.querySelector("[data-llm-wizard-form]");
+      if (wizardForm) wizardTest(wizardForm);
+      break;
+    }
+    case "wz-endpoint-reset": {
+      const wizard = state.llm.wizard;
+      const provider = wizard ? llmProviderById(wizard.providerId) : null;
+      const form = el.closest("form");
+      if (provider && form && form.elements.base_url) {
+        form.elements.base_url.value = provider.baseUrl || "";
+      }
+      break;
+    }
+    case "wz-skip":
+      finishDreamSetup("Skipped — MnemoSeed keeps capturing sessions, dreaming stays off until a model is configured. You can set one any time in Models.");
       break;
     case "retry":
       render();
@@ -2727,6 +3227,28 @@ function handleChange(event) {
   if (target.dataset && target.dataset.act === "toggle-auto") {
     setAutoTrigger(target.checked === true);
   }
+  if (target.name === "wizard-provider") {
+    const wizard = state.llm.wizard;
+    if (!wizard) return;
+    wizard.providerId = target.value;
+    wizard.oauthProvider = null;
+    renderWizardPanel();
+    return;
+  }
+  if (target.name === "wizard-share") {
+    const wizard = state.llm.wizard;
+    if (wizard) wizard.share = target.checked === true;
+    return;
+  }
+  if (target.name === "llm-provider") {
+    // The editor's provider picker morphs the route fields to the chosen
+    // provider's defaults (oauth card → oauth mode); the provider id itself is
+    // carried by the card, never by a text input.
+    const form = target.closest("form");
+    if (!form) return;
+    llmApplyEditorProvider(form, target.value, true);
+    return;
+  }
   if (target.hasAttribute && target.hasAttribute("data-resolution-branch")) {
     const index = target.dataset.index;
     const scopeInput = document.querySelector(`[data-resolution-scope][data-index="${index}"]`);
@@ -2756,7 +3278,16 @@ function handleSubmit(event) {
   }
   if (form.hasAttribute("data-llm-wizard-form")) {
     event.preventDefault();
-    submitWizard(form);
+    const wizard = state.llm.wizard;
+    if (!wizard) return;
+    if (wizard.step === 2) {
+      wizardCollect(form, wizard);
+      wizard.step = 3;
+      renderWizardPanel();
+    } else if (wizard.step === 3) {
+      wizardSave(form);
+    }
+    return;
   }
   if (form.hasAttribute("data-weight-form")) {
     event.preventDefault();

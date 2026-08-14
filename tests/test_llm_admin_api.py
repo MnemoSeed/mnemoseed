@@ -37,6 +37,7 @@ import pytest
 from _identity_helpers import attach_token
 from fastapi.testclient import TestClient
 
+from mnemoseed.config import DEFAULT_LLM_ROUTES
 from mnemoseed.daemon.app import create_app
 from mnemoseed.llm.registry import LLM_DRIVERS, register
 from mnemoseed.storage.drivers.lancedb_embedded import LanceDbEmbeddedStore
@@ -177,17 +178,26 @@ def test_llm_routes_reports_roles_env_names_and_connectivity(tmp_path, monkeypat
         body = response.json()
         assert body.get("checked_at")
         roles = {r["role"]: r for r in body["roles"]}
-        assert set(roles) == {"deep_reflection", "short_increment", "local_track"}
+        assert set(roles) == {"deep_reflection", "short_increment"}
+        assert "local_track" not in roles  # the legacy role never reaches the wire
         deep = roles["deep_reflection"]
         assert deep["driver"] == "stub"
         assert deep["model"] == "stub"
         assert deep["base_url"] is None  # explicit-only: this role's file row has none
         assert isinstance(deep["connectivity"]["ok"], bool)
         assert deep["connectivity"]["checked_at"]
-        local = roles["local_track"]
-        assert local["base_url"] == "http://127.0.0.1:1"
+        short = roles["short_increment"]
+        assert short["base_url"] is None  # explicit-only: this role's file row has none
         names = {d["name"] for d in body["drivers"]}
         assert {"oauth", "anthropic", "ollama", "openai_compatible", "stub"} <= names
+        # E1-1: the routes map resolves the defaults chain into effective
+        routes = body["routes"]
+        assert set(routes) == {"deep_reflection", "short_increment"}
+        eff_deep = routes["deep_reflection"]["effective"]
+        assert eff_deep["model"] == "stub"
+        assert eff_deep["base_url"] == DEFAULT_LLM_ROUTES["deep_reflection"].params["base_url"]
+        assert eff_deep["api_key_env"] == DEFAULT_LLM_ROUTES["deep_reflection"].params["api_key_env"]
+        assert routes["short_increment"]["effective"]["model"] == "stub"
 
 
 def test_llm_routes_auth_gate_503_pre_setup_and_401_post(tmp_path, monkeypatch) -> None:
@@ -377,6 +387,14 @@ def test_llm_set_role_unknown_role_is_422(tmp_path, monkeypatch) -> None:
         response = client.post("/api/v1/llm/routes/no_such_role", json={"driver": "stub", "model": "m"})
         assert response.status_code == 422
         assert "unknown llm role" in response.json()["detail"]
+
+
+def test_llm_set_role_local_track_is_422_with_deprecation_wording(tmp_path, monkeypatch) -> None:
+    """E1-1: the removed offline role is rejected with deprecation wording."""
+    with _client(tmp_path, monkeypatch) as client:
+        response = client.post("/api/v1/llm/routes/local_track", json={"driver": "stub", "model": "m"})
+        assert response.status_code == 422
+        assert "deprecated" in response.json()["detail"].lower()
 
 
 def test_llm_set_role_unknown_driver_is_422(tmp_path, monkeypatch) -> None:

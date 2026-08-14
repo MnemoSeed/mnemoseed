@@ -21,11 +21,13 @@
 |---|---|---|
 | `openai_compatible` | `POST /chat/completions`，Bearer key；探测 = `GET /models` | **Fireworks** 与 **OpenRouter**（均为 OpenAI 兼容）以及任何其他兼容端点 |
 | `anthropic` | Messages API `POST /v1/messages`，`x-api-key` + `anthropic-version`；探测 = `GET /v1/models` | **Anthropic**（原生，已存在——无需新建） |
-| `ollama` | 原生 `POST /api/chat`，无 key；探测 = `GET /api/tags` | 本机 **Ollama**（离线轨） |
+| `ollama` | 原生 `POST /api/chat`，无 key；探测 = `GET /api/tags` | 本机 **Ollama**（本地运行、无需账号；"全离线"是角色构成的派生真相，见下注） |
 | `oauth` | 复用宿主 `~/.codex/auth.json` / `~/.grok/auth.json`，OIDC 刷新 | 仅限 Codex / Grok 宿主登录（`SUPPORTED_PROVIDERS = ("codex", "grok")`） |
 | `stub` | 确定性离线桩（仅测试 / 人工评审阶段使用） | 永不该是用户可见的服务商 |
 
 **不存在** Fireworks 或 OpenRouter 驱动，也**无需**新建——两者都由 `openai_compatible` 承担。原生 `anthropic` 驱动存在。**没有**目录接口；目录搭在探测结果上，成功时返回 `detail["models"]`（`openai_compatible.py:88`、`anthropic.py:95`、`ollama.py:78`）。
+
+**角色模型（最终定案）**：梦境引擎只有两个角色——`deep_reflection`（长背景深睡反思）与 `short_increment`（短增量合并）。两个角色各自**可独立指向任意服务商**（Fireworks / OpenRouter / Anthropic / Ollama / 其他 OpenAI-compatible），云 + 本地混搭是完全合法的配置，永不阻断或羞辱。`local_track` **不再是角色**——仅作为**已弃用配置键**保留：接受但带警告、引擎内无消费者。**离线是派生真相**：当所有已配置角色都解析为本地 `ollama` 驱动时，页面显示 "fully offline" 徽章；任一云角色存在即不显示（不给虚假隐私感）；没有离线开关（§8 D10、§8.1）。
 
 ### 2.2 路由 payload 语义（`admin.py:104-130`）
 
@@ -58,11 +60,11 @@
 
 | 承诺 | 代码现实 |
 |---|---|
-| FR-6.9：向导顺序 ① OAuth ② BYOK ③ 离线轨，作为*引导式序列* | 向导把 OAuth 与 BYOK 并排展示；"use X OAuth" 按钮只是预填同一个表单。没有序列化引导，没有"离线轨"呈现。 |
+| FR-6.9：向导顺序 ① OAuth ② BYOK ③ 离线轨（*定案后改写*：③ 离线轨并入服务商卡片——Ollama 卡 + 质量提示，无独立离线序列，见 §8.1） | 向导把 OAuth 与 BYOK 并排展示；"use X OAuth" 按钮只是预填同一个表单。没有序列化引导。 |
 | FR-6.9："中国用户可选 MiniMax/Kimi 等 CLI 服务商，选择时明示数据出境提示" | **未实现。** 没有任何 MiniMax/Kimi 服务商，任何地方都没有出境提示。 |
 | FR-6.9："Anthropic 订阅明确不做" | 代码正确——`oauth` 只支持 codex/grok；`anthropic` 仅 key。一致。 |
-| design/02 §6：默认 deep_reflection → Kimi K3（Fireworks），short_increment → DeepSeek V4 Flash（Fireworks），local_track → ≤14B Ollama | 与 `DEFAULT_LLM_ROUTES`（`config.py:138-164`）一致。Fireworks model id 已在配置注释中核实；视为可信默认。 |
-| PRD-07 G-AC2：⑧ 配置全部三个角色 | 是；**向导**只配置 deep_reflection。有意的但未成文——见 §8 决策 D4。 |
+| design/02 §6：默认 deep_reflection → Kimi K3（Fireworks），short_increment → DeepSeek V4 Flash（Fireworks）；**local_track 默认路由删除**（角色模型定案，§8 D10） | 与 `DEFAULT_LLM_ROUTES`（`config.py:138-164`）一致；当前仍含 local_track 条目，工程批次一并移除（§8.1）。Fireworks model id 已在配置注释中核实；视为可信默认。 |
+| PRD-07 G-AC2：⑧ 配置全部两个角色（deep_reflection / short_increment） | 是；**向导**只配置 deep_reflection（+ D4 共享复选框）。有意的但未成文——见 §8 决策 D4。 |
 
 ---
 
@@ -71,6 +73,8 @@
 一个组件统领全部三个表面（§10）。它的职责只有一件事：**"我有一个服务商账号——把它配好，让我的梦境能跑起来。"** 它从不同用户索要 driver 名，对当前选择用不到的字段绝不显示，也绝不让任何默认值隐藏。
 
 ### 3.1 第一步——服务商选择器（品牌优先，驱动无关）
+
+**先有角色，再有服务商。** 服务商卡片只回答"用哪个服务商"，不回答"干什么"——它们对两个梦境角色（`deep_reflection` / `short_increment`）同样有效，被编辑的是**正在编辑的那个角色**。⑧ 编辑器入口永远是角色卡片（§4 的一句话说明）：点 "Edit route" 后，该角色的路由编辑器才展开服务商选择器；向导则默认编辑 `deep_reflection`，配 D4 定案的"also apply to short_increment"共享复选框。本设计**没有第三个角色、也没有"第三张卡"**——不存在 `local_track` 角色卡（§2.1 角色模型）。
 
 一组单选卡片，每张卡对应一条可用路径。每张卡用一句话说明"你需要什么"：
 
@@ -118,11 +122,14 @@
 
 用于 ⑧ 页（角色卡片副标题）与向导（一行说明）。
 
+梦境引擎只有两个角色（§8 D10）。每个角色一句大白话说明，⑧ 页作为角色卡片副标题、向导作为一行说明。两个角色可各自独立选择服务商，互不绑定——云 + 本地混搭是正常用法。
+
 | 角色 | 一句话说明（UI 字符串） | 推荐搭配 |
 |---|---|---|
-| deep_reflection | "The careful model. Reads your recent sessions and writes the distilled facts into long-term memory. Use the strongest model you can afford here." | Fireworks kimi-k3（默认）· Anthropic claude-opus 档 · 预算内任何强云模型 |
-| short_increment | "The quick model. Handles the frequent small consolidation passes. Use a fast, low-cost model." | Fireworks deepseek-v4-flash-0731（默认）· 快速/低成本的云模型 |
-| local_track | "The private model. Runs on this computer, offline, for free. Lower synthesis quality, but nothing leaves the machine." | Ollama + `llama3.1:8b`（默认）——须先 pull |
+| deep_reflection | "The careful model. Reads your recent sessions and writes the distilled facts into long-term memory. Use the strongest model you can afford here." | Fireworks kimi-k3（默认）· Anthropic claude-opus 档 · 预算内任何强云模型（可选 Ollama） |
+| short_increment | "The quick model. Handles the frequent small consolidation passes. Use a fast, low-cost model." | Fireworks deepseek-v4-flash-0731（默认）· 快速/低成本云模型（可选 Ollama） |
+
+**质量提示规则**：任一角色**选择 Ollama** 时，紧贴卡片/表单显示一行质量提示——`Lower synthesis quality than cloud models — you accept this for privacy or cost.` 不阻断、不二次确认，只是告知；向导、⑧ 编辑器、CLI 三处一致（§11）。两个角色都指向 Ollama = 全离线，页头显示派生徽章（§9、§10.1）。
 
 出现以下术语时必须带 tooltip/展开器：**endpoint**（"服务商接收 MnemoSeed 请求的地址"）、**env var**（"存于你电脑环境里的具名值——MnemoSeed 从中读取 key，它本身绝不存 key"）、**context / max tokens**（"模型单次允许产出的文本量"）、**OpenAI compatible**（"Fireworks 与 OpenRouter 说的同一种 API 方言——一条代码路径即可通吃"）。
 
@@ -226,12 +233,27 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 | D1 | key 处理：纯环境变量（现状）vs"粘贴 key 由 MnemoSeed 写入用户环境变量 / 系统凭据库"？ | (a) 纯环境变量 + 教学（现状，G-AC2 干净）；(b) 从 console 写一个 `~/.mnemoseed/.env` 或 OS keychain 条目；(c) 完整 OS 凭据库集成 | **已定案**——设置 DB 为主 + 热生效，key 仍 env 来源、不入库；见上注。 |
 | D2 | 实时模型目录：复用探测 `detail["models"]`（后端零改动）vs 新建 `GET /api/v1/llm/catalog?driver=&base_url=` 接口？ | (a) 仅探测；(b) 专用目录接口 | **(a) 本轮**——先交付 UX；(b) 作为发布打磨后续（探测是按需的，首次访问在用户测试前看不到目录——happy path 可接受）。 |
 | D3 | 原生驱动：无需新建——Fireworks/OpenRouter = openai_compatible，Anthropic 原生，Ollama 原生。确认？ | — | **确认；无需驱动工作。** |
-| D4 | 向导角色范围：仅 deep_reflection（现状）vs "同时用于 short_increment" 复选框（写两个角色）vs 让向导配置全部三个？ | (a) 现状；(b) +共享复选框；(c) 完整三角色向导 | **(b)**——一个复选框、一行文案，覆盖常见的"一把 key、一个服务商"用户，又不把 TTFM 拖过 3 分钟。local_track 永远保持 Ollama 离线。 |
+| D4 | 向导角色范围：仅 deep_reflection（现状）vs "同时用于 short_increment" 复选框（写两个角色）vs 让向导配置全部两个？ | (a) 现状；(b) +共享复选框；(c) 完整双角色向导 | **(b)**——一个复选框、一行文案，覆盖常见的"一把 key、一个服务商"用户，又不把 TTFM 拖过 3 分钟；每个角色后续都可在 ⑧ 独立改（含改指向 Ollama，见 D10）。 |
 | D5 | 把 `stub` 驱动从向导/console 下拉隐藏（保留在 API 与配置里供测试）？ | (a) 隐藏；(b) 保留 | **(a) 隐藏**——测试接缝不是用户路径。 |
 | D6 | MiniMax/Kimi 出境路径（FR-6.9）：实现，还是删掉承诺？ | (a) 在"Other OpenAI-compatible"卡片上加"中国区域"说明，附数据出境提示；(b) 实现前从文档删除 | **(a)**——零代码、一条提示，补回一个已文档化的承诺；提示写明"记忆会出境到服务商服务器"。 |
 | D7 | `onboard` CLI LLM 步骤：扩展为采集 base_url + api_key_env + 服务商选择？ | (a) 是，镜像组件；(b) 保持 driver+model | **(a)**——不这样，今天 CLI 根本无法配置云服务商（见 §2.5）。 |
 | D8 | 探测错误分类：前端解析字符串（现状）vs 后端新建结构化 `error.kind`？ | (a) 前端解析；(b) 后端 kinds | **(a) 现在，(b) 以后**——§7.1 的三四种错误类稳定，与现有字符串匹配。 |
 | D9 | 核实 model id：当前占位符/`default_config_toml` 样例（`claude-opus-5`、`claude-sonnet-5`）未核实。 | (a) 只从目录取，不发布未核实 id；(b) 对照服务商文档核实 | **(a)+(b)**：发布时用目录核实过的 id 替换未核实 id；Fireworks 默认值（配置注释已核实）维持不变。 |
+| D10 | 角色模型（**已定案**）：梦境引擎只有两个角色 `deep_reflection` / `short_increment`，各自可**独立指向任意服务商**（Fireworks / OpenRouter / Anthropic / Ollama / 其他 OpenAI-compatible）——云 + 本地混搭是完全合法的配置，永不阻断或羞辱。`local_track` 不再作为角色，仅保留为**已弃用配置键**（接受 + 警告，引擎内无消费者，无角色卡）。离线 = **派生真相**：所有已配置角色都解析为本地 ollama 驱动时显示 "fully offline" 徽章；任一云角色存在即不显示；没有离线开关。 | — | **已定案**——§2.1、§3.1、§4、§9、§10 已按此改稿；文档同步见 §8.1。 |
+| D11 | 权限范围（**已定案**）：模型路由（及引擎设置）**系统级**，仅 owner/admin 级可配置——自托管 = owner 账号（开源单用户构建的唯一账号）；商业多用户 license = admin 级、作用于所有用户；SaaS = 云 Admin Plane（系统操作员级）、作用于所有用户。**不是**用户个人设置。 | — | **已定案**——⑧ 页权限模型见 §10.1.1。 |
+
+### 8.1 文档同步清单（engineering batch 一次性落实）
+
+> 角色模型与权限范围定案后，下列文档随工程批次一次性同步（逐条一行，均指向本规格对应章节）：
+
+- **PRD-02 FR-2.7**：离线轨改写为"两个角色都指向 Ollama"——移除"离线轨"作为独立第三选项的表述。
+- **PRD-02 FR-2.14**：`LLM_ROLES` = 两个角色（`deep_reflection` / `short_increment`）；`local_track` 降级为**已弃用配置键**（接受 + 警告、引擎无消费者）。
+- **design/02 §6 默认值**：删除 `local_track` 默认路由，仅保留两个角色的默认。
+- **PRD-06 FR-6.9**：离线选项 ③ 并入服务商卡片（Ollama 卡 + 质量提示），删除"引导式离线轨"序列。
+- **PRD-07 G-AC2**："全部三个角色" → "全部两个角色"（`deep_reflection` / `short_increment`）。
+- **design/07 §8**：梦境路由表由三行改为两行（`local_track` 行删除）。
+- **CLI `llm` help 文本**：角色说明改为两个角色，移除 `local_track` 示例。
+- **onboard LLM 步骤文案**：与 §10.3 / §11.3 对齐——服务商选择含 Ollama 质量提示、双角色说明。
 
 ---
 
@@ -248,6 +270,7 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 | daemon 宕机 / 拉取失败（⑧） | 沿用现有错误面板 + Retry，不变。 |
 | 保存 → 409（test-required 竞态） | 映射为大白话 "Test the connection first"，绝不给原始 409 详情。 |
 | 路由卡片无显式配置（⑧） | 用 "defaults" 徽章代替空块——生效 base URL / key 链 / model 现在在卡片上可见，而非只有编辑时可见。 |
+| 全离线派生徽章（⑧ 页头 / 路由卡片） | 仅当**所有**已配置角色都解析为本地 ollama 驱动时显示 `fully offline — nothing leaves this machine`；任一云角色存在即**不**显示（混搭绝不显示——不给虚假隐私感）。没有离线开关。 |
 
 ### 9.2 无障碍
 
@@ -270,6 +293,10 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 │  per-role dream models: what each role does, and which model serves   │
 │  it. Key values never appear here — only env-var names.               │
 │                                                                       │
+│  fully-offline badge (derived — shown only when BOTH roles resolve    │
+│  to local ollama;  ⇢ 本页为云+本地混搭 Fireworks+Ollama，故不显示):   │
+│  ◉ fully offline — nothing leaves this machine                        │
+│                                                                       │
 │  host logins: [codex: logged in] [grok: not detected]                 │
 │                                                                       │
 │  ┌─ deep_reflection ── the careful model ──────────────────────────┐  │
@@ -278,14 +305,32 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 │  │  base URL: https://api.fireworks.ai/inference/v1  ·  max 2048   │  │
 │  │  [test connection] [edit route]                                 │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
-│  ┌─ short_increment ── the quick model ── ... (same card) ─────────┐  │
-│  ┌─ local_track ── the private model ── ollama · llama3.1:8b ──────┐  │
+│  ┌─ short_increment ── the quick model ────────────────────────────┐  │
+│  │  connected · Ollama · llama3.1:8b                               │  │
+│  │  quality note: lower synthesis quality than cloud models —      │  │
+│  │  you accept this for privacy or cost.                           │  │
+│  │  [test connection] [edit route]                                 │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
 │                                                                       │
 │  [edit route] expands the provider-first form (§3) inline:           │
-│    provider picker → morphing form → test → save (armed only after   │
-│    a passing probe of the exact values)                              │
+│    role card → provider picker (cards apply to whichever role is      │
+│    being edited) → morphing form → test → save (armed only after      │
+│    a passing probe of the exact values)                               │
+│                                                                       │
+│  foot: Model routing is system-scoped — set by the owner/admin and    │
+│        applies to every user.                                         │
 └───────────────────────────────────────────────────────────────────────┘
 ```
+
+#### 10.1.1 权限模型（系统级，非用户级）
+
+模型路由与引擎设置**系统级**，仅 owner/admin 级可配置（§8 D11）：
+
+- **自托管**（开源单用户构建）：owner 账号是唯一账号，owner 即配置者。
+- **商业多用户 license**：admin 级，作用于所有用户——普通用户看不到路由、不可改设置。
+- **SaaS**：云 Admin Plane（系统操作员级）配置，作用于所有用户；**不提供**用户级个人路由设置。
+
+⑧ 页页脚常显一行：`Model routing is system-scoped — set by the owner/admin and applies to every user.` 普通用户打开 ⑧ 时整页只读（§9.2 的键盘/焦点纪律同样适用——无编辑入口即是只读信号）。
 
 ### 10.2 首次运行向导（owner 创建后）
 
@@ -306,7 +351,17 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 │  [continue]                                            [skip for now]│
 └───────────────────────────────────────────────────────────────────────┘
 ```
-第二步按服务商变形（§5），第三步跑探测（§7）然后保存 deep_reflection（+ 按 D4 的 short_increment）。"skip for now" 保持 capture-only daemon——明说，而非让用户自行发现。
+服务商卡片对两个角色同样有效（§3.1）。第三步的共享复选框（D4 定案）：
+
+```
+┌─ step 3 ─ test & save ─────────────────────────────────────────────┐
+│  provider: Fireworks                    [x] also apply to           │
+│  Testing connection to Fireworks…         short_increment           │
+│  ✓ Connected — key in FIREWORKS_API_KEY works.            [save]    │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+第二步按服务商变形（§5），第三步跑探测（§7）然后保存。向导默认配置 `deep_reflection`；**"also apply to short_increment" 共享复选框**在同一屏——勾选即把同一服务商 + 同一 key 一并写入 `short_increment`。若两个角色都选 Ollama，共享复选框同样适用，保存后"全离线"徽章随之出现（§9）。"skip for now" 保持 capture-only daemon——明说，而非让用户自行发现。
 
 ### 10.3 CLI `mnemoseed onboard` LLM 步骤
 
@@ -325,8 +380,12 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
     macOS/Linux: export FIREWORKS_API_KEY="your-key"   # add to ~/.zshrc
   api key env var [FIREWORKS_API_KEY]:
   model [accounts/fireworks/models/kimi-k3]:            ← verified default
+  (若选 4 Ollama，先打一行质量提示，再进入测试：)
+  ⚠ Ollama chosen for this role — lower synthesis quality than cloud
+    models; you accept this for privacy or cost.
   testing connection to Fireworks…
   connected — key works. saving…
+  also apply to short_increment? [y/N]: y        ← D4 共享复选框的 CLI 形态
   ✓ dream model configured (openai_compatible/accounts/fireworks/models/kimi-k3)
   (skip: entering no model → "capture-only daemon (dreaming disabled)"; 
    --skip llm and --llm-driver/--llm-model scripted flags unchanged)
@@ -353,6 +412,10 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
   platform.claude.com.`
 - Ollama card: label `Ollama on this computer`, blurb `Free and offline. Runs entirely on
   this machine; lower synthesis quality.`
+- Ollama quality hint (shown when the role being configured picks Ollama): `Lower
+  synthesis quality than cloud models — you accept this for privacy or cost.`
+- Share checkbox (D4): label `also apply to short_increment`, note `Uses the same provider
+  and key for the quick consolidation model.`
 - Other card: label `Another OpenAI-compatible API`, blurb `Point at any other endpoint
   that speaks the OpenAI chat API.`
 - OAuth panel header: `Or reuse a login already on this computer`
@@ -376,7 +439,8 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - Catalog empty: `No models listed — pick a suggestion or type the exact model id.`
 - Probe in-flight: `Testing connection to Fireworks…`
 - Probe ok: `Connected — key in FIREWORKS_API_KEY works.`
-- Probe saved: `dream model configured: deep reflection → <model>`
+- Probe saved: `dream model configured: deep reflection → <model>` (shared: `deep
+  reflection + short increment → <model>`)
 - Skip button: `Skip for now — capture-only (dreaming stays off)`
 - Skip confirm: `Skipped — MnemoSeed keeps capturing sessions, dreaming stays off until a
   model is configured. You can set one any time in Models.`
@@ -386,7 +450,13 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - Page title: `models & routing`
 - Page note: `What each role does, and which model serves it. Key values never appear here —
   only the env-var names MnemoSeed reads them from.`
-- Role subtitles (§4).
+- Role subtitles (§4) — two roles only: `deep_reflection` / `short_increment`.
+- Offline badge (derived): `fully offline — nothing leaves this machine`（含义：仅当所有已配置
+  角色都解析为本地 ollama 时显示；任一云角色存在即隐藏——派生真相，无开关）
+- Card quality note (any role on Ollama): `lower synthesis quality than cloud models — you
+  accept this for privacy or cost.`
+- Permission footnote: `Model routing is system-scoped — set by the owner/admin and applies
+  to every user.`（§10.1.1 权限模型）
 - Card probe: `connected` / `needs attention` (with the plain message from §7, not raw JSON)
 - Card key line: `key: MNEMOSEED_DEEP_REFLECTION_API_KEY → FIREWORKS_API_KEY`
 - Card base: `base URL: https://api.fireworks.ai/inference/v1`
@@ -396,7 +466,7 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - Save gate error: `Test the connection first — a route can only be saved after a passing
   probe of these exact values.`
 - 409 mapped: same as save gate error.
-- Editor header: `Edit route — deep_reflection`
+- Editor header: `Edit route — <role>` (deep_reflection / short_increment)
 - Provider group in editor: `Which provider?` (same cards, minus "recommended")
 - max tokens label: `max tokens` (advanced), note: `blank = role default`
 - Saved banner: `route deep_reflection saved — config version <v> (audited)`
@@ -416,6 +486,9 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - `model [accounts/fireworks/models/kimi-k3]: `
 - `testing connection to Fireworks…`
 - `connected — key works. saving…`
+- Share prompt (D4, CLI 形态): `also apply to short_increment? [y/N]: `
+- Ollama quality line (provider = Ollama 时先打): `Ollama chosen for this role — lower
+  synthesis quality than cloud models; you accept this for privacy or cost.`
 - Success: `✓ dream model configured (<driver>/<model>)`
 - Fail 401: `error: Fireworks rejected the key in FIREWORKS_API_KEY — set it and restart
   the daemon, then re-run onboard (it resumes here).`
@@ -425,6 +498,8 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
   model is configured)`
 - `mnemoseed llm set --help`: driver help updated to `provider (or --provider codex|grok
   for a host login)`; add `--provider-card`? No — keep parity, add examples in help text.
+  Help text names the two roles (`deep_reflection` / `short_increment`) only — no `local_track`
+  example or role.
 
 ---
 

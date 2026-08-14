@@ -10,7 +10,7 @@
 
 | Tier | Representatives | Permissions |
 |---|---|---|
-| Tier 1 | Claude 5 Sonnet, GPT-5.6, local open-source models (offline track) | Read the full store; distillations write to the primary base |
+| Tier 1 | Claude 5 Sonnet, GPT-5.6, local open-source models (e.g. Ollama) | Read the full store; distillations write to the primary base |
 | Tier 2 | Mid-range models | Read the full store; distillations enter the pending-review queue |
 | Tier 3 | Lightweight on-device models (GPT-mini class, local small models) | Read the full store; distillations write **only** to the isolated graph |
 

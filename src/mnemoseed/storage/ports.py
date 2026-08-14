@@ -689,6 +689,16 @@ class MetaStore(Protocol):
     def list_dream_runs(self, filter: DreamRunFilter, page: Page) -> PageResult[DreamRun]:
         raise NotImplementedError
 
+    def update_dream_run_model(self, run_id: str, model_id: str) -> None:
+        """F2: record the model pinned at reflect run start on an existing run.
+
+        A dream run is registered at snapshot capture, before the route is
+        resolved; the reflect boundary pins the model at run start and writes
+        it back here. Unknown run ids are a silent no-op (the run is always
+        registered first).
+        """
+        raise NotImplementedError
+
     def add_token_usage(self, profile_id: str, year_month: str, tokens: int) -> None:
         """FR-2.5b: atomically increment a profile's monthly dream-token counter."""
         raise NotImplementedError

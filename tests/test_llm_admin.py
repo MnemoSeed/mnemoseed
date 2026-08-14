@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from mnemoseed.config import LLM_ROLES, load_config
+from mnemoseed.config import DEFAULT_LLM_ROUTES, LLM_ROLES, load_config
 from mnemoseed.llm.admin import LLMAdminError, LLMAdminService
 from mnemoseed.llm.registry import LLM_DRIVERS, register
 
@@ -39,7 +39,8 @@ def _iso(timestamp: float) -> str:
 
 
 def _config_toml(tmp_path: Path) -> Path:
-    """A routable config whose three roles are network-free (stub + closed port)."""
+    """A routable config whose live roles are network-free (stub). The legacy
+    [dream.llm.local_track] table stays to prove it is tolerated + ignored."""
     p = tmp_path / "config.toml"
     p.write_text(
         'preset = "embedded"\n'
@@ -49,6 +50,7 @@ def _config_toml(tmp_path: Path) -> Path:
         "[dream.llm.short_increment]\n"
         'driver = "stub"\n'
         'model = "stub"\n'
+        'base_url = "http://127.0.0.1:1"\n'
         "[dream.llm.local_track]\n"
         'driver = "ollama"\n'
         'model = "llama3.1:8b"\n'
@@ -115,19 +117,46 @@ class _AuditSink:
 # ---------------------------------------------------------------- routes()
 
 
-def test_routes_reports_three_roles_with_driver_model_and_env_name(tmp_path) -> None:
+def test_routes_reports_live_roles_with_driver_model_and_env_name(tmp_path) -> None:
     body = _service(tmp_path).routes()
     roles = {r["role"]: r for r in body["roles"]}
     assert set(roles) == set(LLM_ROLES)
+    assert "local_track" not in roles  # the legacy role is gone from the wire
     deep = roles["deep_reflection"]
     assert deep["driver"] == "stub"
     assert deep["model"] == "stub"
     assert deep["base_url"] is None  # stub carries no endpoint
     assert "connectivity" in deep
     assert isinstance(deep["connectivity"]["ok"], bool)
-    local = roles["local_track"]
-    assert local["driver"] == "ollama"
-    assert local["base_url"] == "http://127.0.0.1:1"
+    short = roles["short_increment"]
+    assert short["driver"] == "stub"
+    assert short["base_url"] == "http://127.0.0.1:1"
+
+
+def test_routes_map_reports_explicit_fields_and_resolved_effective(tmp_path) -> None:
+    """E1-1: the new ``routes`` map carries per-role explicit fields plus an
+    ``effective`` object with the RESOLVED defaults chain (loader defaults are
+    never advertised as explicit)."""
+    body = _service(tmp_path).routes()
+    routes = body["routes"]
+    assert set(routes) == set(LLM_ROLES)
+    deep = routes["deep_reflection"]
+    assert deep["driver"] == "stub"
+    assert deep["model"] == "stub"
+    assert deep["base_url"] is None  # explicit only: this role pins no endpoint
+    assert deep["api_key_env"] is None
+    eff = deep["effective"]
+    assert eff["driver"] == "stub"
+    assert eff["model"] == "stub"
+    # the resolved chain merges the loader defaults back in (never explicit)
+    assert eff["base_url"] == DEFAULT_LLM_ROUTES["deep_reflection"].params["base_url"]
+    assert eff["api_key_env"] == DEFAULT_LLM_ROUTES["deep_reflection"].params["api_key_env"]
+    assert eff["provider"] is None
+    short = routes["short_increment"]
+    assert short["base_url"] == "http://127.0.0.1:1"  # explicit
+    assert short["effective"]["base_url"] == "http://127.0.0.1:1"
+    # env-var NAME semantics hold on the new surface too: never a literal value
+    assert "sk-" not in json.dumps(body)
 
 
 def test_routes_payload_never_contains_key_values(tmp_path) -> None:
@@ -246,7 +275,6 @@ def test_set_role_persists_toml_and_reads_back(tmp_path) -> None:
     assert reread.model == "claude-sonnet-5"
     assert reread.params["api_key_env"] == "ANTHROPIC_API_KEY"
     # unrelated roles were left untouched
-    assert load_config(path).llm["local_track"].driver == "ollama"
     assert load_config(path).llm["deep_reflection"].driver == "stub"
 
 
@@ -258,6 +286,12 @@ def test_set_role_unknown_driver_is_typed_error(tmp_path) -> None:
 def test_set_role_unknown_role_is_typed_error(tmp_path) -> None:
     with pytest.raises(LLMAdminError, match="unknown llm role"):
         _service(tmp_path).set_role("no_such_role", driver="stub", model="m")
+
+
+def test_set_role_local_track_is_deprecation_error(tmp_path) -> None:
+    """E1-1: the removed offline role is rejected with deprecation wording."""
+    with pytest.raises(LLMAdminError, match="deprecated"):
+        _service(tmp_path).set_role("local_track", driver="stub", model="m")
 
 
 def test_set_role_empty_model_rejected(tmp_path) -> None:

@@ -10,6 +10,7 @@ run stopped. Config operations are loopback-only (design/06 6).
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,62 @@ from mnemoseed.rest_client import (
 )
 
 STATE_FILE_NAME = "onboard.json"
+
+#: The provider picker of the dream-LLM wizard (模型路由配置-UX §11.3). Only the
+#: Fireworks default model id was verified against the live catalog — every
+#: other provider defaults to free text, never an unverified suggestion (D9).
+_LLM_PROVIDERS: dict[str, dict[str, str]] = {
+    "1": {
+        "driver": "openai_compatible",
+        "provider": "fireworks",
+        "name": "Fireworks",
+        "base_url": "https://api.fireworks.ai/inference/v1",
+        "key_env": "FIREWORKS_API_KEY",
+        "key_url": "https://app.fireworks.ai/settings/users/api-keys",
+        "key_prompt": "api key env var [FIREWORKS_API_KEY]:",
+        "model_prompt": "model [accounts/fireworks/models/kimi-k3]:",
+    },
+    "2": {
+        "driver": "openai_compatible",
+        "provider": "openrouter",
+        "name": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "key_env": "OPENROUTER_API_KEY",
+        "key_url": "https://openrouter.ai/settings/keys",
+        "key_prompt": "api key env var [OPENROUTER_API_KEY]:",
+        "model_prompt": "model:",
+    },
+    "3": {
+        "driver": "anthropic",
+        "provider": "anthropic",
+        "name": "Anthropic",
+        "base_url": "https://api.anthropic.com",
+        "key_env": "ANTHROPIC_API_KEY",
+        "key_url": "https://platform.claude.com/settings/keys",
+        "key_prompt": "api key env var [ANTHROPIC_API_KEY]:",
+        "model_prompt": "model:",
+    },
+    "4": {
+        "driver": "ollama",
+        "provider": "ollama",
+        "name": "Ollama",
+        "base_url": "http://localhost:11434",
+        "key_env": "",
+        "key_url": "",
+        "key_prompt": "",
+        "model_prompt": "model [llama3.1:8b]:",
+    },
+    "5": {
+        "driver": "openai_compatible",
+        "provider": "other",
+        "name": "the endpoint",
+        "base_url": "",
+        "key_env": "MNEMOSEED_DEEP_REFLECTION_API_KEY",
+        "key_url": "",
+        "key_prompt": "api key env var [MNEMOSEED_DEEP_REFLECTION_API_KEY]:",
+        "model_prompt": "model:",
+    },
+}
 
 
 def _state_path(path: Path | None) -> Path:
@@ -205,26 +262,134 @@ class OnboardService:
             return False, f"config operations are loopback-only; refusing {client.base_url}"
         driver = self.llm_driver or self.answers.get("llm_driver")
         model = self.llm_model or self.answers.get("llm_model")
+        base_url = ""
+        key_env = ""
+        meta: dict[str, str] | None = None
         if not driver or not model:
             if self.yes:
-                self._print("  skipping the LLM wizard: the daemon stays capture-only (dreaming disabled)")
+                self._print(
+                    "  skipping the LLM wizard: the daemon stays capture-only "
+                    "(dreaming disabled until a model is configured)"
+                )
                 return True, "llm skipped (capture-only daemon)"
-            driver = self._answer("llm_driver", "llm driver (e.g. ollama, anthropic, stub)")
-            model = self._answer("llm_model", "llm model")
+            driver, model, base_url, key_env, meta = self._llm_interactive()
             if not driver or not model:
-                self._print("  skipping the LLM wizard: the daemon stays capture-only (dreaming disabled)")
+                self._print(
+                    "  skipping the LLM wizard: the daemon stays capture-only "
+                    "(dreaming disabled until a model is configured)"
+                )
                 return True, "llm skipped (capture-only daemon)"
-        report = client.post(
-            "/api/v1/llm/test",
-            {"role": "deep_reflection", "driver": driver, "model": model},
-        )
+
+        probe: dict[str, Any] = {"role": "deep_reflection", "driver": driver, "model": model}
+        persist: dict[str, Any] = {"driver": driver, "model": model}
+        if meta is not None:
+            if base_url:
+                probe["base_url"] = base_url
+                persist["base_url"] = base_url
+            if key_env:
+                probe["api_key_env"] = key_env
+                persist["api_key_env"] = key_env
+            probe["provider"] = meta["provider"]
+            persist["provider"] = meta["provider"]
+            self._print(f"  testing connection to {meta['name']}…")
+        try:
+            report = client.post("/api/v1/llm/test", probe)
+        except DaemonRestError as exc:
+            self._error(f"llm probe rejected: {exc}")
+            return False, "llm probe rejected"
         if not report.get("ok"):
             detail = report.get("detail") or {}
-            message = detail.get("error") if isinstance(detail, dict) else str(detail)
-            self._print(f"  connectivity test failed: {message}")
+            error_text = str(detail.get("error") or "") if isinstance(detail, dict) else str(detail)
+            self._print(self._llm_probe_message(driver, meta, base_url, key_env, error_text))
             return True, "llm skipped (connectivity test failed)"
-        client.post("/api/v1/llm/routes/deep_reflection", {"driver": driver, "model": model})
+
+        share = False
+        if meta is not None:
+            self._print("  connected — key works. saving…")
+        if "llm_share" in self.answers:
+            share = bool(self.answers["llm_share"])
+        elif meta is not None and not self.yes:
+            answer = input("  also apply to short_increment? [y/N]: ").strip().lower()
+            share = answer in ("y", "yes")
+        client.post("/api/v1/llm/routes/deep_reflection", persist)
+        if share:
+            client.post("/api/v1/llm/routes/short_increment", persist)
         return True, f"dream model configured ({driver}/{model})"
+
+    def _llm_interactive(self) -> tuple[str | None, str | None, str, str, dict[str, str] | None]:
+        """The provider-first picker (模型路由配置-UX §11.3), run only when the
+        caller did not pass ``--llm-driver`` / ``--llm-model``."""
+        self._print(
+            "  Pick the model that distills your sessions into long-term memory. "
+            "One model gets you started; change any role later with "
+            "'mnemoseed llm set'."
+        )
+        self._print("  1) Fireworks (recommended)")
+        self._print("  2) OpenRouter")
+        self._print("  3) Anthropic")
+        self._print("  4) Ollama on this computer")
+        self._print("  5) other OpenAI-compatible")
+        choice = str(self.answers.get("llm_provider") or "").strip()
+        if not choice:
+            choice = input("provider [1]: ").strip() or "1"
+        meta = _LLM_PROVIDERS.get(choice)
+        if meta is None:
+            self._error("That connection type isn't built in — go back and pick a provider.")
+            return None, None, "", "", None
+        if meta["provider"] == "ollama":
+            self._print(
+                "  Ollama chosen for this role — lower synthesis quality than cloud "
+                "models; you accept this for privacy or cost."
+            )
+        key_env = meta["key_env"]
+        if key_env:
+            if meta["key_url"]:
+                self._print(f"  Create a key at {meta['key_url']}")
+            self._print(
+                f"  Set {key_env} as an env var and restart MnemoSeed:\n"
+                f'    Windows:  setx {key_env} "your-key"\n'
+                f'    macOS/Linux: export {key_env}="your-key"   # add to ~/.zshrc'
+            )
+            value = str(self.answers.get("llm_key_env") or "").strip()
+            if not value:
+                value = input(meta["key_prompt"] + " ").strip()
+            key_env = value or meta["key_env"]
+        base_url = meta["base_url"]
+        if meta["provider"] == "other":
+            endpoint = str(self.answers.get("llm_endpoint") or "").strip()
+            if not endpoint:
+                endpoint = input("endpoint: ").strip()
+            if endpoint:
+                base_url = endpoint
+        model = str(self.answers.get("llm_model") or "").strip()
+        if not model:
+            model = input(meta["model_prompt"] + " ").strip()
+        return meta["driver"], model or None, base_url, key_env, meta
+
+    def _llm_probe_message(
+        self,
+        driver: str,
+        meta: dict[str, str] | None,
+        base_url: str,
+        key_env: str,
+        error_text: str,
+    ) -> str:
+        """The §11.3 plain-language probe failure mapping. The fallback always
+        carries the raw driver error so a typed failure is never hidden."""
+        if meta is None:
+            return f"  connectivity test failed: {error_text}"
+        name = meta["name"]
+        if re.search(r"401|403", error_text):
+            return (
+                f"  error: {name} rejected the key in {key_env} — set it and restart "
+                "the daemon, then re-run onboard (it resumes here)."
+            )
+        if meta["provider"] == "ollama":
+            return (
+                f"  error: can't reach Ollama at {base_url} — is it running? Install "
+                "from ollama.com and pull a model (ollama pull llama3.1:8b)."
+            )
+        return f"  connectivity test failed: {error_text}"
 
     def _step_link(self, client: Any) -> tuple[bool, str]:
         """④ host link: installer plan + apply with per-item confirmation."""

@@ -365,13 +365,24 @@ class ReflectOrchestrator:
         directory: Path | None = None,
         on_done: Callable[[str], None] | None = None,
         on_unavailable: Callable[[str], None] | None = None,
+        on_run_started: Callable[[str, str], None] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         max_retries: int = 3,
         backoff_base: float = 1.0,
         packer: DeltaPacker | None = None,
         ledger: TokenLedger | None = None,
+        resolve_llm: Callable[[], ChatLLM] | None = None,
     ) -> None:
         self._llm = llm
+        # F2 hot-apply seam: when wired, every reflect pass materializes the
+        # route AT RUN START (pinned for the run) instead of reusing the boot
+        # instance, so a configwrite change lands on the NEXT dream run without
+        # a daemon restart. ``llm`` stays the boot-time fallback.
+        self._resolve_llm = resolve_llm
+        # F2 model pinning seam: called with (run_id, model) once per run with
+        # the RESOLVED instance's model, so the caller can record
+        # dream_runs.model for the run. Never a raise into the pipeline.
+        self._on_run_started = on_run_started
         self._directory = directory if directory is not None else CONFIG_DIR / "dreams"
         self._on_done = on_done
         self._on_unavailable = on_unavailable
@@ -386,6 +397,17 @@ class ReflectOrchestrator:
         no-op: a recovered snapshot that already wrote back never re-runs."""
         if SnapshotPhase.REFLECT_DONE.value in snapshot.phases:
             return ReflectOutcome(ok=True, result=None, skipped=True)
+
+        # F2: resolve the route fresh for THIS run (pinned per run), unless no
+        # resolver is wired and the boot-time instance is the only seam.
+        llm = self._resolve_llm() if self._resolve_llm is not None else self._llm
+        if self._on_run_started is not None:
+            model = str(getattr(llm, "model", "") or "")
+            if model:
+                try:
+                    self._on_run_started(snapshot.snapshot_id, model)
+                except Exception as exc:  # noqa: BLE001 - a recording failure never breaks the dream
+                    logger.warning("dream_runs model recording failed for %s: %s", snapshot.snapshot_id, exc)
 
         request = self._packer.pack(snapshot)
         report = self._packer.report(request)
@@ -439,7 +461,7 @@ class ReflectOrchestrator:
         unavailable = False
         for attempt in range(self._max_retries + 1):
             try:
-                response = self._llm.chat(system=request.cache_prefix, user=request.delta)
+                response = llm.chat(system=request.cache_prefix, user=request.delta)
                 text, provider_usage = _split_response(response)
                 payload = json.loads(text)
                 if not isinstance(payload, list):

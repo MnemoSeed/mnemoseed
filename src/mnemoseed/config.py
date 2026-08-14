@@ -9,11 +9,14 @@ offending config key.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("mnemoseed.config")
 
 CONFIG_DIR = Path(os.environ.get("MNEMOSEED_HOME", Path.home() / ".mnemoseed"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -101,11 +104,22 @@ class DreamConfig:
     token_budget_usd: float = DEFAULT_DREAM_TOKEN_BUDGET_USD
 
 
-# T6 (FR-2.14): the three dream LLM roles. All are cloud/network-backed except
-# local_track, which is the offline role (FR-2.7). Deep_reflection runs the slow
-# full digests; short_increment runs the cheap per-increment passes; local_track
-# runs the privacy/cost-hard-line track offline.
-LLM_ROLES: tuple[str, ...] = ("deep_reflection", "short_increment", "local_track")
+# T6 (FR-2.14): the dream LLM roles, both cloud/network-backed. Deep_reflection
+# runs the slow full digests; short_increment runs the cheap per-increment
+# passes. The offline "local_track" role was deprecated and removed (E1-1): any
+# legacy [dream.llm.local_track] table is tolerated on load and ignored with a
+# warning, never applied.
+LLM_ROLES: tuple[str, ...] = ("deep_reflection", "short_increment")
+
+#: The removed offline role name (E1-1): recognized for deprecation tolerance.
+LEGACY_LOCAL_TRACK_ROLE = "local_track"
+
+#: Wording shared by the loader warning, the admin surface, and the wire: a
+#: legacy table or a write targeting the removed role answers the same message.
+LOCAL_TRACK_DEPRECATION = (
+    "[dream.llm.local_track] was deprecated and removed; the offline track was "
+    "merged into deep_reflection and short_increment"
+)
 
 
 @dataclass(frozen=True)
@@ -126,7 +140,7 @@ class RoleLLMConfig:
 
 # Route defaults per design/02 section 6 (PRD FR-2.14): deep_reflection ->
 # Kimi K3 via Fireworks (OpenAI-compatible); short_increment -> DeepSeek V4
-# Flash (0731) via Fireworks; local_track -> a local Ollama model. NOTE:
+# Flash (0731) via Fireworks. NOTE:
 # design/02 §6 + FR-2.7 pin the offline default to a <=14B quantized model
 # ("70B is not a default assumption"), which conflicts with PRD FR-2.14's
 # Llama-3.3-70B line; the <=14B default wins here (flagged in the T6 report).
@@ -154,12 +168,6 @@ DEFAULT_LLM_ROUTES: dict[str, RoleLLMConfig] = {
             "base_url": "https://api.fireworks.ai/inference/v1",
             "api_key_env": "MNEMOSEED_SHORT_INCREMENT_API_KEY,FIREWORKS_API_KEY",
         },
-    ),
-    "local_track": RoleLLMConfig(
-        role="local_track",
-        driver="ollama",
-        model="llama3.1:8b",
-        params={"base_url": "http://localhost:11434"},
     ),
 }
 
@@ -323,12 +331,18 @@ def load_config(path: Path | None = None) -> Config:
                     model=model if model is not None else base.model,
                     params={**base.params, **params},
                 )
-            unknown = [str(role) for role in llm_table if str(role) not in LLM_ROLES]
+            unknown = [
+                str(role)
+                for role in llm_table
+                if str(role) not in LLM_ROLES and str(role) != LEGACY_LOCAL_TRACK_ROLE
+            ]
             if unknown:
                 raise ConfigError(
                     f"dream.llm.{unknown[0]}",
                     f"unknown llm role (expected one of {', '.join(LLM_ROLES)})",
                 )
+            if LEGACY_LOCAL_TRACK_ROLE in llm_table:
+                logger.warning(LOCAL_TRACK_DEPRECATION)
 
     return Config(
         preset=preset_raw,
@@ -374,9 +388,10 @@ baseurl = "http://localhost:7788"
 # driver = "anthropic"
 # model = "claude-sonnet-5"
 # api_key_env = "ANTHROPIC_API_KEY"
-#
-# [dream.llm.local_track]
-# driver = "ollama"
-# model = "llama3.1:8b"
-# base_url = "http://localhost:11434"
+
+# The offline local_track role was deprecated and removed: any legacy
+# [dream.llm.local_track] table is tolerated on load and ignored with a warning.
+# [dream.llm.short_increment]
+# driver = "openai_compatible"
+# model = "accounts/fireworks/models/deepseek-v4-flash-0731"
 """

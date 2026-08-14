@@ -311,14 +311,27 @@ def test_dream_runs_roundtrip(stack) -> None:
     assert second.total == 0
 
 
+def test_dream_run_model_update_records_resolved_model(stack) -> None:
+    """F2: a run is registered at snapshot capture without a model; the
+    per-run route resolution pins the model and records it on the run row."""
+    stack.meta.record_dream_run(DreamRun(run_id="run-m1", session_id="s1", started_at=100.0))
+    stack.meta.update_dream_run_model("run-m1", "kimi-k3")
+    run = stack.meta.list_dream_runs(DreamRunFilter(session_id="s1"), Page(0, 50)).items[0]
+    assert run.model_id == "kimi-k3"
+    stack.meta.update_dream_run_model("run-m1", "deepseek-v4-flash")
+    run = stack.meta.list_dream_runs(DreamRunFilter(session_id="s1"), Page(0, 50)).items[0]
+    assert run.model_id == "deepseek-v4-flash"
+    stack.meta.update_dream_run_model("no-such-run", "kimi-k3")  # unknown run: silent no-op
+
+
 def test_schema_version_and_migrate_forward_only(stack) -> None:
-    """meta's head is v7 (frozen v1 schema + v3 profile_score_pool + v4
+    """meta's head is v8 (frozen v1 schema + v3 profile_score_pool + v4
     dream_token_ledger + v6 identity users/token_hash + v7 profile archive
-    flag); migrate is idempotent and forward-only."""
-    assert stack.meta.schema_version() == 7
-    assert stack.meta.migrate() == 7
-    assert stack.meta.migrate(target=1) == 7  # back-targeting is a no-op at head
-    assert stack.meta.schema_version() == 7
+    flag + v8 reserved config.scope); migrate is idempotent and forward-only."""
+    assert stack.meta.schema_version() == 8
+    assert stack.meta.migrate() == 8
+    assert stack.meta.migrate(target=1) == 8  # back-targeting is a no-op at head
+    assert stack.meta.schema_version() == 8
 
 
 def test_dream_token_ledger_atomic_increment(stack) -> None:

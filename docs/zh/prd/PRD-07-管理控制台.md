@@ -28,7 +28,7 @@
 | FR-7.8 | Graph View：**手写 three.js instanced 图层**——节点一次 `THREE.Points` 自定义 shader 绘制、边一次 `InstancedMesh` 四边形、top-60 中心性节点 canvas-sprite 标签、`Raycaster` 拾取、预计算聚类布局（2026-08-12 拍板；基准证据 [docs/bench/graphview-three-results.md](../../bench/graphview-three-results.md)，可运行工件 `.bench/graphview-three/`（本地、不入库），2026-08-13）；节点透明度 = decay_weight（遗忘可视化）、颜色 = 类型、大小 = 中心性、边粗细 = 权重；过滤 profile/类型/时间/Tier；点击进档案页；最低硬件上 5k 节点保持 ≥30 fps（NFR-7.2 v2） | P0（console-COMPLETE） |
 | FR-7.9 | 全部写操作进 Audit Log（actor ∈ console\|cli\|mcp）；Audit Log 页面带过滤分页 | P0（console-COMPLETE） |
 | FR-7.10 | Anima 面板（进阶模块，不在首发）：特质雷达图（轴数随 schema 不锁死六轴；顶点=mean，误差带=width 不确定性可视，允许手动微调）；白话创建（自然语言描述 → 模型量化生成模板）；核心实线 + 染层当前表现虚线叠加；跨 profile 链接/换绑入口 + 换绑触发 re-dye 确认；drift_history 时间轴回放（design/09 §7） | 进阶 / Out |
-| FR-7.11 | 每条 console 写入与设置变更都由 **daemon 独占的 ConfigWriteService**（唯一配置写入者）支撑：registry → 校验 → 外科式 toml 补丁 → 版本化 meta-store 记录（既有 `set_config`/`rollback_config` 端口）→ 带 actor 归属（console\|cli\|mcp）的审计 → live-apply 或 restart-required 标记；手改 config.toml 按 mtime/hash 侦测，下次启动 rebaseline 并记一条 `config_rebaseline` 审计条目 | P0 |
+| FR-7.11 | 每条 console 写入与设置变更都由 **daemon 独占的 ConfigWriteService**（唯一配置写入者）支撑：registry → 校验 → 外科式 toml 补丁 → 版本化 meta-store 记录（既有 `set_config`/`rollback_config` 端口）→ 带 actor 归属（console\|cli\|mcp）的审计 → live-apply 或 restart-required 标记；config.toml 降级为生成镜像——registry 键以 meta store 为准（升级时 store 为空则一次性审计导入 `config_import`）；文件被手改按 mtime/hash 侦测，DB 胜出：镜像被重写并记 `config_mirror_drift` 告警 + 审计条目（原 `config_rebaseline` 语义作废）；**配置权限系统级**：⑧/⑨ 写操作仅 owner/admin 级（自托管 = owner 账号；商业多用户 license = admin 级、作用于所有用户；SaaS = 云 Admin Plane、作用于所有用户），不是用户个人设置 | P0 |
 | FR-7.12 | **CLI 能力对等**：console 的每个动作都能用 `mnemoseed` CLI 脚本化（JSON/表格输出）；交互式可视化 console 独有，但都有 CLI 数据等价物（如 `graph export --json`）；`mnemoseed config set\|get\|rollback` 在 console↔CLI 间往返一致；新增 `mnemoseed audit` 动词；对等矩阵入库 docs；CLI 配置操作走 REST 客户端（仅 REST；`--force` 离线逃生只打印 "not audited (daemon down)"，仅限 loopback baseurl） | P0 |
 | FR-7.13 | **Onboard 共享后端**：console 设置向导与 CLI `mnemoseed onboard` 动词是同一个后端服务的两个前端（细节落 PRD-06）；console 绝不自己实现 onboarding 流程 | P0 |
 
@@ -45,7 +45,7 @@
 | ID | 验收标准 |
 |---|---|
 | G-AC1 | Console 写齐全：forget（tombstone）/ pin（never_decay）/ 调权重 / 解冲突 / dream --once / 自动触发器开关 / profile 创建-重命名-归档 / token 签发-吊销——全部会话内即时生效且留痕 |
-| G-AC2 | ⑧ 配置全部三个梦境角色（deep_reflection / short_increment / local_track）；持久化前连通性实测通过；UI 只暴露 env-var **名称**（UI 出现字面 key 即测试失败）；版本化 + 可回滚 |
+| G-AC2 | ⑧ 配置全部两个梦境角色（deep_reflection / short_increment）；持久化前连通性实测通过；UI 只暴露 env-var **名称**（UI 出现字面 key 即测试失败）；版本化 + 可回滚 |
 | G-AC3 | ⑨ Settings（w₁/w₂/w₃、按类型 λ、top-k、token 预算、积分池阈值）校验 / 持久化 / 审计 / 回滚；每 key 的 live-vs-restart 分类有文档；有数据时存储驱动切换被禁用 |
 | G-AC4 | Graph View（three.js）最低硬件上 5k 节点保持 ≥30 fps；透明度 = decay_weight、颜色 = 类型、大小 = 中心性、边粗细 = 权重；点击 → Memory Detail；过滤 profile/类型/时间/Tier |
 | G-AC5 | CLI 对等矩阵入库；console 每个动作都有 CLI 对应物且状态迁移一致；审计 actor 归属正确（cli/console/mcp）；`config set/get/rollback` console↔CLI 往返一致 |
@@ -56,10 +56,10 @@
 
 ### W1 · ConfigWriteService + console 写操作 + Audit + Settings + ⑧（8d）——与 PRD-04 并行
 
-1. `core/configwrite` —— daemon 独占唯一配置写入者：registry → 校验 → 外科式 toml 补丁 → 版本化 meta-store 记录（`set_config`/`rollback_config` 端口）→ 审计（actor ∈ console|cli|mcp）→ live-apply/restart-required 标记；手改 mtime/hash 侦测 → 下次启动 rebaseline + `config_rebaseline` 审计条目（2d）
+1. `core/configwrite` —— daemon 独占唯一配置写入者：registry → 校验 → 外科式 toml 补丁 → 版本化 meta-store 记录（`set_config`/`rollback_config` 端口）→ 审计（actor ∈ console|cli|mcp）→ live-apply/restart-required 标记；registry 键 DB 为主 + 一次性 `config_import`；mtime/hash 漂移侦测 → 镜像重建 + `config_mirror_drift` 审计（2d）
 2. `console/write` —— forget（tombstone）/ pin（never_decay）/ 调权重 / 解冲突 / dream --once / 自动触发器开关 / profile 创建-重命名-归档 / token 签发-吊销，全部会话内留痕（2d）
 3. `console/audit` —— Audit Log 页面 + 过滤分页（0.5d）
-4. `console/settings` + `console/models` —— ⑨ Settings（w₁/w₂/w₃、按类型 λ、top-k、token 预算、积分池阈值；每 key live-vs-restart 表；有数据时驱动切换禁用）+ ⑧ Models & Routing（三角色、仅 env-var 名称、持久化前连通性实测、版本化 + 可回滚）（1.5d）
+4. `console/settings` + `console/models` —— ⑨ Settings（w₁/w₂/w₃、按类型 λ、top-k、token 预算、积分池阈值；每 key live-vs-restart 表；有数据时驱动切换禁用）+ ⑧ Models & Routing（两角色、仅 env-var 名称、持久化前连通性实测、版本化 + 可回滚）（1.5d）
 5. `console/integration` —— 跨界面审计完整性扫描（G-AC7 脚本）+ 与 CLI 套件联合的闸门演练（2d）
 
 ### W2 · CLI 对等动词（7d）——与 PRD-04 并行

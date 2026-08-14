@@ -59,7 +59,7 @@ from mnemoseed.llm.types import (
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.schema.turn import Turn
 from mnemoseed.storage.factory import Stores, build_stores
-from mnemoseed.storage.ports import CapabilityIssue, GraphStore, MetaStore
+from mnemoseed.storage.ports import CapabilityIssue, GraphStore
 
 logger = logging.getLogger("mnemoseed.daemon")
 
@@ -98,7 +98,7 @@ class _UnavailableLLM:
         return HealthReport(ok=False, detail={"error": self._reason})
 
 
-def _build_dream_llm(config: Config, meta: MetaStore) -> DreamLLM:
+def _build_dream_llm(router: RoleRouter) -> DreamLLM:
     """Materialize the dream-pipeline LLM from the configured routes.
 
     The reflect role is resolved through the RoleRouter exactly like any other
@@ -110,7 +110,6 @@ def _build_dream_llm(config: Config, meta: MetaStore) -> DreamLLM:
     of crashing boot; the reflect boundary then reports ``llm_unavailable`` and
     the snapshot stays journaled (FR-2.6).
     """
-    router = RoleRouter(routes=config.llm, audit=meta)
     try:
         return router.resolve(_REFLECT_ROLE)
     except LLMError as exc:
@@ -219,8 +218,8 @@ class _DreamRelay:
 
 
 def _build_capture(
-    stores: Stores, config: Config
-) -> tuple[WritingPipeline, DreamTrigger, DreamPipeline, _DreamRelay]:
+    stores: Stores, config: Config, configwrite: ConfigWriteService
+) -> tuple[WritingPipeline, DreamTrigger, DreamPipeline, _DreamRelay, RoleRouter]:
     """Serving capture funnel: strip -> score -> pool -> stamp/write over the
     resolved storage stack. /ingest stays submit-only; the funnel drains on
     /session/end (v1 drain trigger, off the /ingest hot path).
@@ -232,9 +231,12 @@ def _build_capture(
     the config directory and registered in dream_runs, whose completion seam
     runs the T4 dream pipeline (reflect -> merge -> safe-clear commit) off the
     ingest hot path. The reflect LLM is the configured deep_reflection route
-    (FR-2.14) resolved through the RoleRouter — drivers construct lazy HTTP
+    (FR-2.14) resolved through the role router — drivers construct lazy HTTP
     clients, so boot resolves no network, and an unbuildable route degrades
-    typed to a deferred LLM instead of crashing boot (FR-2.6). Boot recovery
+    typed to a deferred LLM instead of crashing boot (FR-2.6). The router holds
+    a LIVE reference to config.llm keyed by the configwrite per-role generation
+    (F2), so the reflector resolves the route AT RUN START: a routing change
+    hot-applies to the next dream run without a restart. Boot recovery
     (NFR-2.3) resumes interrupted dreams at their exact phase boundary —
     reflect for a fresh snapshot, merge ONLY for one that already ran reflect —
     synchronously before serving starts. The safe-clear purger fires exactly
@@ -253,13 +255,29 @@ def _build_capture(
             "no 'isolated' graph instance configured; tier-3 output is stranded "
             "(the salvage review channel still captures the entry)"
         )
+    router = RoleRouter(
+        routes=config.llm,
+        audit=stores.meta,
+        generation=configwrite.generation_for,
+    )
+
+    # Per-run resolver: materialize the reflect route fresh at run start so a
+    # configwrite generation bump hot-applies to the next dream (F2). It
+    # degrades typed (like boot) when the route becomes unbuildable mid-run.
+    def _resolve_dream_llm() -> DreamLLM:
+        return _build_dream_llm(router)
+
     reflector = ReflectOrchestrator(
-        llm=_build_dream_llm(config, stores.meta),
+        llm=_resolve_dream_llm(),
+        resolve_llm=_resolve_dream_llm,
         directory=snapshotter.directory,
         on_done=trigger.on_reflect_complete,
         # FR-2.6: log every typed provider outage the reflect boundary refuses
         # (capture-only degradation), off the ingest hot path.
         on_unavailable=_reflect_unavailable,
+        # F2: the model pinned at each run start is recorded on the run row the
+        # snapshotter registered at capture time (dream_runs.model).
+        on_run_started=lambda run_id, model: stores.meta.update_dream_run_model(run_id, model),
         # FR-2.5b: the monthly token ledger binds the real meta store and the
         # config's USD cap, so the budget gate and the meter run on the serving
         # path (capture-only once the projected month spend exceeds the cap).
@@ -302,6 +320,7 @@ def _build_capture(
         trigger,
         pipeline,
         relay,
+        router,
     )
 
 
@@ -311,6 +330,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     stores = build_stores(config)
     app.state.config = config
     app.state.stores = stores
+    # ConfigWriteService (PRD-07 FR-7.11 / design/07 section 9): the daemon's
+    # single config writer behind every console/CLI settings change. It is
+    # created BEFORE the serving funnel because the funnel consumes its F2
+    # per-role generation counter (hot-apply on routing changes). Boot
+    # reconciliation (E1-4 DB-primary) imports registry keys into the settings
+    # DB once and then makes the DB win over a hand-edited config.toml: the
+    # mirror is regenerated from the DB with a config_mirror_drift log + audit
+    # entry (actor=daemon); the DB is never rebaselined from the file.
+    app.state.configwrite = ConfigWriteService(config, stores.meta)
+    app.state.configwrite.reconcile_boot()
     # The serving funnel is bound to the resolved stack here, not at app
     # construction: the VectorStore/Embedder instances only exist after boot.
     (
@@ -318,7 +347,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.dream,
         app.state.dream_pipeline,
         app.state.dream_relay,
-    ) = _build_capture(stores, config)
+        app.state.role_router,
+    ) = _build_capture(stores, config, app.state.configwrite)
     app.state.segmenter = TurnSegmenter(app.state.capture)
     # The memory surface (T4) owns one retrieval engine whose track executor is
     # shut down in teardown, before the stores close (no worker outlives boot).
@@ -330,13 +360,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # memory and console route depends on require_identity, which reads this
     # state; the setup wizard 503s those routes until setup_owner has run.
     app.state.identity = IdentityService(stores.meta)
-    # ConfigWriteService (PRD-07 FR-7.11 / design/07 section 9): the daemon's
-    # single config writer behind every console/CLI settings change. Boot
-    # reconciliation detects a hand-edited config.toml (mtime/hash drift) and
-    # re-baselines the versioned store, recording a config_rebaseline audit
-    # entry (actor=daemon).
-    app.state.configwrite = ConfigWriteService(config, stores.meta)
-    app.state.configwrite.reconcile_boot()
     app.state.console = ConsoleService(stores, config, app.state.dream, configwrite=app.state.configwrite)
     # LLM admin surface (issue #23 / FR-6.9): per-role route reads/writes,
     # OAuth availability, and the pre-write connectivity probe. It audits

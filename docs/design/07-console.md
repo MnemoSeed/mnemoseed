@@ -111,20 +111,21 @@ Every memory has one "dossier page" exposing everything the system knows about i
 
 ### ⑧ Models & Routing
 
-- dream routing table covering all three roles: `deep_reflection` (long-context deep-sleep reflection) / `short_increment` (short increments, dynamic budget ≤32k) / `local_track` (offline Ollama track, optional) → dropdown switching + live connectivity test button;
+- dream routing table covering both roles: `deep_reflection` (long-context deep-sleep reflection) / `short_increment` (short increments, dynamic budget ≤32k) → dropdown switching + live connectivity test button;
 - **keys by env-var NAME only**: the UI shows and edits the environment-variable names (`MNEMOSEED_DEEP_REFLECTION_API_KEY` / `MNEMOSEED_SHORT_INCREMENT_API_KEY`, shared `FIREWORKS_API_KEY` fallback) — literal key values are never displayed or entered in the console;
 - **connectivity test before persist**: a role's driver/model change is written to config only after the live connectivity self-check passes (the DreamLLM self-check port, [PRD-02 FR-2.14](../prd/PRD-02-dream-engine.md));
 - role changes go through ConfigWriteService: validated, versioned, rollbackable, and audited (actor = console);
 - embedding model settings & switching (switching triggers an index rebuild, with a cost warning);
 - edge classifier (persistence judgment / contradiction judgment) model settings;
 - per-model call volume & cost statistics.
+- **Configuration permissions are system-scoped**: model routing and engine settings are owner/admin-level only — self-hosted = the owner account (the sole account in the open-source single-user build); commercial multi-user license = admin level, applies to all users; SaaS = the cloud Admin Plane (PRD-05), applies to all users; never a per-user setting.
 
 ### ⑨ Settings
 
 - storage driver selection (presets: embedded / docker / custom + per-layer driver override; capability validation results shown); **switching the storage driver is disabled while data exists** (restart + explicit migration verb instead);
 - scoring weights w₁/w₂/w₃, decay λ (per memory type), top-k and token budgets, score pool threshold;
 - **every change goes through the daemon-owned ConfigWriteService** (the single config writer): registry lookup → validation → surgical toml patch → versioned meta-store record (the existing `set_config` / `rollback_config` ports) → audit entry (actor = console) → live-apply or restart-required flag. Changes are rollbackable via the versioned config history;
-- hand-edited `config.toml` is detected by mtime/hash and causes a **next-boot rebaseline** with a `config_rebaseline` audit entry; the console marks which keys are pending a restart;
+- `config.toml` is a **generated mirror** of the meta-store settings (registry keys): on upgrade with an empty store, a one-shot audited `config_import` from the file runs; a hand-edited file is detected by mtime/hash — the DB wins, the mirror is regenerated, and a `config_mirror_drift` warning + audit entry is written (supersedes the old `config_rebaseline` semantics); the console marks which keys are pending a restart;
 
 | Key family | Live-apply | Restart-required |
 |---|---|---|

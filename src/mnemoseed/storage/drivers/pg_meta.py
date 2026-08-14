@@ -531,6 +531,14 @@ class PgMetaDriver:
         items = [_decode_dream_run(r) for r in rows]
         return PageResult(items=items, total=total, offset=page.offset, limit=page.limit)
 
+    def update_dream_run_model(self, run_id: str, model_id: str) -> None:
+        """F2: record the model pinned at reflect run start (the run row is
+        registered at snapshot capture, before route resolution)."""
+        self._conn.execute(
+            "UPDATE dream_runs SET model_id = %s WHERE run_id = %s",
+            (model_id, run_id),
+        )
+
     # ------------------------------------------------------------ dream token ledger (FR-2.5b)
 
     def add_token_usage(self, profile_id: str, year_month: str, tokens: int) -> None:

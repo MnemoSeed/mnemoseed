@@ -34,7 +34,7 @@
 | FR-6.6 | `mnemoseed doctor`：daemon 存活 / 端口 / embedding 加载 / round-trip 存取实测 / 宿主注册生效，单项失败给单行修复命令 | P0 |
 | FR-6.7 | `mnemoseed uninstall`：逐宿主注销（备份恢复或精确摘除）、停 daemon、数据默认保留并明示路径、--purge 才删 | P1 |
 | FR-6.8 | 配置单一事实源 `~/.mnemoseed/config.toml`；宿主侧仅瘦注册 | P0 |
-| FR-6.9 | 首次设置 LLM 向导（`mnemoseed onboard` 的 post-setup 步骤，FR-6.10）：引导梦境模型配置，推荐顺序 ① OAuth 复用订阅（Codex / Grok 本地登录态，条款允许；Anthropic 订阅不复用；中国用户可选 MiniMax/Kimi 等 CLI 服务商，选择时明示数据出境提示）② 自带 API key（任意 OpenAI 兼容端点，如 Fireworks）③ 高级离线轨（Ollama，≤14B 量化模型，附提炼质量警告）；连通性实测通过才写入 config.toml；落地 PRD-02 FR-2.14 的角色路由 | P0 |
+| FR-6.9 | 首次设置 LLM 向导（`mnemoseed onboard` 的 post-setup 步骤，FR-6.10）：引导梦境模型配置，推荐顺序 ① OAuth 复用订阅（Codex / Grok 本地登录态，条款允许；Anthropic 订阅不复用；中国用户可选 MiniMax/Kimi 等 CLI 服务商，选择时明示数据出境提示）② 自带 API key（任意 OpenAI 兼容端点，如 Fireworks）③ Ollama——**作为每个角色的服务商卡片**提供（≤14B 量化模型，附提炼质量警告），不是独立的"离线轨"；两个角色都指向 Ollama 时自动达成完全离线（派生结果）；连通性实测通过才写入 config.toml；落地 PRD-02 FR-2.14 的角色路由 | P0 |
 | FR-6.10 | `mnemoseed onboard`：在既有原语之上的引导式逐步聚合——① owner 账号设置 → ② 存储形态选择 → ③ 梦境 LLM 向导（FR-6.9）→ ④ 宿主链接 → ⑤ 开机自启 → ⑥ doctor 全绿。规则：① 与 console 设置向导共享**同一个**后端 onboard 服务——无并行逻辑（`/api/v1/setup` 端点保持 exact-once）；② LLM 向导是 post-setup 步骤（保持"连通性实测后才持久化"行为）；③ 每步可跳过 + 可续跑——跳过 LLM 步骤得到可启动的仅捕获 daemon，向导内明示；④ 宿主链接步骤原样复用安装的备份 + diff 预览 + 逐项确认纪律（FR-6.1）；⑤ TTFM < 3 分钟仍为 happy-path 目标，每步限时；⑥ 配置操作仅限 loopback——非 loopback baseurl 直接报清晰错误 | P0 |
 
 ## 4. 非功能需求

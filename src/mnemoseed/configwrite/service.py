@@ -18,9 +18,13 @@ flow:
   where slot is the key's registry index, so a version id decodes to exactly
   one (key, version) pair and rolls through an append-only
   ``rollback_config`` on restore.
-- ``reconcile_boot`` re-baselines the versioned store when the file's
-  mtime/hash differs from the last-known state (a hand edit while the daemon
-  was down), recording a ``config_rebaseline`` audit entry (actor=daemon).
+- ``reconcile_boot`` (E1-4 DB-primary Phase 0) makes the settings DB the
+  primary store for registry keys and config.toml its generated mirror: a
+  one-shot audited import (``config_import``) seeds an empty DB from the file,
+  then the DB WINS on every later boot (the file is regenerated from the DB,
+  never the reverse — a hand edit is logged + audited as
+  ``config_mirror_drift``). Boot-scope keys (preset/storage/baseurl/auth) are
+  never registry keys: file-scoped + restart-required.
 - Secrets are never written or read: ``api_key_env`` values are env-var NAMES,
   and every read surface redacts anything that is not a valid name.
 """
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
@@ -38,6 +43,8 @@ from typing import Any, Protocol
 
 from mnemoseed.config import CONFIG_PATH, LLM_ROLES, Config, DreamConfig, RoleLLMConfig
 from mnemoseed.storage.ports import AuditEntry, ConfigEntry
+
+logger = logging.getLogger("mnemoseed.configwrite")
 
 #: Global version-id stride: slot * stride + version.
 _VERSION_STRIDE = 1_000_000
@@ -399,6 +406,32 @@ class ConfigWriteService:
         self._config = config
         self._meta = meta
         self._clock = clock if clock is not None else time.time
+        # F2 hot-apply generation: every successful write/rollback bumps the
+        # global counter; a role-key write also bumps that role's counter so
+        # consumers (the role router) rebuild exactly what changed.
+        self._generation = 0
+        self._role_generations: dict[str, int] = {}
+
+    # ------------------------------------------------------------ generation (F2)
+
+    @property
+    def generation(self) -> int:
+        """Monotonic config-write generation: bumped on every successful set
+        or rollback, so per-run consumers re-check their materialized state."""
+        return self._generation
+
+    def generation_for(self, role: str) -> int:
+        """Per-role generation: bumped only when a write touched that role's
+        route keys (a non-role key leaves every role generation untouched)."""
+        return self._role_generations.get(role, 0)
+
+    def _bump(self, key_path: str) -> None:
+        self._generation += 1
+        prefix = "dream.llm."
+        if key_path.startswith(prefix):
+            role, _, _ = key_path[len(prefix) :].partition(".")
+            if role:
+                self._role_generations[role] = self._generation
 
     # ------------------------------------------------------------ reads
 
@@ -468,6 +501,7 @@ class ConfigWriteService:
         version_id = self._record(key_path, validated)
         spec.apply(self._config, validated)
         self._touch_fingerprint()
+        self._bump(key_path)
         restart_required = not spec.live_apply
         self._audit(
             "config.set",
@@ -512,6 +546,7 @@ class ConfigWriteService:
         _patch_toml(path, key_path, restored_value)
         spec.apply(self._config, restored_value)
         self._touch_fingerprint()
+        self._bump(key_path)
         new_version_id = _version_id(key_path, restored.version)
         self._audit(
             "config.rollback",
@@ -527,50 +562,98 @@ class ConfigWriteService:
             "actor": actor,
         }
 
-    # ------------------------------------------------------------ boot reconcile
+    # ------------------------------------------------------------ boot reconcile (E1-4 DB-primary)
 
     def reconcile_boot(self) -> dict[str, Any]:
-        """Re-baseline the versioned store when the file drifted while the
-        daemon was down (first boot or a hand edit): every registered key is
-        recorded with its resolved value, and a config_rebaseline audit entry
-        explains the divergence (reason initial|hand_edit, actor=daemon)."""
+        """DB-primary boot overlay (Phase 0, D1 "settings DB primary").
+
+        The settings DB is the primary store for registry keys; config.toml is
+        its generated mirror. At boot:
+
+        - one-shot audited import: a registry key with NO DB entry takes its
+          value from the file (already resolved into the live Config) and is
+          recorded — the only file->DB direction Phase 0 allows, audited as
+          ``config_import`` (actor=daemon);
+        - DB-wins overlay: for every key the DB already holds, the DB value is
+          authoritative — it is applied to the live config and the toml mirror
+          line is regenerated from it (``_patch_toml``); the DB is NEVER
+          rebaselined from the file;
+        - drift detection: when the regenerated mirror was the consequence of a
+          changed file (mtime/hash drift), a ``config_mirror_drift`` log line
+          and audit entry name the rewritten keys;
+        - boot-scope keys (preset/storage/baseurl/auth) are NOT registry keys:
+          they stay file-scoped and restart-required, untouched by this pass.
+        """
         if self._meta is None:
             return {
                 "ok": False,
                 "reason": "no versioned config store available",
                 "changed": False,
                 "keys_updated": [],
+                "mirror_rewritten": [],
             }
         path = self._config_path()
         fingerprint = _file_fingerprint(path)
         last = self._last_fingerprint()
-        changed = last != fingerprint
-        reason = "initial" if last is None else "hand_edit"
-        updated: list[str] = []
-        if changed:
-            for key_path in _SLOT_KEYS:
-                current = CONFIG_KEY_REGISTRY[key_path].read(self._config)
-                entry = self._meta.get_config(key_path)
-                if entry is None or entry.value.get("value") != current:
-                    self._meta.set_config(key_path, {"value": current})
-                    updated.append(key_path)
-            self._set_fingerprint(fingerprint)
+        drifted = last != fingerprint
+        imported: list[str] = []
+        repaired: list[str] = []
+        for key_path in _SLOT_KEYS:
+            spec = CONFIG_KEY_REGISTRY[key_path]
+            current = spec.read(self._config)
+            entry = self._meta.get_config(key_path)
+            if entry is None:
+                # One-shot import: the DB has no registry entry for this key, so
+                # the file (resolved into the live Config) is the only source.
+                self._meta.set_config(key_path, {"value": current})
+                imported.append(key_path)
+                continue
+            db_value = entry.value.get("value")
+            if db_value != current:
+                # DB wins on the live config; the toml mirror is regenerated to
+                # converge on the DB. Never the reverse direction.
+                spec.apply(self._config, db_value)
+                _patch_toml(path, key_path, db_value)
+                repaired.append(key_path)
+        if imported:
             self._audit(
-                "config_rebaseline",
+                "config_import",
                 {
-                    "reason": reason,
+                    "reason": "initial",
+                    "keys_imported": imported,
                     "hash": fingerprint[1],
                     "mtime": fingerprint[0],
-                    "keys_updated": updated,
-                    "changed": True,
                 },
                 "daemon",
             )
+        if repaired:
+            logger.warning(
+                "config_mirror_drift: config.toml diverged from the settings DB; "
+                "%d registry key(s) regenerated from the DB (the DB is primary, "
+                "the file is a mirror)",
+                len(repaired),
+            )
+            self._audit(
+                "config_mirror_drift",
+                {
+                    "drifted": drifted,
+                    "keys_rewritten": repaired,
+                    "hash": fingerprint[1],
+                    "mtime": fingerprint[0],
+                },
+                "daemon",
+            )
+        if imported or repaired or drifted:
+            # The file or the DB changed: record the current file state so the
+            # next boot compares against a known baseline (a boot-scope-only
+            # file edit is legitimate and must not re-trigger drift).
+            self._set_fingerprint(_file_fingerprint(path))
         return {
             "ok": True,
-            "changed": changed,
-            "reason": reason,
-            "keys_updated": updated,
+            "changed": bool(imported or repaired),
+            "reason": "initial" if imported else ("hand_edit" if repaired else "noop"),
+            "keys_updated": imported + repaired,
+            "mirror_rewritten": repaired,
             "fingerprint": {"mtime": fingerprint[0], "hash": fingerprint[1]},
         }
 

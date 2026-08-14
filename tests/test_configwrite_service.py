@@ -19,9 +19,14 @@ HTTP layer:
   validation failure that names the key;
 - rollback is append-only (a new version record, never a delete) and restores
   both the file and the live config;
-- boot reconciliation re-baselines the versioned store when the file's
-  mtime/hash differs from the last-known state and records a
-  config_rebaseline audit entry.
+- boot reconciliation (E1-4 DB-primary Phase 0) imports the file's registry
+  values into the settings DB exactly once (audited as ``config_import`` when
+  the DB is empty of registry entries), then the DB WINS for registry keys on
+  every later boot: a hand-edited config.toml is never rebaselined into the DB
+  — the DB value is applied to the live config and the toml mirror is
+  regenerated from it, logged + audited as ``config_mirror_drift``. Boot-scope
+  keys (preset/storage/baseurl/auth) are never registry keys: they stay
+  file-scoped and restart-required.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from mnemoseed.configwrite.service import (
 from mnemoseed.storage.drivers.sqlite_meta import SqliteMetaDriver
 from mnemoseed.storage.ports import AuditFilter, Page
 
-_AUDIT_ACTIONS = ("config.set", "config.rollback", "config_rebaseline")
+_AUDIT_ACTIONS = ("config.set", "config.rollback", "config_import", "config_mirror_drift")
 
 
 def _config_toml(tmp_path: Path) -> Path:
@@ -310,33 +315,74 @@ def test_rollback_without_meta_is_typed_error(tmp_path) -> None:
         service.rollback(1, actor="console")
 
 
-# ---------------------------------------------------------------- boot reconciliation
+# ---------------------------------------------------------------- generation (F2 hot-apply)
 
 
-def test_reconcile_first_boot_baselines_and_audits(tmp_path) -> None:
+def test_generation_starts_zero_and_bumps_per_role_and_globally(tmp_path) -> None:
+    """E1-2 (F2): every successful write bumps the global generation counter;
+    a role-key write also bumps that role's generation so the role router can
+    rebuild exactly the changed role."""
+    service, _ = _service(tmp_path)
+    assert service.generation == 0
+    assert service.generation_for("deep_reflection") == 0
+    service.set("dream.llm.deep_reflection.model", "stub2", actor="console")
+    assert service.generation == 1
+    assert service.generation_for("deep_reflection") == 1
+    assert service.generation_for("short_increment") == 0  # untouched role: no bump
+
+
+def test_generation_bumps_globally_for_non_role_keys(tmp_path) -> None:
+    service, _ = _service(tmp_path)
+    service.set("dream.auto_trigger", True, actor="console")
+    assert service.generation == 1
+    assert service.generation_for("deep_reflection") == 0  # no per-role bump
+
+
+def test_rollback_bumps_generation(tmp_path) -> None:
+    """A rollback restores a previous value, so it is also a hot-apply event:
+    the next run must rebuild the changed role."""
+    meta = _meta(tmp_path)
+    service, _ = _service(tmp_path, meta=meta)
+    version = service.set("dream.llm.deep_reflection.model", "stub2", actor="console")["version_id"]
+    assert service.generation == 1
+    service.rollback(version, actor="console")
+    assert service.generation == 2
+    assert service.generation_for("deep_reflection") == 2
+
+
+# ---------------------------------------------------------------- boot reconciliation (E1-4 DB-primary)
+
+
+def test_reconcile_first_boot_imports_registry_keys_once_and_audits(tmp_path) -> None:
+    """E1-4: with an empty settings DB the file's resolved registry values are
+    imported EXACTLY ONCE, audited as ``config_import`` (actor=daemon); a later
+    boot with no changes is a no-op and imports nothing again."""
     meta = _meta(tmp_path)
     service, _ = _service(tmp_path, meta=meta)
     result = service.reconcile_boot()
     assert result["ok"] is True
+    assert result["changed"] is True
     assert result["reason"] == "initial"
     assert "dream.auto_trigger" in result["keys_updated"]
     entry = meta.get_config("dream.auto_trigger")
     assert entry is not None and entry.value["value"] is False
-    audit = _audit_entries(meta, "config_rebaseline")
-    assert len(audit) == 1
-    assert audit[0].actor == "daemon"
-    assert audit[0].detail["reason"] == "initial"
+    assert meta.get_config("dream.llm.deep_reflection.model").value["value"] == "stub"
+    imports = _audit_entries(meta, "config_import")
+    assert len(imports) == 1
+    assert imports[0].actor == "daemon"
+    assert imports[0].detail["reason"] == "initial"
 
-
-def test_reconcile_unchanged_is_noop(tmp_path) -> None:
-    meta = _meta(tmp_path)
-    service, _ = _service(tmp_path, meta=meta)
-    service.reconcile_boot()
+    # the same boot state never imports again
     assert service.reconcile_boot()["changed"] is False
-    assert len(_audit_entries(meta, "config_rebaseline")) == 1
+    assert service.reconcile_boot()["reason"] == "noop"
+    assert len(_audit_entries(meta, "config_import")) == 1
 
 
-def test_reconcile_hand_edit_rebaselines_next_boot(tmp_path) -> None:
+def test_reconcile_hand_edit_is_mirror_drift_never_rebaseline(tmp_path) -> None:
+    """E1-4: the settings DB is primary — a hand-edited config.toml is NOT
+    rebaselined into the DB. The DB value wins on the live config and the toml
+    mirror is regenerated from the DB, logged + audited as
+    ``config_mirror_drift``."""
     meta = _meta(tmp_path)
     service, path = _service(tmp_path, meta=meta)
     service.reconcile_boot()
@@ -345,16 +391,93 @@ def test_reconcile_hand_edit_rebaselines_next_boot(tmp_path) -> None:
         "token_budget_usd = 5.0\n", "token_budget_usd = 5.0\nauto_trigger = true\n"
     )
     path.write_text(text, encoding="utf-8")
-    # next boot: a fresh load + reconcile detects the divergence
+
     service = ConfigWriteService(load_config(path), meta, clock=lambda: 1_700_000_000.0)
     result = service.reconcile_boot()
     assert result["changed"] is True
     assert result["reason"] == "hand_edit"
+    assert result["mirror_rewritten"] == ["dream.auto_trigger"]
+    # DB wins on the live config and the mirror line is regenerated from it
+    assert service._config.dream.auto_trigger is False
+    assert "auto_trigger = true" not in path.read_text(encoding="utf-8")
+    assert "auto_trigger = false" in path.read_text(encoding="utf-8")
+    # the DB was never rebaselined from the file
+    assert meta.get_config("dream.auto_trigger").value["value"] is False
+    assert len(_audit_entries(meta, "config_import")) == 1  # still exactly one import
+    drift = _audit_entries(meta, "config_mirror_drift")
+    assert len(drift) == 1
+    assert drift[0].actor == "daemon"
+    assert drift[0].detail["drifted"] is True
+    assert drift[0].detail["keys_rewritten"] == ["dream.auto_trigger"]
+
+
+def test_reconcile_db_value_wins_over_file_value_at_boot(tmp_path) -> None:
+    """E1-4: a DB value that diverged from the file (restore/other-writer) wins
+    at boot: the live config and the toml mirror both converge on the DB, and
+    no hand-edit drift fires because the file itself never changed."""
+    meta = _meta(tmp_path)
+    service, path = _service(tmp_path, meta=meta)
+    service.reconcile_boot()
+    # the settings DB holds a newer value the file does not know about
+    meta.set_config("dream.llm.deep_reflection.model", {"value": "db-model"})
+
+    service = ConfigWriteService(load_config(path), meta)
+    result = service.reconcile_boot()
+    assert result["changed"] is True
+    assert result["mirror_rewritten"] == ["dream.llm.deep_reflection.model"]
+    assert service._config.llm["deep_reflection"].model == "db-model"
+    # the mirror file was regenerated from the DB
+    assert 'model = "db-model"' in path.read_text(encoding="utf-8")
+    # no hand-edit drift: the file fingerprint never moved
+    drift = _audit_entries(meta, "config_mirror_drift")
+    assert len(drift) == 1
+    assert drift[0].detail["drifted"] is False
+
+
+def test_reconcile_boot_scope_keys_stay_file_scoped_and_restart_required(tmp_path) -> None:
+    """E1-4: preset/storage/baseurl are boot-scope keys — never registry keys.
+    A hand edit to one of them is a legitimate file-scoped change: it survives
+    the next boot untouched, no mirror drift fires, and the DB holds no entry
+    for it."""
+    meta = _meta(tmp_path)
+    service, path = _service(tmp_path, meta=meta)
+    service.reconcile_boot()
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'baseurl = "http://localhost:7788"', 'baseurl = "http://localhost:9999"'
+        ),
+        encoding="utf-8",
+    )
+
+    service = ConfigWriteService(load_config(path), meta, clock=lambda: 1_700_000_000.0)
+    result = service.reconcile_boot()
+    assert result["changed"] is False
+    assert result["reason"] == "noop"
+    assert "baseurl" not in result["keys_updated"]
+    assert "baseurl" not in result["mirror_rewritten"]
+    # the file-scoped change survived (applies at next restart, as designed)
+    assert 'baseurl = "http://localhost:9999"' in path.read_text(encoding="utf-8")
+    assert len(_audit_entries(meta, "config_mirror_drift")) == 0
+    assert meta.get_config("baseurl") is None  # never a registry key
+
+
+def test_reconcile_completes_partial_import_without_overwriting(tmp_path) -> None:
+    """E1-4: a DB holding SOME registry entries (aborted import / older writer)
+    completes the one-shot import for the missing keys only — existing entries
+    are never rebaselined from the file."""
+    meta = _meta(tmp_path)
+    service, _ = _service(tmp_path, meta=meta)
+    service.reconcile_boot()
+    # simulate a DB with one registry entry missing (aborted import / older writer)
+    meta._conn.execute("DELETE FROM config WHERE key = 'dream.auto_trigger'")
+
+    service = ConfigWriteService(load_config(_config_toml(tmp_path)), meta)
+    result = service.reconcile_boot()
+    assert result["changed"] is True
     assert "dream.auto_trigger" in result["keys_updated"]
-    assert meta.get_config("dream.auto_trigger").value["value"] is True
-    audit = _audit_entries(meta, "config_rebaseline")
-    assert len(audit) == 2
-    assert audit[1].detail["reason"] == "hand_edit"
+    assert meta.get_config("dream.auto_trigger").value["value"] is False  # file value imported once
+    assert meta.get_config("dream.llm.deep_reflection.model").value["value"] == "stub"  # untouched
+    assert len(_audit_entries(meta, "config_import")) == 2  # completed import is audited too
 
 
 def test_reconcile_without_meta_is_noop(tmp_path) -> None:

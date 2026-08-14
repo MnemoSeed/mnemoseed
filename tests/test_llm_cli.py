@@ -125,17 +125,30 @@ def test_llm_status_lists_all_roles_with_routes_and_connectivity(tmp_path, monke
     for role in LLM_ROLES:
         assert role in captured.out
     assert "deep_reflection" in captured.out
+    assert "short_increment" in captured.out
+    assert "local_track" not in captured.out  # the legacy role is gone
     assert "connectivity: ok" in captured.out  # stub probe is healthy
-    assert "ollama" in captured.out
     assert str(cfg) in captured.out  # the source file is named
 
 
 def test_llm_status_reports_failed_connectivity_for_closed_port(tmp_path, monkeypatch, capsys) -> None:
-    _env(tmp_path, monkeypatch)
+    cfg = _config_toml(tmp_path)
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8").replace(
+            '[dream.llm.short_increment]\ndriver = "stub"\nmodel = "stub"\n',
+            '[dream.llm.short_increment]\ndriver = "ollama"\nmodel = "llama3.1:8b"\n'
+            'base_url = "http://127.0.0.1:1"\n',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.delenv("MNEMOSEED_USER_HOME", raising=False)
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", cfg)
+    monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
     code = main(["llm", "status"])
     captured = capsys.readouterr()
     assert code == 0
-    assert "local_track" in captured.out
+    assert "short_increment" in captured.out
     assert "connectivity: FAIL" in captured.out
 
 

@@ -1045,6 +1045,13 @@ def cmd_llm_set(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.role == "local_track":
+        print(
+            "error: llm role 'local_track' was removed — MnemoSeed now has two dream "
+            "roles: deep_reflection and short_increment",
+            file=sys.stderr,
+        )
+        return 1
     body: dict[str, Any] = {}
     for field, value in (
         ("driver", args.driver),
@@ -1290,10 +1297,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_llm_set.add_argument(
         "role",
         metavar="ROLE",
-        help="dream role (deep_reflection, short_increment, local_track)",
+        help="dream role (deep_reflection, short_increment)",
     )
     p_llm_set.add_argument("--baseurl", default=None, help="daemon base URL (default: config baseurl)")
-    p_llm_set.add_argument("--driver", default=None, help="driver name to switch to")
+    p_llm_set.add_argument(
+        "--driver",
+        default=None,
+        help="provider (or --provider codex|grok for a host login)",
+    )
     p_llm_set.add_argument("--model", default=None, help="model name to switch to")
     p_llm_set.add_argument(
         "--base-url", default=None, help="endpoint override (omit to keep; empty to clear)"
