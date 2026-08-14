@@ -251,14 +251,26 @@ def test_llm_oauth_availability_both_providers_and_expiry_flags(tmp_path, monkey
 def test_llm_set_role_roundtrips_persists_and_audits(tmp_path, monkeypatch) -> None:
     cfg = _config_toml(tmp_path)
     with _client(tmp_path, monkeypatch, cfg=cfg) as client:
+        # MUST-FIX 2: a matching connectivity probe must pass before a persist.
+        probe = client.post(
+            "/api/v1/llm/test",
+            json={
+                "role": "short_increment",
+                "driver": "stub",
+                "model": "claude-sonnet-5",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+        )
+        assert probe.status_code == 200
+        assert probe.json()["ok"] is True
         response = client.post(
             "/api/v1/llm/routes/short_increment",
-            json={"driver": "anthropic", "model": "claude-sonnet-5", "api_key_env": "ANTHROPIC_API_KEY"},
+            json={"driver": "stub", "model": "claude-sonnet-5", "api_key_env": "ANTHROPIC_API_KEY"},
         )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["role"] == "short_increment"
-        assert body["driver"] == "anthropic"
+        assert body["driver"] == "stub"
         assert body["model"] == "claude-sonnet-5"
         assert body["api_key_env"] == "ANTHROPIC_API_KEY"
         assert body["persisted_to"] == str(cfg)
@@ -266,14 +278,14 @@ def test_llm_set_role_roundtrips_persists_and_audits(tmp_path, monkeypatch) -> N
 
         # read-back through the wire
         roles = {r["role"]: r for r in client.get("/api/v1/llm/routes").json()["roles"]}
-        assert roles["short_increment"]["driver"] == "anthropic"
+        assert roles["short_increment"]["driver"] == "stub"
         assert roles["short_increment"]["model"] == "claude-sonnet-5"
         assert roles["short_increment"]["api_key_env"] == "ANTHROPIC_API_KEY"
 
         # the config file on disk matches (surgical patch; the other roles intact)
         on_disk = cfg.read_text(encoding="utf-8")
         assert "[dream.llm.short_increment]" in on_disk
-        assert 'driver = "anthropic"' in on_disk
+        assert 'driver = "stub"' in on_disk
         assert 'model = "claude-sonnet-5"' in on_disk
         assert 'api_key_env = "ANTHROPIC_API_KEY"' in on_disk
         assert 'driver = "stub"' in on_disk  # deep_reflection row untouched
@@ -291,14 +303,73 @@ def test_llm_set_role_clears_optional_param(tmp_path, monkeypatch) -> None:
     cfg = _config_toml(tmp_path)
     with _client(tmp_path, monkeypatch, cfg=cfg) as client:
         set_url = "/api/v1/llm/routes/short_increment"
+        probe = {"role": "short_increment", "driver": "stub", "model": "m", "base_url": "http://example.test"}
+        client.post("/api/v1/llm/test", json=probe)
         client.post(set_url, json={"driver": "stub", "model": "m", "base_url": "http://example.test"})
         assert 'base_url = "http://example.test"' in cfg.read_text(encoding="utf-8")
+        client.post(
+            "/api/v1/llm/test",
+            json={"role": "short_increment", "driver": "stub", "model": "m", "base_url": ""},
+        )
         response = client.post(set_url, json={"base_url": ""})
         assert response.status_code == 200
         short_table = (
             cfg.read_text(encoding="utf-8").split("[dream.llm.short_increment]", 1)[1].split("[", 1)[0]
         )
         assert "base_url" not in short_table  # the cleared endpoint is un-pinned
+
+
+def test_llm_set_role_partial_model_only_merges_current_route(tmp_path, monkeypatch) -> None:
+    """A partial set keeps the current resolved values server-side: a model-only
+    change must not clobber driver or an explicitly pinned base_url."""
+    cfg = _config_toml(tmp_path)
+    with _client(tmp_path, monkeypatch, cfg=cfg) as client:
+        set_url = "/api/v1/llm/routes/short_increment"
+        # pin an explicit endpoint first (full probe + full set)
+        client.post(
+            "/api/v1/llm/test",
+            json={
+                "role": "short_increment",
+                "driver": "stub",
+                "model": "m",
+                "base_url": "http://example.test",
+            },
+        )
+        pinned = client.post(
+            set_url, json={"driver": "stub", "model": "m", "base_url": "http://example.test"}
+        )
+        assert pinned.status_code == 200
+
+        # partial probe: omitted driver/base_url are merged from the current route
+        probe = client.post("/api/v1/llm/test", json={"role": "short_increment", "model": "claude-x"})
+        assert probe.status_code == 200
+        assert probe.json()["ok"] is True
+        # partial set: driver + pinned base_url survive the model-only write
+        response = client.post(set_url, json={"model": "claude-x"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["driver"] == "stub"
+        assert body["model"] == "claude-x"
+        assert body["base_url"] == "http://example.test"
+        roles = {r["role"]: r for r in client.get("/api/v1/llm/routes").json()["roles"]}
+        assert roles["short_increment"]["model"] == "claude-x"
+        assert roles["short_increment"]["base_url"] == "http://example.test"
+        assert 'model = "claude-x"' in cfg.read_text(encoding="utf-8")
+        assert 'base_url = "http://example.test"' in cfg.read_text(encoding="utf-8")
+
+
+def test_llm_set_role_partial_gate_enforced_on_merged_signature(tmp_path, monkeypatch) -> None:
+    """The probe-gate runs against the MERGED signature: probing model X never
+    authorizes persisting model Y, even when both persist partially."""
+    with _client(tmp_path, monkeypatch) as client:
+        probe = client.post("/api/v1/llm/test", json={"role": "short_increment", "model": "claude-x"})
+        assert probe.status_code == 200
+        assert probe.json()["ok"] is True
+        response = client.post("/api/v1/llm/routes/short_increment", json={"model": "claude-y"})
+        assert response.status_code == 409
+        # the matching partial persist still lands
+        matched = client.post("/api/v1/llm/routes/short_increment", json={"model": "claude-x"})
+        assert matched.status_code == 200
 
 
 def test_llm_set_role_unknown_role_is_422(tmp_path, monkeypatch) -> None:
@@ -430,9 +501,19 @@ def test_llm_responses_never_contain_token_values(tmp_path, monkeypatch) -> None
             assert _TOKEN_CODE not in blob
             assert _TOKEN_GROK not in blob
             assert "ultra-secret" not in blob
+        probe = client.post(
+            "/api/v1/llm/test",
+            json={
+                "role": "short_increment",
+                "driver": "stub",
+                "model": "claude-opus-5",
+                "api_key_env": "CLAUDE_API_KEY",
+            },
+        )
+        assert probe.json()["ok"] is True
         written = client.post(
             "/api/v1/llm/routes/short_increment",
-            json={"driver": "anthropic", "model": "claude-opus-5", "api_key_env": "CLAUDE_API_KEY"},
+            json={"driver": "stub", "model": "claude-opus-5", "api_key_env": "CLAUDE_API_KEY"},
         )
         assert _TOKEN_CODE not in written.text
         assert _TOKEN_GROK not in written.text

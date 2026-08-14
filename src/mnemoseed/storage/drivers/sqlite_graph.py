@@ -479,7 +479,7 @@ class SqliteGraphDriver:
         )
 
     def tombstone(self, node_id: str, deleted_at: float | None = None) -> bool:
-        """Tombstone the current revision (design/03 2.4, GDPR right-to-erasure).
+        """Tombstone the current revision (design/03 storage-layer erasure, GDPR right-to-erasure).
 
         Close the current revision at ``deleted_at`` and append a ``deleted``
         provenance event to that revision's version-chain payload. Nothing is

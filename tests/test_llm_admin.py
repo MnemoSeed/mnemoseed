@@ -135,6 +135,7 @@ def test_routes_payload_never_contains_key_values(tmp_path) -> None:
     config = load_config(_config_toml(tmp_path))
     # give short_increment an env-var NAME (only a name is ever stored)
     service = LLMAdminService(config, meta=None, clock=lambda: 1_700_000_000.0)
+    _arm(service, "short_increment", model="stub", api_key_env=env_name)
     service.set_role("short_increment", api_key_env=env_name)
     blob = json.dumps(service.routes())
     # attested names yes, literal values never
@@ -215,22 +216,33 @@ def _service_on(tmp_path: Path, **kwargs) -> tuple[LLMAdminService, Path]:
     return LLMAdminService(load_config(path), meta=None, **defaults), path
 
 
+def _arm(service: LLMAdminService, role: str, *, model: str = "m", **route) -> None:
+    """MUST-FIX 2: pass a connectivity test for the exact route to be persisted.
+
+    Uses the stub driver, which passes offline, so the arming probe never needs
+    the network.
+    """
+    report = service.test_config(role=role, driver="stub", model=model, **route)
+    assert report.ok is True
+
+
 def test_set_role_persists_toml_and_reads_back(tmp_path) -> None:
     service, path = _service_on(tmp_path)
+    _arm(service, "short_increment", model="claude-sonnet-5", api_key_env="ANTHROPIC_API_KEY")
     service.set_role(
         "short_increment",
-        driver="anthropic",
+        driver="stub",
         model="claude-sonnet-5",
         api_key_env="ANTHROPIC_API_KEY",
     )
     text = path.read_text(encoding="utf-8")
     assert "[dream.llm.short_increment]" in text
-    assert 'driver = "anthropic"' in text
+    assert 'driver = "stub"' in text
     assert 'model = "claude-sonnet-5"' in text
     assert 'api_key_env = "ANTHROPIC_API_KEY"' in text
     # the persisted file round-trips through the loader as the source of truth
     reread = load_config(path).llm["short_increment"]
-    assert reread.driver == "anthropic"
+    assert reread.driver == "stub"
     assert reread.model == "claude-sonnet-5"
     assert reread.params["api_key_env"] == "ANTHROPIC_API_KEY"
     # unrelated roles were left untouched
@@ -255,8 +267,10 @@ def test_set_role_empty_model_rejected(tmp_path) -> None:
 
 def test_set_role_clears_optional_param_when_empty(tmp_path) -> None:
     service, path = _service_on(tmp_path)
+    _arm(service, "short_increment", base_url="http://example.test")
     service.set_role("short_increment", driver="stub", model="m", base_url="http://example.test")
     assert load_config(path).llm["short_increment"].params["base_url"] == "http://example.test"
+    _arm(service, "short_increment", base_url="")
     service.set_role("short_increment", base_url="")
     # the endpoint is no longer pinned in the file, and the typed routes()
     # surface reports explicit-only values so the cleared field reads back None
@@ -273,24 +287,25 @@ def test_set_role_oauth_requires_provider(tmp_path) -> None:
 
 def test_set_role_oauth_with_provider_persists(tmp_path) -> None:
     service, path = _service_on(tmp_path)
-    service.set_role("deep_reflection", driver="oauth", model="gpt-5.6-codex", provider="codex", base_url="")
+    # a stub probe (offline-passing) arms the exact provider-carrying signature
+    _arm(service, "deep_reflection", provider="codex")
+    service.set_role("deep_reflection", driver="stub", model="m", provider="codex", base_url="")
     cfg = load_config(path).llm["deep_reflection"]
-    assert cfg.driver == "oauth"
+    assert cfg.driver == "stub"
     assert cfg.params["provider"] == "codex"
-    # the oauth route pins no endpoint in the file (the loader's default base_url
-    # remains a fallback param the oauth driver ignores at chat time)
+    # the provider route pins no endpoint in the file (the loader's default
+    # base_url remains a fallback param ignored at chat time)
     table = path.read_text(encoding="utf-8").split("[dream.llm.deep_reflection]", 1)[1].split("[", 1)[0]
     assert "base_url" not in table
-    assert 'driver = "oauth"' in table
+    assert 'driver = "stub"' in table
     assert 'provider = "codex"' in table
 
 
 def test_set_role_audits_env_name_never_value(tmp_path) -> None:
     sink = _AuditSink()
     service = LLMAdminService(load_config(_config_toml(tmp_path)), meta=sink, clock=lambda: 1_700_000_000.0)
-    service.set_role(
-        "deep_reflection", driver="anthropic", model="claude-opus-5", api_key_env="ANTHROPIC_API_KEY"
-    )
+    _arm(service, "deep_reflection", model="claude-opus-5", api_key_env="ANTHROPIC_API_KEY")
+    service.set_role("deep_reflection", driver="stub", model="claude-opus-5", api_key_env="ANTHROPIC_API_KEY")
     assert len(sink.entries) == 1
     entry = sink.entries[0]
     assert entry.action == "llm_role_set"

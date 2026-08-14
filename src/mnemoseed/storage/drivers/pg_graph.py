@@ -560,7 +560,7 @@ class PgGraphDriver:
         )
 
     def tombstone(self, node_id: str, deleted_at: float | None = None) -> bool:
-        """Tombstone the current revision (design/03 2.4); postgres mirror of the
+        """Tombstone the current revision (design/03 storage-layer erasure); postgres mirror of the
         sqlite driver. Close the current revision at ``deleted_at`` and append a
         ``deleted`` provenance event to its version-chain payload. Returns False
         when the node has no current revision to tombstone."""

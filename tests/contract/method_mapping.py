@@ -58,6 +58,7 @@ COVERAGE: dict[str, dict[str, str]] = {
         "get_profile": "test_contract_meta.py::test_profile_crud_and_token_cascade",
         "delete_profile": "test_contract_meta.py::test_profile_crud_and_token_cascade",
         "list_profiles": "test_contract_meta.py::test_profile_crud_and_token_cascade",
+        "archive_profile": "test_contract_meta.py::test_profile_archive_flag",
         "issue_token": "test_contract_meta.py::test_issue_token_and_revoke",
         "revoke_token": "test_contract_meta.py::test_issue_token_and_revoke",
         "get_config": "test_contract_meta.py::test_config_versioned_get_set_rollback",
@@ -90,10 +91,11 @@ COVERAGE: dict[str, dict[str, str]] = {
 # Appendix B reference method counts (prd-08 appendix B.1..B.4). MetaStore
 # grew to 29 with the issue-#14 identity chain surface (create/get/list/count/
 # update_password user + authenticate_token over hashed bearer digests) and to
-# 30 with create_owner (the atomic single-transaction owner setup).
+# 30 with create_owner (the atomic single-transaction owner setup), and to 31
+# with archive_profile (PRD-07 FR-7.3 console profile archive).
 EXPECTED_METHOD_COUNTS: dict[str, int] = {
     "VectorStore": 12,
     "GraphStore": 19,
-    "MetaStore": 30,
+    "MetaStore": 31,
     "Embedder": 3,
 }

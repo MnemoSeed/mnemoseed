@@ -405,7 +405,7 @@ def test_batch_update_weights(stack) -> None:
 
 
 def test_tombstone_tombstoned_node_via_port(stack) -> None:
-    """`tombstone` (design/03 2.4): a deleted node is invisible to reads /
+    """`tombstone` (design/03 storage-layer erasure): a deleted node is invisible to reads /
     traversal / future as_of, yet its version chain survives for audit.
 
     Tombstone semantics are expressible entirely through the existing

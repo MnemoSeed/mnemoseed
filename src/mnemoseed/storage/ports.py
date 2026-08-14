@@ -140,6 +140,7 @@ class StoredProfile:
     profile_id: str
     display_name: str = ""
     created_at: float = 0.0
+    archived: bool = False
 
 
 @dataclass(frozen=True)
@@ -535,7 +536,7 @@ class GraphStore(Protocol):
         raise NotImplementedError
 
     def tombstone(self, node_id: str, deleted_at: float | None = None) -> bool:
-        """Delete a node for good (GDPR right-to-erasure, design/03 2.4).
+        """Delete a node for good (GDPR right-to-erasure, design/03 storage-layer erasure).
 
         The current revision is closed at ``deleted_at`` and a ``deleted``
         provenance event is appended to that revision's version-chain payload;
@@ -607,6 +608,14 @@ class MetaStore(Protocol):
         raise NotImplementedError
 
     def list_profiles(self) -> list[StoredProfile]:
+        raise NotImplementedError
+
+    def archive_profile(self, profile_id: str, archived: bool) -> None:
+        """Set the profile's archived flag (console FR-7.3 profile archive).
+
+        Rename never touches the flag (upsert updates display_name only); the
+        flag is an explicit archive/unarchive action.
+        """
         raise NotImplementedError
 
     def issue_token(

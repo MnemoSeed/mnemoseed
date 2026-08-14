@@ -27,6 +27,8 @@ from mnemoseed.capture import ScoringPipeline, StrippingPipeline, TurnScorer, Tu
 from mnemoseed.capture.pool import PoolEvent, ScorePool
 from mnemoseed.capture.stamper import WriteContext
 from mnemoseed.config import Config, load_config
+from mnemoseed.configwrite.routes import router as configwrite_router
+from mnemoseed.configwrite.service import ConfigWriteService
 from mnemoseed.console import ConsoleService, GuardedStaticFiles
 from mnemoseed.console import router as console_router
 from mnemoseed.daemon.ingest import router as ingest_router
@@ -324,16 +326,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Console surface (PRD-07): the live dream trigger is bound here so the
     # /api/v1 routers observe the same trigger instance the /memory and /ingest
     # surfaces drive.
-    app.state.console = ConsoleService(stores, config, app.state.dream)
     # Identity chain (issue #14): the owner account + token surface. Every
     # memory and console route depends on require_identity, which reads this
     # state; the setup wizard 503s those routes until setup_owner has run.
     app.state.identity = IdentityService(stores.meta)
+    # ConfigWriteService (PRD-07 FR-7.11 / design/07 section 9): the daemon's
+    # single config writer behind every console/CLI settings change. Boot
+    # reconciliation detects a hand-edited config.toml (mtime/hash drift) and
+    # re-baselines the versioned store, recording a config_rebaseline audit
+    # entry (actor=daemon).
+    app.state.configwrite = ConfigWriteService(config, stores.meta)
+    app.state.configwrite.reconcile_boot()
+    app.state.console = ConsoleService(stores, config, app.state.dream, configwrite=app.state.configwrite)
     # LLM admin surface (issue #23 / FR-6.9): per-role route reads/writes,
     # OAuth availability, and the pre-write connectivity probe. It audits
-    # through the same meta store the console writes do and persists surgical
-    # TOML patches into the live config.
-    app.state.llm_admin = LLMAdminService(config, stores.meta)
+    # through the same meta store the console writes do and persists role
+    # changes through the ConfigWriteService into the live config.
+    app.state.llm_admin = LLMAdminService(config, stores.meta, configwrite=app.state.configwrite)
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,
@@ -367,6 +376,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router)
     app.include_router(console_router)
     app.include_router(llm_admin_router)
+    app.include_router(configwrite_router)
     # Console SPA shell (PRD-07 T1): served from its own static directory,
     # mounted behind the same localhost/admin-token gate as /api/v1.
     app.mount("/console", GuardedStaticFiles(directory=_CONSOLE_STATIC_DIR), name="console")

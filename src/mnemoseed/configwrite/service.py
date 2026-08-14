@@ -1,0 +1,627 @@
+"""ConfigWriteService (PRD-07 FR-7.11 / design/07 section 9, W1.1).
+
+The daemon's single config writer. Every settings change funnels through one
+flow:
+
+  registry  -> validate  -> surgical TOML patch  -> versioned record  ->
+  audit (actor attributed) -> live-apply
+
+- The key-path registry (:data:`CONFIG_KEY_REGISTRY`) is the closed schema of
+  writable keys; an unknown key is a typed ``ConfigWriteError`` that names it.
+- ``set`` applies a line-oriented TOML patch (never a full round-trip): the
+  target line is rewritten in place, comments/layout and sibling keys survive,
+  and a missing table is inserted after the last existing one.
+- With a meta store attached, every write lands a versioned record
+  (``set_config``) and an audit entry with actor attribution; without one the
+  service still patches the file (offline mode) but records nothing.
+- ``version_id`` is a global integer: ``slot * _VERSION_STRIDE + version``
+  where slot is the key's registry index, so a version id decodes to exactly
+  one (key, version) pair and rolls through an append-only
+  ``rollback_config`` on restore.
+- ``reconcile_boot`` re-baselines the versioned store when the file's
+  mtime/hash differs from the last-known state (a hand edit while the daemon
+  was down), recording a ``config_rebaseline`` audit entry (actor=daemon).
+- Secrets are never written or read: ``api_key_env`` values are env-var NAMES,
+  and every read surface redacts anything that is not a valid name.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+from mnemoseed.config import CONFIG_PATH, LLM_ROLES, Config, DreamConfig, RoleLLMConfig
+from mnemoseed.storage.ports import AuditEntry, ConfigEntry
+
+#: Global version-id stride: slot * stride + version.
+_VERSION_STRIDE = 1_000_000
+
+#: Private bookkeeping key (excluded from every public version listing).
+_FILE_STATE_KEY = "__configwrite__file_state"
+
+#: Env-var NAME grammar (FR-2.14): UPPER_SNAKE only. Anything else in an
+#: ``api_key_env`` write is a literal key and a hard validation failure.
+_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+class ConfigWriteError(ValueError):
+    """Typed write failure naming the offending config key (mapped to 422)."""
+
+    def __init__(self, key_path: str, message: str) -> None:
+        self.key_path = key_path
+        super().__init__(f"config[{key_path}]: {message}")
+
+
+class ConfigWriteMeta(Protocol):
+    """The minimal versioned-config store surface the writer records through."""
+
+    def get_config(self, key: str, version: int | None = None) -> ConfigEntry | None: ...
+    def set_config(self, key: str, value: dict[str, Any]) -> int: ...
+    def rollback_config(self, key: str, version: int) -> None: ...
+    def audit_append(self, entry: AuditEntry) -> None: ...
+
+
+@dataclass(frozen=True)
+class ConfigKey:
+    """One writable config key and how to read/validate/apply it.
+
+    ``validate`` normalizes the incoming wire value (raising ``ValueError`` on
+    a typed failure); ``read`` resolves the current effective value from a
+    ``Config``; ``apply`` live-updates the running ``Config`` after the patch
+    lands (frozen ``DreamConfig`` is replaced, role params are rebuilt).
+    """
+
+    key_path: str
+    value_type: str
+    validate: Callable[[Any], Any]
+    read: Callable[[Config], Any]
+    apply: Callable[[Config, Any], None]
+    live_apply: bool = True
+    secret: bool = False
+
+
+# ---------------------------------------------------------------- validators
+
+
+def _validate_bool(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("must be a boolean")
+    return value
+
+
+def _validate_positive_float(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("must be a positive number")
+    return float(value)
+
+
+def _validate_optional_positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("must be a positive integer")
+    return value
+
+
+def _validate_nonempty_str(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("must be a non-empty string")
+    return value.strip()
+
+
+def _validate_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("must be a string")
+    return value.strip() or None
+
+
+def _validate_env_name_list(value: Any) -> str | None:
+    """Comma-separated env-var NAMES only; a literal key is never accepted.
+
+    The failure message never echoes the offending token: a key value must not
+    travel back over the wire in an error response either.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("must be a comma-separated list of env-var names")
+    names = [token.strip() for token in value.split(",") if token.strip()]
+    if not names:
+        return None
+    invalid = [name for name in names if _ENV_NAME_RE.fullmatch(name) is None]
+    if invalid:
+        raise ValueError("must be env-var NAMES only (a literal key value is never accepted or stored)")
+    return ",".join(names)
+
+
+# ---------------------------------------------------------------- live-apply
+
+
+def _dream_apply(config: Config, field: str, value: Any) -> None:
+    """Replace the frozen DreamConfig and mirror the change into config.raw."""
+    if field == "auto_trigger":
+        config.dream = DreamConfig(auto_trigger=bool(value), token_budget_usd=config.dream.token_budget_usd)
+    else:
+        config.dream = DreamConfig(auto_trigger=config.dream.auto_trigger, token_budget_usd=float(value))
+    raw_dream = config.raw.setdefault("dream", {})
+    if value is None:
+        raw_dream.pop(field, None)
+    else:
+        raw_dream[field] = value
+
+
+def _role_apply(config: Config, role: str, field: str, value: Any) -> None:
+    """Rebuild the role's RoleLLMConfig with the new field and mirror raw."""
+    cfg = config.llm[role]
+    params = dict(cfg.params)
+    if field not in ("driver", "model"):
+        if value is None:
+            params.pop(field, None)
+        else:
+            params[field] = value
+    new_driver = str(value) if field == "driver" else cfg.driver
+    new_model = str(value) if field == "model" else cfg.model
+    config.llm[role] = RoleLLMConfig(role=role, driver=new_driver, model=new_model, params=params)
+    raw_table = config.raw.setdefault("dream", {}).setdefault("llm", {}).setdefault(role, {})
+    if value is None:
+        raw_table.pop(field, None)
+    else:
+        raw_table[field] = value
+
+
+def _role_read(config: Config, role: str, field: str) -> Any:
+    cfg = config.llm[role]
+    if field in ("driver", "model"):
+        return getattr(cfg, field)
+    return cfg.params.get(field)
+
+
+def _role_reader(role: str, field: str) -> Callable[[Config], Any]:
+    return lambda config: _role_read(config, role, field)
+
+
+def _role_applier(role: str, field: str) -> Callable[[Config, Any], None]:
+    return lambda config, value: _role_apply(config, role, field, value)
+
+
+# ---------------------------------------------------------------- registry
+
+
+def _role_key_specs(role: str) -> dict[str, ConfigKey]:
+    """The six writable fields of one dream role (design/02 section 6)."""
+    fields: dict[str, tuple[str, Callable[[Any], Any], bool]] = {
+        "driver": ("string", _validate_nonempty_str, False),
+        "model": ("string", _validate_nonempty_str, False),
+        "base_url": ("string", _validate_optional_str, False),
+        "api_key_env": ("env-var name list", _validate_env_name_list, True),
+        "max_tokens": ("positive integer", _validate_optional_positive_int, False),
+        "provider": ("string", _validate_optional_str, False),
+    }
+    return {
+        f"dream.llm.{role}.{field}": ConfigKey(
+            key_path=f"dream.llm.{role}.{field}",
+            value_type=label,
+            validate=validator,
+            read=_role_reader(role, field),
+            apply=_role_applier(role, field),
+            live_apply=True,
+            secret=is_secret,
+        )
+        for field, (label, validator, is_secret) in fields.items()
+    }
+
+
+CONFIG_KEY_REGISTRY: dict[str, ConfigKey] = {
+    "dream.auto_trigger": ConfigKey(
+        key_path="dream.auto_trigger",
+        value_type="boolean",
+        validate=_validate_bool,
+        read=lambda config: config.dream.auto_trigger,
+        apply=lambda config, value: _dream_apply(config, "auto_trigger", value),
+        live_apply=True,
+    ),
+    "dream.token_budget_usd": ConfigKey(
+        key_path="dream.token_budget_usd",
+        value_type="positive number",
+        validate=_validate_positive_float,
+        read=lambda config: config.dream.token_budget_usd,
+        apply=lambda config, value: _dream_apply(config, "token_budget_usd", value),
+        live_apply=True,
+    ),
+}
+for _role in LLM_ROLES:
+    CONFIG_KEY_REGISTRY.update(_role_key_specs(_role))
+
+#: Sorted registry keys map to stable version-id slots.
+_SLOT_KEYS: tuple[str, ...] = tuple(sorted(CONFIG_KEY_REGISTRY))
+_REGISTRY_SLOTS: dict[str, int] = {key_path: index for index, key_path in enumerate(_SLOT_KEYS)}
+
+
+def _version_id(key_path: str, version: int) -> int:
+    return _REGISTRY_SLOTS[key_path] * _VERSION_STRIDE + version
+
+
+def _resolve_version_id(version_id: int) -> tuple[str, int]:
+    """Decode a global version id into its (key, version) pair."""
+    slot, version = divmod(version_id, _VERSION_STRIDE)
+    try:
+        key_path = _SLOT_KEYS[slot]
+    except IndexError:
+        raise ConfigWriteError("version_id", f"unknown config version {version_id}") from None
+    return key_path, version
+
+
+def _coerce_version_id(raw: Any) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ConfigWriteError("version_id", "must be an integer")
+    if isinstance(raw, str):
+        if not raw.isdigit():
+            raise ConfigWriteError("version_id", "must be an integer")
+        return int(raw)
+    if raw < 1:
+        raise ConfigWriteError("version_id", "must be a positive integer")
+    return raw
+
+
+# ---------------------------------------------------------------- TOML patch
+
+
+def _line_key(line: str) -> str | None:
+    """The TOML key of a key=value line; None for headers/comments/blanks."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("[") or stripped.startswith("#") or "=" not in stripped:
+        return None
+    return stripped.split("=", 1)[0].strip().strip('"').strip("'")
+
+
+def _table_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
+    """Header name -> (start, end) for every TOML table.
+
+    ``end`` is the next header's index (exclusive), so a table body is
+    ``lines[start + 1 : end]``; the last table runs to EOF.
+    """
+    spans: dict[str, tuple[int, int]] = {}
+    current: str | None = None
+    start: int = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if current is not None:
+                spans[current] = (start, index)
+            current = stripped[1:-1].strip()
+            start = index
+    if current is not None:
+        spans[current] = (start, len(lines))
+    return spans
+
+
+def _toml_str(value: Any) -> str:
+    """Encode a scalar as a TOML literal (double-quoted strings, JSON booleans)."""
+    return json.dumps(value)
+
+
+def _inline_comment_index(line: str) -> int:
+    """Index of the first ``#`` outside quotes (a trailing comment), else -1."""
+    in_quotes = False
+    quote = ""
+    for index, char in enumerate(line):
+        if char in "\"'":
+            if not in_quotes:
+                in_quotes = True
+                quote = char
+            elif quote == char:
+                in_quotes = False
+        elif char == "#" and not in_quotes:
+            return index
+    return -1
+
+
+def _rewrite_value_line(line: str, leaf: str, value: Any) -> str:
+    """Rewrite a ``leaf = value`` line in place, keeping indent + comments."""
+    indent = line[: len(line) - len(line.lstrip())]
+    comment_index = _inline_comment_index(line)
+    suffix = line[comment_index:] if comment_index >= 0 else ""
+    return f"{indent}{leaf} = {_toml_str(value)}{suffix}"
+
+
+def _patch_toml(path: Path, key_path: str, value: Any) -> None:
+    """Surgical line-oriented TOML patch for one key.
+
+    ``value=None`` removes the key's line (a clear); anything else writes
+    ``leaf = <literal>`` inside the key's table, rewriting an existing line in
+    place (never duplicated) or creating the table after the last existing one.
+    """
+    table_path, _, leaf = key_path.rpartition(".")
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = original.split("\n")
+    spans = _table_spans(lines)
+
+    if table_path in spans:
+        start, end = spans[table_path]
+        new_body: list[str] = []
+        written = False
+        for line in lines[start + 1 : end]:
+            line_key = _line_key(line)
+            if line_key == leaf:
+                if value is None:
+                    continue  # clear: drop the line
+                new_body.append(_rewrite_value_line(line, leaf, value))
+                written = True
+                continue
+            new_body.append(line)
+        if value is not None and not written:
+            new_body.append(f"{leaf} = {_toml_str(value)}")
+        out = lines[: start + 1] + new_body + lines[end:]
+    else:
+        if value is None:
+            return  # a clear with no table to edit writes nothing
+        insert_at = max((finish for _, finish in spans.values()), default=len(lines))
+        block = [f"[{table_path}]", f"{leaf} = {_toml_str(value)}"]
+        out = lines[:insert_at] + block + lines[insert_at:]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out).strip("\n") + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------- fingerprint
+
+
+def _file_fingerprint(path: Path) -> tuple[float, str]:
+    """(mtime, sha256) of the config file; hand edits break the hash."""
+    if not path.exists():
+        return 0.0, ""
+    stat = path.stat()
+    return stat.st_mtime, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------- service
+
+
+class ConfigWriteService:
+    """The single config writer: registry -> validate -> patch -> record ->
+    audit -> live-apply (offline when no meta store is attached)."""
+
+    def __init__(
+        self,
+        config: Config,
+        meta: ConfigWriteMeta | None = None,
+        *,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._config = config
+        self._meta = meta
+        self._clock = clock if clock is not None else time.time
+
+    # ------------------------------------------------------------ reads
+
+    def get(self) -> dict[str, Any]:
+        """The resolved config for the wire, secrets redacted to names only."""
+        return {
+            "config": {
+                "preset": self._config.preset,
+                "baseurl": self._config.baseurl,
+                "dream": {
+                    "auto_trigger": self._config.dream.auto_trigger,
+                    "token_budget_usd": self._config.dream.token_budget_usd,
+                    "llm": {role: self._resolved_role(role) for role in LLM_ROLES},
+                },
+            },
+            "restart_required": {},
+        }
+
+    def _resolved_role(self, role: str) -> dict[str, Any]:
+        cfg = self._config.llm[role]
+        return {
+            "driver": cfg.driver,
+            "model": cfg.model,
+            "base_url": cfg.params.get("base_url"),
+            "api_key_env": _redact_env_names(cfg.params.get("api_key_env")),
+            "max_tokens": cfg.params.get("max_tokens"),
+            "provider": cfg.params.get("provider"),
+        }
+
+    def versions(self) -> list[dict[str, Any]]:
+        """The versioned history (registry keys only, never internal records)."""
+        if self._meta is None:
+            return []
+        out: list[dict[str, Any]] = []
+        for key_path in _SLOT_KEYS:
+            version = 1
+            while True:
+                entry = self._meta.get_config(key_path, version)
+                if entry is None:
+                    break
+                out.append(
+                    {
+                        "version_id": _version_id(key_path, entry.version),
+                        "key": key_path,
+                        "version": entry.version,
+                        "value": self._redact(key_path, entry.value.get("value")),
+                        "updated_at": entry.updated_at,
+                    }
+                )
+                version += 1
+        out.sort(key=lambda item: item["version_id"])
+        return out
+
+    # ------------------------------------------------------------ writes
+
+    def set(self, key_path: str, value: Any, *, actor: str = "console") -> dict[str, Any]:
+        """Validate, patch, record, audit and live-apply one config write."""
+        spec = CONFIG_KEY_REGISTRY.get(key_path)
+        if spec is None:
+            raise ConfigWriteError(key_path, "unknown config key (not writable)")
+        try:
+            validated = spec.validate(value)
+        except ValueError as exc:
+            raise ConfigWriteError(key_path, str(exc)) from exc
+        path = self._config_path()
+        _patch_toml(path, key_path, validated)
+        version_id = self._record(key_path, validated)
+        spec.apply(self._config, validated)
+        self._touch_fingerprint()
+        restart_required = not spec.live_apply
+        self._audit(
+            "config.set",
+            {
+                "key_path": key_path,
+                "value": validated,
+                "version_id": version_id,
+                "restart_required": restart_required,
+            },
+            actor,
+        )
+        return {
+            "ok": True,
+            "version_id": version_id,
+            "restart_required": restart_required,
+            "key_path": key_path,
+            "value": validated,
+            "persisted_to": str(path),
+            "actor": actor,
+        }
+
+    def rollback(self, version_id: Any, *, actor: str = "console") -> dict[str, Any]:
+        """Restore a recorded version, append-only (a new record, never a
+        delete): the file, the live config and the versioned store converge on
+        the restored value."""
+        if self._meta is None:
+            raise ConfigWriteError("rollback", "no versioned config store available")
+        resolved = _coerce_version_id(version_id)
+        key_path, version = _resolve_version_id(resolved)
+        spec = CONFIG_KEY_REGISTRY.get(key_path)
+        if spec is None:
+            raise ConfigWriteError(key_path, "unknown config key (not writable)")
+        target = self._meta.get_config(key_path, version)
+        if target is None:
+            raise ConfigWriteError(key_path, f"no version {version} recorded for {key_path!r}")
+        self._meta.rollback_config(key_path, version)
+        restored = self._meta.get_config(key_path)
+        if restored is None:
+            raise ConfigWriteError(key_path, "rollback produced no restored record")
+        restored_value = restored.value.get("value")
+        path = self._config_path()
+        _patch_toml(path, key_path, restored_value)
+        spec.apply(self._config, restored_value)
+        self._touch_fingerprint()
+        new_version_id = _version_id(key_path, restored.version)
+        self._audit(
+            "config.rollback",
+            {"key_path": key_path, "restored_version": version, "version_id": new_version_id},
+            actor,
+        )
+        return {
+            "ok": True,
+            "version_id": new_version_id,
+            "restored": new_version_id,
+            "key_path": key_path,
+            "persisted_to": str(path),
+            "actor": actor,
+        }
+
+    # ------------------------------------------------------------ boot reconcile
+
+    def reconcile_boot(self) -> dict[str, Any]:
+        """Re-baseline the versioned store when the file drifted while the
+        daemon was down (first boot or a hand edit): every registered key is
+        recorded with its resolved value, and a config_rebaseline audit entry
+        explains the divergence (reason initial|hand_edit, actor=daemon)."""
+        if self._meta is None:
+            return {
+                "ok": False,
+                "reason": "no versioned config store available",
+                "changed": False,
+                "keys_updated": [],
+            }
+        path = self._config_path()
+        fingerprint = _file_fingerprint(path)
+        last = self._last_fingerprint()
+        changed = last != fingerprint
+        reason = "initial" if last is None else "hand_edit"
+        updated: list[str] = []
+        if changed:
+            for key_path in _SLOT_KEYS:
+                current = CONFIG_KEY_REGISTRY[key_path].read(self._config)
+                entry = self._meta.get_config(key_path)
+                if entry is None or entry.value.get("value") != current:
+                    self._meta.set_config(key_path, {"value": current})
+                    updated.append(key_path)
+            self._set_fingerprint(fingerprint)
+            self._audit(
+                "config_rebaseline",
+                {
+                    "reason": reason,
+                    "hash": fingerprint[1],
+                    "mtime": fingerprint[0],
+                    "keys_updated": updated,
+                    "changed": True,
+                },
+                "daemon",
+            )
+        return {
+            "ok": True,
+            "changed": changed,
+            "reason": reason,
+            "keys_updated": updated,
+            "fingerprint": {"mtime": fingerprint[0], "hash": fingerprint[1]},
+        }
+
+    # ------------------------------------------------------------ plumbing
+
+    def _config_path(self) -> Path:
+        source = self._config.source
+        return source if source is not None else CONFIG_PATH
+
+    def _record(self, key_path: str, value: Any) -> int | None:
+        if self._meta is None:
+            return None
+        version = self._meta.set_config(key_path, {"value": value})
+        return _version_id(key_path, version)
+
+    def _audit(self, action: str, detail: dict[str, Any], actor: str) -> bool:
+        if self._meta is None:
+            return False
+        self._meta.audit_append(AuditEntry(actor=actor, action=action, detail=detail, at=self._clock()))
+        return True
+
+    def _touch_fingerprint(self) -> None:
+        """A write moves the file, so the recorded file state follows."""
+        if self._meta is None:
+            return
+        fingerprint = _file_fingerprint(self._config_path())
+        self._set_fingerprint(fingerprint)
+
+    def _last_fingerprint(self) -> tuple[float, str] | None:
+        if self._meta is None:
+            return None
+        entry = self._meta.get_config(_FILE_STATE_KEY)
+        if entry is None:
+            return None
+        return float(entry.value.get("mtime", 0.0)), str(entry.value.get("hash", ""))
+
+    def _set_fingerprint(self, fingerprint: tuple[float, str]) -> None:
+        if self._meta is None:
+            return
+        self._meta.set_config(_FILE_STATE_KEY, {"mtime": fingerprint[0], "hash": fingerprint[1]})
+
+    def _redact(self, key_path: str, value: Any) -> Any:
+        """Secret keys surface env-var NAMES only; other values pass through."""
+        if CONFIG_KEY_REGISTRY[key_path].secret:
+            return _redact_env_names(value)
+        return value
+
+
+def _redact_env_names(value: Any) -> str:
+    """Keep env-var NAMES only: a literal key value never surfaces on a read."""
+    if not isinstance(value, str):
+        return ""
+    names = [token.strip() for token in value.split(",") if token.strip()]
+    return ",".join(name for name in names if _ENV_NAME_RE.fullmatch(name))

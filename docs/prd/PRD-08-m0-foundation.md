@@ -5,6 +5,7 @@
 > Nature: pure foundation with zero user-visible functionality — but what it freezes (schema, interface contracts) hurts every time it changes later, so this PRD has the strictest review standard of all PRDs.
 > v2 revision: after independent blind-reviewer review (15 findings), added the interface method list (Appendix B), the degradation behavior table (Appendix C), and completed the schema-freeze fields (profile isolation / structured turn boundaries / flag bits / usage counters / sparse-vector representation).
 > v1.1 amendment (2026-08-13): Appendix B.2 adds GraphStore `list_edges(filter, page)` (bulk edge read for the console Graph View), the capability-flag set grows to 12 (FR-8.6) with the new `GRAPH_EDGE_LIST`, and Appendix C gains the corresponding degrade row. This is a numbered amendment, not a rewrite — all previously frozen language stands unchanged.
+> v1.2 amendment (2026-08-14): B.3 adds MetaStore `archive_profile(profile_id)` (soft-archive; `profiles.archived` column, migration v7) backing console Profiles FR-7.3. All previously frozen language stands unchanged.
 
 ## 1. Goals
 
@@ -185,6 +186,7 @@ Note (v1.1 amendment, 2026-08-13): `list_edges` is required in **both** `sqlite_
 | pool_state(profile_id) / pool_states() | single profile / all balances and watermarks read | capture FR-1.5, daemon startup recovery |
 | advance_watermark(profile_id, turn_range) | monotonically advance a single profile's watermark | dream |
 | profiles CRUD / tokens issue / revoke | identity and credentials | PRD-06 |
+| archive_profile(profile_id) | **profile soft-archive** (v1.2 amendment, 2026-08-14): sets `profiles.archived` (migration v7); archived profiles stay queryable but are excluded from default active lists; distinct from delete — tokens/data survive until an explicit purge | console Profiles (FR-7.3) |
 | config get / set (versioned + rollback) | versioned configuration | console Settings |
 | audit_append / audit_query(filter, page) | append-only audit write / filtered paginated read | global |
 | dream_runs record / list | dream run history | dream, console |

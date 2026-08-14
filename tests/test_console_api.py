@@ -297,6 +297,19 @@ def test_status_dashboard_counts_reconcile_and_pending(tmp_path, monkeypatch) ->
         assert row["counts"]["pending_consolidation"] == 1
 
 
+def test_status_profile_row_surfaces_display_name_and_archived(tmp_path, monkeypatch) -> None:
+    """FR-7.3: /api/v1/status profile rows expose display_name + archived so the
+    Profiles page can list/rename/archive from the dashboard surface alone."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        client.post(f"/api/v1/profiles/{_PROFILE}/rename", json={"display_name": "Home"})
+        client.post(f"/api/v1/profiles/{_PROFILE}/archive", json={"archived": True})
+
+        row = next(p for p in client.get("/api/v1/status").json()["profiles"] if p["profile_id"] == _PROFILE)
+        assert row["display_name"] == "Home"
+        assert row["archived"] is True
+
+
 # ---------------------------------------------------------------- memory browse (FR-7.4)
 
 

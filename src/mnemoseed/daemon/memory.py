@@ -14,10 +14,10 @@ Router + service seam over the retrieval engine and the storage ports:
 - POST /memory/audit      - provenance + version chain + relevant audit rows.
 - POST /memory/timeline   - per-node version replay, else profile-wide paging.
 - POST /memory/export     - stable paged JSON dump including provenance.
-- POST /memory/forget_this- GDPR deletion (design/03 2.4): chunk rows are
-                            deleted, graph nodes are tombstoned (version chain
-                            preserved), the audit trail records exactly what was
-                            removed.
+- POST /memory/forget_this- GDPR deletion (design/03 storage-layer erasure):
+                            chunk rows are deleted, graph nodes are tombstoned
+                            (version chain preserved), the audit trail records
+                            exactly what was removed.
 - POST /memory/dream_once / dream_status - the /dream command HTTP surface
                             (FR-2.8 manual-first): run exactly one manual dream
                             cycle and read the trigger's observability. Handlers
@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field, model_validator
 from mnemoseed.capture.stamper import ConsistencyVerdict, NearDuplicateChecker, WriteConfig
 from mnemoseed.config import Config
 from mnemoseed.dream import DreamTrigger, TriggerStatus
+from mnemoseed.identity.actor import resolve_actor
 from mnemoseed.identity.gate import require_identity
 from mnemoseed.retrieve.assemble import (
     AssembledContext,
@@ -373,7 +374,7 @@ class MemoryService:
 
     # ------------------------------------------------------------ remember
 
-    def remember(self, *, profile_id: str, text: str) -> dict[str, Any]:
+    def remember(self, *, profile_id: str, text: str, actor: str = "console") -> dict[str, Any]:
         """Write an explicit user pin, mirroring the StampWriter's dual-branch
         near-duplicate flow: a strong consistent hit reinforces in place, a
         conflict flags needs_reconcile, anything else becomes a new chunk.
@@ -407,7 +408,9 @@ class MemoryService:
         band = vector.near_duplicate(embedded.dense, config.conflict_threshold, profile_id=profile_id)
         if not band:
             vector.upsert_chunk(stamp, embedded.dense, embedded.sparse)
-            self._audit(profile_id, "remember", {"chunk_id": stamp.chunk_id, "profile_id": profile_id})
+            self._audit(
+                profile_id, "remember", {"chunk_id": stamp.chunk_id, "profile_id": profile_id}, actor=actor
+            )
             return {"outcome": "new_chunk", "chunk_id": stamp.chunk_id}
         hit = band[0]
         strong_ids = {chunk.chunk_id for chunk in strong}
@@ -419,6 +422,7 @@ class MemoryService:
                 profile_id,
                 "remember",
                 {"chunk_id": hit.chunk_id, "profile_id": profile_id, "outcome": "reinforced"},
+                actor=actor,
             )
             return {"outcome": "reinforced", "chunk_id": hit.chunk_id}
         if verdict is ConsistencyVerdict.CONFLICT:
@@ -427,10 +431,13 @@ class MemoryService:
                 profile_id,
                 "remember",
                 {"chunk_id": hit.chunk_id, "profile_id": profile_id, "outcome": "needs_reconcile"},
+                actor=actor,
             )
             return {"outcome": "needs_reconcile", "chunk_id": hit.chunk_id}
         vector.upsert_chunk(stamp, embedded.dense, embedded.sparse)
-        self._audit(profile_id, "remember", {"chunk_id": stamp.chunk_id, "profile_id": profile_id})
+        self._audit(
+            profile_id, "remember", {"chunk_id": stamp.chunk_id, "profile_id": profile_id}, actor=actor
+        )
         return {"outcome": "new_chunk", "chunk_id": stamp.chunk_id}
 
     # ------------------------------------------------------------ audit
@@ -575,8 +582,9 @@ class MemoryService:
         chunk_id: str | None = None,
         node_id: str | None = None,
         entity: str | None = None,
+        actor: str = "console",
     ) -> dict[str, Any]:
-        """GDPR deletion (design/03 2.4). Chunks are physically deleted; graph
+        """GDPR deletion (design/03 storage-layer erasure). Chunks are physically deleted; graph
         nodes are tombstoned so their full version chains stay reachable through
         the store layer (versions / audit / timeline) while every current read
         stops seeing them. recall's as_of does not resurrect a tombstoned node:
@@ -608,13 +616,14 @@ class MemoryService:
             profile_id,
             "forget_this",
             {"chunks": removed_chunks, "nodes": removed_nodes, "profile_id": profile_id},
+            actor=actor,
         )
         return {"removed": {"chunks": removed_chunks, "nodes": removed_nodes}}
 
     # ------------------------------------------------------------ plumbing
 
-    def _audit(self, profile_id: str, action: str, detail: dict[str, Any]) -> None:
-        self._stores.meta.audit_append(AuditEntry(actor="user", action=action, detail=detail, at=time.time()))
+    def _audit(self, profile_id: str, action: str, detail: dict[str, Any], *, actor: str = "console") -> None:
+        self._stores.meta.audit_append(AuditEntry(actor=actor, action=action, detail=detail, at=time.time()))
 
 
 # ---------------------------------------------------------------- router
@@ -648,7 +657,7 @@ def memory_recall(req: RecallRequest, request: Request) -> dict[str, Any]:
 @router.post("/memory/remember")
 def memory_remember(req: RememberRequest, request: Request) -> dict[str, Any]:
     service: MemoryService = request.app.state.memory
-    return service.remember(profile_id=req.profile_id, text=req.text)
+    return service.remember(profile_id=req.profile_id, text=req.text, actor=resolve_actor(request))
 
 
 @router.post("/memory/audit")
@@ -684,6 +693,7 @@ def memory_forget_this(req: ForgetRequest, request: Request) -> dict[str, Any]:
             chunk_id=req.chunk_id,
             node_id=req.node_id,
             entity=req.entity,
+            actor=resolve_actor(request),
         )
     except MemoryNotFoundError as exc:
         raise _route_404(exc) from exc

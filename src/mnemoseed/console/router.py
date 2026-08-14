@@ -1,9 +1,11 @@
-"""Console REST router (PRD-07 T1): /api/v1, read-only-first + M1 writes.
+"""Console REST router (PRD-07): /api/v1 reads + FR-7.9 write ops.
 
 Every route sits behind the console auth gate; validation lives on the Query
 bounds (422 code covers a malformed filter), and a missing/foreign-profile
 memory target becomes a typed 404. The service methods this router calls are
-the whole surface -- no storage port is touched from the ASGI layer.
+the whole surface -- no storage port is touched from the ASGI layer. Writes
+(forget / pin / weight adjust / profiles / tokens) flow through the audit
+trail via the service.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from mnemoseed.console.service import (
     ConsoleNotFoundError,
     ConsoleService,
 )
+from mnemoseed.identity.actor import resolve_actor
 from mnemoseed.identity.gate import require_identity
 from mnemoseed.schema.graph import NodeType
 
@@ -172,19 +175,21 @@ def dream_runs(
 @router.post("/dream/once")
 def dream_once(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """FR-7.6 manual dream trigger, audited."""
+    actor = resolve_actor(request)
     profile_id = body.get("profile_id")
     if not isinstance(profile_id, str) or not profile_id:
         raise HTTPException(status_code=422, detail="body.profile_id must be a non-empty string")
-    return _service(request).dream_once(profile_id)
+    return _service(request).dream_once(profile_id, actor=actor)
 
 
 @router.post("/dream/auto_trigger")
 def dream_auto_trigger(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """FR-7.6 auto-trigger toggle (persisted to the config file), audited."""
+    actor = resolve_actor(request)
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=422, detail="body.enabled must be a boolean")
-    return _service(request).set_auto_trigger(enabled)
+    return _service(request).set_auto_trigger(enabled, actor=actor)
 
 
 # ---------------------------------------------------------------- dream review (FR-7.6)
@@ -222,6 +227,7 @@ def dream_review_verdict(request: Request, body: dict[str, Any]) -> dict[str, An
     verdict = _string_field(body, "verdict")
     if verdict not in REVIEW_VERDICTS:
         raise HTTPException(status_code=422, detail=f"body.verdict must be one of {sorted(REVIEW_VERDICTS)}")
+    actor = resolve_actor(request)
     try:
         return _service(request).dream_review_verdict(
             run_id=run_id,
@@ -231,6 +237,7 @@ def dream_review_verdict(request: Request, body: dict[str, Any]) -> dict[str, An
             obj=obj,
             route=route,
             verdict=verdict,
+            actor=actor,
         )
     except ConsoleNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -264,6 +271,7 @@ def resolve_conflict(request: Request, group_id: str, body: dict[str, Any]) -> d
         raise HTTPException(status_code=422, detail=f"body.node_id is required for branch {branch!r}")
     if branch == "coexist" and (scope is None or not scope.strip()):
         raise HTTPException(status_code=422, detail="body.scope is required for branch 'coexist'")
+    actor = resolve_actor(request)
     try:
         return service.resolve_conflict(
             group_id=group_id,
@@ -271,6 +279,179 @@ def resolve_conflict(request: Request, group_id: str, body: dict[str, Any]) -> d
             branch=branch,
             node_id=node_id,
             scope=scope,
+            actor=actor,
         )
     except ConsoleNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------- memory writes (FR-7.9)
+
+
+@router.post("/forget")
+def forget(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.9 forget: chunk / node / entity erasure, mirroring the daemon's
+    forget_this semantics (chunks deleted, nodes tombstoned), audit-logged."""
+    profile_id = _string_field(body, "profile_id")
+    targets = [key for key in ("chunk_id", "node_id", "entity") if body.get(key) is not None]
+    if len(targets) != 1:
+        raise HTTPException(
+            status_code=422,
+            detail="body must contain exactly one of chunk_id, node_id, entity",
+        )
+    for key in targets:
+        value = body.get(key)
+        if not isinstance(value, str) or not value:
+            raise HTTPException(status_code=422, detail=f"body.{key} must be a non-empty string")
+    actor = resolve_actor(request)
+    try:
+        return _service(request).forget(
+            profile_id=profile_id,
+            chunk_id=body.get("chunk_id"),
+            node_id=body.get("node_id"),
+            entity=body.get("entity"),
+            actor=actor,
+        )
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/pin")
+def pin(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.9 manual pin: flip a node's never_decay as a version-chain append,
+    audit-logged and idempotent."""
+    profile_id = _string_field(body, "profile_id")
+    node_id = _string_field(body, "node_id")
+    pinned = body.get("pinned")
+    if not isinstance(pinned, bool):
+        raise HTTPException(status_code=422, detail="body.pinned must be a boolean")
+    actor = resolve_actor(request)
+    try:
+        return _service(request).pin_node(profile_id=profile_id, node_id=node_id, pinned=pinned, actor=actor)
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/weights")
+def adjust_weight(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.9 manual decay-weight adjust for a node or chunk, bounded to
+    [0.0, 1.0] and audited with the old + new values."""
+    profile_id = _string_field(body, "profile_id")
+    kind = _string_field(body, "kind")
+    if kind not in ("node", "chunk"):
+        raise HTTPException(status_code=422, detail="body.kind must be 'node' or 'chunk'")
+    target_id = _string_field(body, "target_id")
+    weight = body.get("decay_weight")
+    if not isinstance(weight, (int, float)) or isinstance(weight, bool):
+        raise HTTPException(status_code=422, detail="body.decay_weight must be a number")
+    weight = float(weight)
+    if not 0.0 <= weight <= 1.0:
+        raise HTTPException(status_code=422, detail="body.decay_weight must be within [0.0, 1.0]")
+    actor = resolve_actor(request)
+    try:
+        return _service(request).adjust_weight(
+            profile_id=profile_id,
+            kind=kind,
+            target_id=target_id,
+            decay_weight=weight,
+            actor=actor,
+        )
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------- profiles (FR-7.3)
+
+
+@router.post("/profiles")
+def create_profile(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.3 console profile create (upsert), audit-logged."""
+    profile_id = _string_field(body, "profile_id")
+    display_name = body.get("display_name")
+    if display_name is None:
+        display_name = ""
+    elif not isinstance(display_name, str):
+        raise HTTPException(status_code=422, detail="body.display_name must be a string")
+    return _service(request).create_profile(
+        profile_id=profile_id, display_name=display_name, actor=resolve_actor(request)
+    )
+
+
+@router.post("/profiles/{profile_id}/rename")
+def rename_profile(request: Request, profile_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.3 console profile rename (display_name-only upsert), audit-logged."""
+    display_name = _string_field(body, "display_name")
+    actor = resolve_actor(request)
+    try:
+        return _service(request).rename_profile(profile_id=profile_id, display_name=display_name, actor=actor)
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/profiles/{profile_id}/archive")
+def archive_profile(request: Request, profile_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.3 console profile archive flag (reversible), audit-logged."""
+    archived = body.get("archived")
+    if not isinstance(archived, bool):
+        raise HTTPException(status_code=422, detail="body.archived must be a boolean")
+    actor = resolve_actor(request)
+    try:
+        return _service(request).archive_profile(profile_id=profile_id, archived=archived, actor=actor)
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/profiles/{profile_id}/tokens")
+def issue_token(request: Request, profile_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.3 console token issue: the bearer secret is returned exactly once
+    and never written to the audit trail."""
+    scopes = body.get("scopes")
+    if scopes is None:
+        scopes = ()
+    elif not isinstance(scopes, list) or not all(isinstance(s, str) and s for s in scopes):
+        raise HTTPException(status_code=422, detail="body.scopes must be a list of non-empty strings")
+    expires_at = body.get("expires_at")
+    if expires_at is not None and not isinstance(expires_at, (int, float)):
+        raise HTTPException(status_code=422, detail="body.expires_at must be a number")
+    actor = resolve_actor(request)
+    try:
+        return _service(request).issue_token(
+            profile_id=profile_id,
+            scopes=tuple(scopes),
+            expires_at=float(expires_at) if expires_at is not None else None,
+            actor=actor,
+        )
+    except ConsoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/tokens/{token_id}/revoke")
+def revoke_token(request: Request, token_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """FR-7.3 console token revoke (idempotent), audit-logged."""
+    del body
+    return _service(request).revoke_token(token_id=token_id, actor=resolve_actor(request))
+
+
+# ---------------------------------------------------------------- audit (FR-7.9 / G-AC1)
+
+
+@router.get("/audit")
+def audit_log(
+    request: Request,
+    actor: str | None = Query(default=None, min_length=1),
+    action: str | None = Query(default=None, min_length=1),
+    since: float | None = Query(default=None),
+    until: float | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    """FR-7.9 audit view: paginated append-only trail, filterable by actor /
+    action / time window, ascending (chronological, id-ordered)."""
+    return _service(request).audit_log(
+        actor=actor,
+        action=action,
+        since=since,
+        until=until,
+        offset=offset,
+        limit=limit,
+    )

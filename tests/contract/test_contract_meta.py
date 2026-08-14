@@ -117,6 +117,28 @@ def test_profile_crud_and_token_cascade(stack) -> None:
     assert raw_meta_row(stack, "tokens", "token_id", token.token_id) == {}  # FK cascade
 
 
+def test_profile_archive_flag(stack) -> None:
+    """FR-7.3 console profile archive: the flag roundtrips, rename never
+    touches it (upsert updates display_name only), and unknown profiles raise."""
+    stack.meta.upsert_profile(_pool_profile(stack))
+    assert stack.meta.get_profile("u1").archived is False
+    stack.meta.archive_profile("u1", True)
+    assert stack.meta.get_profile("u1").archived is True
+    assert stack.meta.list_profiles()[0].archived is True
+    stack.meta.archive_profile("u1", False)
+    assert stack.meta.get_profile("u1").archived is False
+
+    # rename preserves the flag
+    stack.meta.archive_profile("u1", True)
+    stack.meta.upsert_profile(StoredProfile(profile_id="u1", display_name="Uma Renamed"))
+    got = stack.meta.get_profile("u1")
+    assert got.display_name == "Uma Renamed"
+    assert got.archived is True
+
+    with pytest.raises(StorageError, match="unknown profile"):
+        stack.meta.archive_profile("ghost", True)
+
+
 def test_issue_token_and_revoke(stack) -> None:
     stack.meta.upsert_profile(_pool_profile(stack))
     token = stack.meta.issue_token("u1", ("graph:read", "graph:write"), expires_at=time.time() + 60.0)
@@ -290,13 +312,13 @@ def test_dream_runs_roundtrip(stack) -> None:
 
 
 def test_schema_version_and_migrate_forward_only(stack) -> None:
-    """meta's head is v6 (frozen v1 schema + v3 profile_score_pool + v4
-    dream_token_ledger + v6 identity users/token_hash); migrate is idempotent
-    and forward-only."""
-    assert stack.meta.schema_version() == 6
-    assert stack.meta.migrate() == 6
-    assert stack.meta.migrate(target=1) == 6  # back-targeting is a no-op at head
-    assert stack.meta.schema_version() == 6
+    """meta's head is v7 (frozen v1 schema + v3 profile_score_pool + v4
+    dream_token_ledger + v6 identity users/token_hash + v7 profile archive
+    flag); migrate is idempotent and forward-only."""
+    assert stack.meta.schema_version() == 7
+    assert stack.meta.migrate() == 7
+    assert stack.meta.migrate(target=1) == 7  # back-targeting is a no-op at head
+    assert stack.meta.schema_version() == 7
 
 
 def test_dream_token_ledger_atomic_increment(stack) -> None:

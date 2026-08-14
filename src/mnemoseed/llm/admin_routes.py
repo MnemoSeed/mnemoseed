@@ -27,8 +27,9 @@ from typing import Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from mnemoseed.identity.actor import resolve_actor
 from mnemoseed.identity.gate import require_identity
-from mnemoseed.llm.admin import LLMAdminError, LLMAdminService
+from mnemoseed.llm.admin import LLMAdminError, LLMAdminService, LLMTestRequiredError
 
 router = APIRouter(
     prefix="/api/v1",
@@ -53,14 +54,16 @@ class RouteUpdateRequest(BaseModel):
 
 class RouteTestRequest(BaseModel):
     """A proposed route to probe -- never written, so the test buttons answer
-    before a change is persisted (FR-6.9)."""
+    before a change is persisted (FR-6.9). Omitted fields are merged against
+    the current route server-side, so a partial probe arms the exact signature
+    a partial persist will be checked against."""
 
     model_config = {"extra": "forbid"}
 
     role: str
-    driver: str
-    model: str
-    base_url: str = ""
+    driver: str | None = None
+    model: str | None = None
+    base_url: str | None = None
     api_key_env: str | None = None
     provider: str | None = None
 
@@ -84,6 +87,7 @@ def llm_oauth_availability(request: Request) -> dict[str, Any]:
 @router.post("/llm/routes/{role}")
 def llm_set_role(request: Request, role: str, body: RouteUpdateRequest) -> dict[str, Any]:
     """FR-6.9: validate + persist one role-route change (audited, surgical TOML)."""
+    actor = resolve_actor(request)
     try:
         return _service(request).set_role(
             role,
@@ -92,7 +96,10 @@ def llm_set_role(request: Request, role: str, body: RouteUpdateRequest) -> dict[
             base_url=body.base_url,
             api_key_env=body.api_key_env,
             provider=body.provider,
+            actor=actor,
         )
+    except LLMTestRequiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LLMAdminError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

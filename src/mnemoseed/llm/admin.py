@@ -8,9 +8,10 @@ the first-run dream-model step, and ``mnemoseed llm`` all funnel through:
   catalog. A literal key value anywhere in the payload is a hard failure.
 - ``oauth_availability()`` detects host Codex / Grok OAuth login state
   (presence + expiry) without ever reading a token value out of the files.
-- ``set_role()`` validates (unknown role / driver are typed errors), persists a
-  line-oriented TOML patch (comments and unrelated keys survive), and audits
-  the env-var NAME -- never the value.
+- ``set_role()`` validates (unknown role / driver are typed errors), funnels
+  the persistence through the single config writer (PRD-07 FR-7.11 — surgical
+  TOML patch, versioned record, audit) and audits the env-var NAME -- never the
+  value.
 - ``test_config()`` runs a proposed route's ``check()`` against a live endpoint
   so the console test buttons probe BEFORE anything is written (FR-6.9).
 
@@ -21,7 +22,6 @@ the process environment only.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from collections.abc import Callable
@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from mnemoseed.config import LLM_ROLES, Config
+from mnemoseed.configwrite.service import ConfigWriteError, ConfigWriteService
 from mnemoseed.llm.drivers.oauth import SUPPORTED_PROVIDERS, OAuthLLM
 from mnemoseed.llm.registry import LLM_DRIVERS, LLMRegistry
 from mnemoseed.llm.routing import RoleRouter
@@ -39,49 +40,32 @@ from mnemoseed.storage.ports import AuditEntry
 #: driver's checks (the console page polls; the probes must not hammer a host).
 _CONNECTIVITY_TTL = 30.0
 
+#: A successful connectivity test authorizes a matching route persist for this
+#: long (in-process only; a daemon restart requires a fresh test).
+_TEST_GRACE = 600.0
+
+#: How many successfully-probed signatures stay remembered in-process before
+#: the oldest are actively dropped (a bounded cap on top of lazy expiry).
+_MAX_PASSED_TESTS = 128
+
 
 class LLMAdminError(ValueError):
     """Typed validation failure on the LLM admin surface (mapped to 422)."""
+
+
+class LLMTestRequiredError(LLMAdminError):
+    """A matching connectivity test must pass before this route can persist.
+
+    The persist carries the exact signature the caller must have probed first
+    (driver + model + base_url + api_key_env + provider) within the grace
+    window; any mismatch or expiry rejects the write (mapped to 409).
+    """
 
 
 class _AuditSink(Protocol):
     """The minimal MetaStore surface the admin service audits through."""
 
     def audit_append(self, entry: AuditEntry) -> None: ...
-
-
-def _line_key(line: str) -> str | None:
-    """The TOML key of a key=value line, or None for headers/comments/blanks."""
-    stripped = line.strip()
-    if not stripped or stripped.startswith("[") or stripped.startswith("#") or "=" not in stripped:
-        return None
-    return stripped.split("=", 1)[0].strip().strip('"').strip("'")
-
-
-def _table_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
-    """Header name -> (start line index, end line index) for every TOML table.
-
-    ``end`` is the index of the next header (exclusive), so the body of table
-    ``name`` is ``lines[start + 1 : end]``; the last table runs to EOF.
-    """
-    spans: dict[str, tuple[int, int]] = {}
-    current: str | None = None
-    start: int = 0
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            if current is not None:
-                spans[current] = (start, index)
-            current = stripped[1:-1].strip()
-            start = index
-    if current is not None:
-        spans[current] = (start, len(lines))
-    return spans
-
-
-def _toml_str(value: Any) -> str:
-    """Encode a scalar as a TOML literal (double-quoted strings, JSON booleans)."""
-    return json.dumps(value)
 
 
 class LLMAdminService:
@@ -96,6 +80,7 @@ class LLMAdminService:
         clock: Callable[[], float] | None = None,
         home: str | Path | None = None,
         env: Callable[[str], str | None] | None = None,
+        configwrite: ConfigWriteService | None = None,
     ) -> None:
         self._config = config
         self._meta = meta
@@ -104,6 +89,15 @@ class LLMAdminService:
         self._home = Path(home).expanduser() if home is not None else None
         self._env = env if env is not None else os.environ.get
         self._connectivity_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        # Signature -> last successful probe time (in-process only; MUST-FIX 2).
+        self._passed_tests: dict[str, float] = {}
+        # The single config writer (PRD-07 FR-7.11): every route change lands
+        # through its registry -> validate -> patch -> record -> audit flow. The
+        # default runs offline (file patch only) so a bare audit-only meta
+        # never drags the versioned store surface into unit construction.
+        self._configwrite = (
+            configwrite if configwrite is not None else ConfigWriteService(config, None, clock=self._clock)
+        )
 
     # ---------------------------------------------------------------- read
 
@@ -170,6 +164,7 @@ class LLMAdminService:
         base_url: str | None = None,
         api_key_env: str | None = None,
         provider: str | None = None,
+        actor: str = "console",
     ) -> dict[str, Any]:
         """Validate and persist one role-route change; network-free.
 
@@ -177,17 +172,28 @@ class LLMAdminService:
         (driver/model cannot be cleared). The exact written keys land back in
         the config TOML (surgical patch) and the ENV-VAR NAME -- never a
         value -- is audit-logged.
+
+        A persist is rejected unless a connectivity test with the exact same
+        signature (driver + model + base_url + api_key_env + provider) passed
+        within the grace window (see :class:`LLMTestRequiredError`).
         """
         if role not in LLM_ROLES:
             raise LLMAdminError(f"unknown llm role {role!r} (choose from: {', '.join(LLM_ROLES)})")
         current = self._config.llm[role]
 
-        # Resolve the new effective values (defaults preserved unless replaced).
-        new_driver = current.driver if driver is None else driver.strip()
-        new_model = current.model if model is None else model.strip()
-        if driver is not None and not new_driver:
+        # Resolve the merged route: None keeps the current value, "" clears an
+        # optional param, and the returned table is exactly what gets written.
+        new_driver, new_model, table = self._merged_route(
+            role,
+            driver=driver,
+            model=model,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            provider=provider,
+        )
+        if not new_driver:
             raise LLMAdminError("driver must be a non-empty string")
-        if model is not None and not new_model:
+        if not new_model:
             raise LLMAdminError("model must be a non-empty string")
         if not self._registry.contains(new_driver):
             raise LLMAdminError(
@@ -201,26 +207,23 @@ class LLMAdminService:
                 f"the oauth driver requires a provider (built-in: {', '.join(SUPPORTED_PROVIDERS)})"
             )
 
-        # The explicit file table: keep every previously written key, update the
-        # ones this call owns, and drop the ones this call clears.
-        table = dict(self._explicit_table(role))
-        if driver is not None:
-            table["driver"] = new_driver
-        if model is not None:
-            table["model"] = new_model
-        for name, field_value in (
-            ("base_url", base_url),
-            ("api_key_env", api_key_env),
-            ("provider", provider),
-        ):
-            if field_value is None:
-                continue
-            if not field_value.strip():
-                table.pop(name, None)
-            else:
-                table[name] = field_value.strip()
+        # MUST-FIX 2: reject the write unless a test with the exact same
+        # signature passed within the grace window.
+        signature = self._signature(
+            driver=new_driver,
+            model=new_model,
+            base_url=table.get("base_url"),
+            api_key_env=table.get("api_key_env"),
+            provider=table.get("provider"),
+        )
+        tested_at = self._passed_tests.get(signature)
+        if tested_at is None or self._clock() - tested_at > _TEST_GRACE:
+            raise LLMTestRequiredError(
+                f"a connectivity test for this exact route (driver={new_driver!r}, "
+                f"model={new_model!r}) must pass before it can be persisted"
+            )
 
-        path = self._persist_llm_role(role, table)
+        path = self._persist_role_table(role, table, actor=actor)
 
         # Keep the in-memory config in lockstep with the file (the explicit
         # table now lives in config.raw; the merged role reflects the change).
@@ -244,7 +247,7 @@ class LLMAdminService:
         )
         self._connectivity_cache.pop(role, None)
 
-        audited = self._audit_role_set(role, table, path)
+        audited = self._audit_role_set(role, table, path, actor=actor)
         return {
             "role": role,
             "driver": new_driver,
@@ -262,44 +265,147 @@ class LLMAdminService:
         self,
         *,
         role: str,
-        driver: str,
-        model: str,
-        base_url: str = "",
+        driver: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
         api_key_env: str | None = None,
         provider: str | None = None,
     ) -> HealthReport:
         """Run a proposed route's connectivity check against a live endpoint.
 
-        Never raises (returns a failed HealthReport instead) so the console test
-        buttons always render a typed inline result.
+        Omitted fields are merged server-side against the current route (the
+        same merge ``set_role`` persists), so a partial probe arms exactly the
+        signature a partial set will be checked against. Never raises (returns
+        a failed HealthReport instead) so the console test buttons always
+        render a typed inline result.
         """
         if role not in LLM_ROLES:
             return HealthReport(ok=False, detail={"error": f"unknown llm role {role!r}"})
-        if not self._registry.contains(driver):
-            return HealthReport(ok=False, detail={"error": f"unknown llm driver {driver!r}"})
+        try:
+            merged_driver, merged_model, table = self._merged_route(
+                role,
+                driver=driver,
+                model=model,
+                base_url=base_url,
+                api_key_env=api_key_env,
+                provider=provider,
+            )
+        except KeyError:
+            return HealthReport(ok=False, detail={"error": f"unknown llm role {role!r}"})
+        if not self._registry.contains(merged_driver):
+            return HealthReport(ok=False, detail={"error": f"unknown llm driver {merged_driver!r}"})
         params: dict[str, Any] = {}
-        for name, value in (("base_url", base_url), ("provider", provider or "")):
+        for name, value in (
+            ("base_url", table.get("base_url") or ""),
+            ("provider", table.get("provider") or ""),
+        ):
             if value:
                 params[name] = value
         # A proposed KEY is referenced by env-var NAME; resolve it against the
         # process environment exactly like the role router does (never a value
         # over the wire).
         api_key = ""
-        if api_key_env:
-            for name in (entry.strip() for entry in api_key_env.split(",")):
+        if table.get("api_key_env"):
+            for name in (entry.strip() for entry in str(table["api_key_env"]).split(",")):
                 env_value = self._env(name) if name else None
                 if env_value:
                     api_key = env_value
                     break
-        params["model"] = model
+        params["model"] = merged_model
         params["api_key"] = api_key
         try:
-            instance = self._registry.build(driver, params)
-            return cast(HealthReport, instance.check())
+            instance = self._registry.build(merged_driver, params)
+            report = cast(HealthReport, instance.check())
         except LLMError as exc:
             return HealthReport(ok=False, detail={"error": str(exc)})
+        if report.ok:
+            # MUST-FIX 2: a passing probe authorizes a matching persist within
+            # the grace window (exact signature, in-process cache only).
+            self._record_passed_test(
+                self._signature(
+                    driver=merged_driver,
+                    model=merged_model,
+                    base_url=table.get("base_url"),
+                    api_key_env=table.get("api_key_env"),
+                    provider=table.get("provider"),
+                ),
+                self._clock(),
+            )
+        return report
 
     # ---------------------------------------------------------------- plumbing
+
+    def _merged_route(
+        self,
+        role: str,
+        *,
+        driver: str | None,
+        model: str | None,
+        base_url: str | None,
+        api_key_env: str | None,
+        provider: str | None,
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Merge a partial route update against the current explicit table.
+
+        ``None`` keeps the current value; ``""`` clears an optional param. The
+        returned table is exactly what ``set_role`` would persist, so probing
+        and persisting the same merge always share one signature.
+        """
+        current = self._config.llm[role]
+        table = dict(self._explicit_table(role))
+        new_driver = current.driver if driver is None else driver.strip()
+        new_model = current.model if model is None else model.strip()
+        if driver is not None:
+            table["driver"] = new_driver
+        if model is not None:
+            table["model"] = new_model
+        for name, field_value in (
+            ("base_url", base_url),
+            ("api_key_env", api_key_env),
+            ("provider", provider),
+        ):
+            if field_value is None:
+                continue
+            if not field_value.strip():
+                table.pop(name, None)
+            else:
+                table[name] = field_value.strip()
+        return new_driver, new_model, table
+
+    def _record_passed_test(self, signature: str, now: float) -> None:
+        """Record a passing probe, actively evicting expired signatures and
+        capping the cache at the most recent ``_MAX_PASSED_TESTS``."""
+        for stale in [sig for sig, at in self._passed_tests.items() if now - at > _TEST_GRACE]:
+            del self._passed_tests[stale]
+        self._passed_tests[signature] = now
+        if len(self._passed_tests) > _MAX_PASSED_TESTS:
+            overflow = len(self._passed_tests) - _MAX_PASSED_TESTS
+            for stale in sorted(self._passed_tests, key=lambda sig: self._passed_tests[sig])[:overflow]:
+                del self._passed_tests[stale]
+
+    @staticmethod
+    def _signature(
+        *,
+        driver: str,
+        model: str,
+        base_url: str | None,
+        api_key_env: str | None,
+        provider: str | None,
+    ) -> str:
+        """The exact route signature that must be connectivity-tested first.
+
+        ``None`` and ``""`` are normalized to the same empty value so a cleared
+        optional field still keys identically.
+        """
+        return "\x1f".join(
+            (
+                driver.strip(),
+                model.strip(),
+                (base_url or "").strip(),
+                (api_key_env or "").strip(),
+                (provider or "").strip(),
+            )
+        )
 
     def _explicit_table(self, role: str) -> dict[str, Any]:
         """The role's own [dream.llm.<role>] table from the source TOML."""
@@ -314,54 +420,29 @@ class LLMAdminService:
             return {}
         return {str(key): value for key, value in table.items()}
 
-    def _persist_llm_role(self, role: str, table: dict[str, Any]) -> Path:
-        """Write the role's table back into the config TOML (line-oriented patch).
+    def _persist_role_table(self, role: str, table: dict[str, Any], *, actor: str = "console") -> Path:
+        """Persist one role-route change through the single config writer.
 
-        Comments and unrelated keys survive untouched; the role's keys are
-        rewritten in place or a new ``[dream.llm.<role>]`` table is inserted
-        after the last dream table (so a new header never redefines an implicit
-        parent that ``[dream.*]`` siblings already created).
+        Every field this call actually changed is a ``config.set`` on
+        ``dream.llm.<role>.<field>`` (registry validation + surgical TOML
+        patch + versioned record + audit, live-applied); untouched fields are
+        never re-written. The written file is returned so the audit entry still
+        reports where the route landed.
         """
-        source = self._config.source
-        path = source if source is not None else Path.home() / ".mnemoseed" / "config.toml"
-        original = path.read_text(encoding="utf-8") if path.exists() else ""
-        lines = original.split("\n")
-        role_header = f"[dream.llm.{role}]"
-        role_name = f"dream.llm.{role}"  # span keys are the bare dotted names
-        written = set(table)
-        new_lines = [f"{key} = {_toml_str(table[key])}" for key in _ordered_keys(table) if key in table]
-
-        spans = _table_spans(lines)
-        if role_name in spans:
-            start, end = spans[role_name]
-            # A key being cleared this write is also "written" (removed): its old
-            # line must be dropped, not kept. Every old key we leave untouched is
-            # carried over into the new table by set_role, so anything here that
-            # is absent from the new table is a deliberate clear.
-            for line in lines[start + 1 : end]:
-                key = _line_key(line)
-                if key is not None and key not in table:
-                    written.add(key)
-            kept = [line for line in lines[start + 1 : end] if _line_key(line) not in written]
-            out = lines[: start + 1]
-            out.extend(new_lines)
-            out.extend(kept)
-            out.extend(lines[end:])
-        else:
-            dream_ends = [
-                finish for name, (_, finish) in spans.items() if name == "dream" or name.startswith("dream.")
-            ]
-            insert_at = max(dream_ends) if dream_ends else len(lines)
-            block = [role_header, *new_lines]
-            out = lines[:insert_at]
-            out.extend(block)
-            out.extend(lines[insert_at:])
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(out).strip("\n") + "\n", encoding="utf-8")
-        # Keep the in-memory raw mirror consistent for subsequent reads.
-        self._config.raw.setdefault("dream", {}).setdefault("llm", {})[role] = dict(table)
-        return path
+        old_table = self._explicit_table(role)
+        persisted: Path | None = None
+        for field in sorted(set(old_table) | set(table)):
+            if old_table.get(field) == table.get(field):
+                continue
+            try:
+                result = self._configwrite.set(f"dream.llm.{role}.{field}", table.get(field), actor=actor)
+            except ConfigWriteError as exc:
+                raise LLMAdminError(str(exc)) from exc
+            persisted = Path(result["persisted_to"])
+        if persisted is None:
+            source = self._config.source
+            persisted = source if source is not None else Path.home() / ".mnemoseed" / "config.toml"
+        return persisted
 
     def _connectivity(self, role: str) -> dict[str, Any]:
         now = self._clock()
@@ -377,12 +458,14 @@ class LLMAdminService:
         self._connectivity_cache[role] = (now, payload)
         return payload
 
-    def _audit_role_set(self, role: str, table: dict[str, Any], path: Path) -> bool:
+    def _audit_role_set(
+        self, role: str, table: dict[str, Any], path: Path, *, actor: str = "console"
+    ) -> bool:
         if self._meta is None:
             return False
         self._meta.audit_append(
             AuditEntry(
-                actor="console",
+                actor=actor,
                 action="llm_role_set",
                 detail={
                     "role": role,
@@ -398,11 +481,3 @@ class LLMAdminService:
             )
         )
         return True
-
-
-def _ordered_keys(table: dict[str, Any]) -> list[str]:
-    """Deterministic key order: the canonical route fields first, then any
-    extra keys in the table's own order (converter params etc. stay put)."""
-    head = [key for key in ("driver", "model", "base_url", "api_key_env", "provider") if key in table]
-    tail = [key for key in table if key not in head]
-    return head + tail

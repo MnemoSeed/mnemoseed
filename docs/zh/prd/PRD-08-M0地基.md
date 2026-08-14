@@ -5,6 +5,7 @@
 > 性质：纯地基，零用户可见功能——但它冻结的东西（schema、接口契约）之后改一次疼一次，所以本 PRD 的审查标准是全部 PRD 里最严的。
 > v2 修订：经 blind-reviewer 独立审查（15 项发现），增补接口方法清单（附录 B）、降级行为表（附录 C）、schema 冻结字段补全（profile 隔离 / 结构化 turn 边界 / 标记位 / 用量计数 / 稀疏向量表示）。
 > v1.1 修订（2026-08-13）：附录 B.2 新增 GraphStore `list_edges(filter, page)`（console Graph View 的批量边读取），能力旗标集扩至 12 个（FR-8.6）并新增 `GRAPH_EDGE_LIST`，附录 C 增加对应降级行。这是编号修订而非重写——此前冻结的语言全部原样成立。
+> v1.2 修订（2026-08-14）：附录 B.3 新增 MetaStore `archive_profile(profile_id)`（软归档；`profiles.archived` 列，migration v7），支撑 console Profiles FR-7.3。此前冻结的语言全部原样成立。
 
 ## 1. 目标
 
@@ -185,6 +186,7 @@
 | pool_state(profile_id) / pool_states() | 单 profile / 全量 balance 与 watermark 读取 | 捕获 FR-1.5、守护进程启动恢复 |
 | advance_watermark(profile_id, turn_range) | 单 profile watermark 单调向前推进 | 梦境 |
 | profiles CRUD / tokens issue / revoke | 身份与凭证 | PRD-06 |
+| archive_profile(profile_id) | **profile 软归档**（v1.2 修订，2026-08-14）：置位 `profiles.archived`（migration v7）；归档 profile 仍可查询，但从默认活动列表排除；区别于删除——token/数据保留至显式 purge | console Profiles（FR-7.3） |
 | config get / set（版本化 + rollback） | 配置版本化 | console Settings |
 | audit_append / audit_query(filter, page) | 审计 append-only 写 / 过滤分页读 | 全局 |
 | dream_runs record / list | 梦境运行历史 | 梦境、console |

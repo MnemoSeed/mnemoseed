@@ -274,7 +274,12 @@ const state = {
   },
   review: { runId: null, data: null },
   conflicts: { data: null },
-  llm: { routes: null, oauth: null, editingRole: null, message: null },
+  llm: { routes: null, oauth: null, config: null, editingRole: null, message: null, probeOk: {} },
+  profilesPage: { tokens: {} },
+  settings: { config: null, versions: null, message: null },
+  audit: { filters: {}, offset: 0, limit: 50, data: null },
+  detailFlash: null,
+  browseFlash: null,
   autoRefreshTimer: null,
 };
 
@@ -540,8 +545,30 @@ async function submitWizard(form) {
     const value = String(data.get(name) || "").trim();
     if (value) payload[name] = value;
   }
-  if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
+  if (feedback) feedback.innerHTML = '<span class="dim">testing connectivity…</span>';
   try {
+    // MUST-FIX 2: connectivity-test-before-persist. The route endpoint rejects
+    // a persist that was not probed first, so probe the exact signature and
+    // refuse to save a failed route.
+    const probe = await api("/api/v1/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "deep_reflection", ...payload }),
+    });
+    if (!probe.ok) {
+      const detail = probe.detail || {};
+      const message =
+        detail && typeof detail === "object" && !Array.isArray(detail)
+          ? detail.error
+          : String(detail || "");
+      if (feedback) {
+        feedback.innerHTML = errorInline(
+          `connectivity test failed${message ? `: ${message}` : ""}`
+        );
+      }
+      return;
+    }
+    if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
     const result = await api("/api/v1/llm/routes/deep_reflection", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -640,7 +667,10 @@ function parseRoute() {
   if (hash.startsWith("/browse")) return { name: "browse" };
   if (hash.startsWith("/review")) return { name: "review" };
   if (hash.startsWith("/conflicts")) return { name: "conflicts" };
+  if (hash.startsWith("/profiles")) return { name: "profiles" };
   if (hash.startsWith("/llm")) return { name: "llm" };
+  if (hash.startsWith("/settings")) return { name: "settings" };
+  if (hash.startsWith("/audit")) return { name: "audit" };
   return { name: "dashboard" };
 }
 
@@ -693,9 +723,18 @@ function render() {
   } else if (route.name === "conflicts") {
     view.innerHTML = '<p class="loading">Loading conflicts inbox…</p>';
     loadConflicts();
+  } else if (route.name === "profiles") {
+    view.innerHTML = '<p class="loading">Loading profiles…</p>';
+    loadProfiles();
   } else if (route.name === "llm") {
     view.innerHTML = '<p class="loading">Loading models…</p>';
     loadLLM();
+  } else if (route.name === "settings") {
+    view.innerHTML = '<p class="loading">Loading settings…</p>';
+    loadSettings();
+  } else if (route.name === "audit") {
+    view.innerHTML = '<p class="loading">Loading audit log…</p>';
+    loadAudit();
   } else {
     view.innerHTML = '<p class="loading">Loading detail…</p>';
     if (!route.type || !route.id) {
@@ -1078,7 +1117,11 @@ function browseResultsHtml(body) {
   const list = items.length
     ? items.map((item) => (state.browse.tab === "chunks" ? chunkRowHtml(item) : nodeRowHtml(item))).join("")
     : emptyPanel("No memories match this profile and filter set.");
-  return `${list}${paginationBar(paging, items.length)}`;
+  const flash = state.browseFlash
+    ? `<div class="card"><span class="ok-inline">${esc(state.browseFlash)}</span></div>`
+    : "";
+  state.browseFlash = null;
+  return `${flash}${list}${paginationBar(paging, items.length)}`;
 }
 
 function chunkRowHtml(chunk) {
@@ -1125,7 +1168,7 @@ function nodeRowHtml(node) {
   </button>`;
 }
 
-function paginationBar(paging, shown) {
+function paginationBar(paging, shown, act = "browse-page") {
   const total = paging.total || 0;
   const offset = paging.offset || 0;
   const limit = paging.limit || state.browse.limit;
@@ -1138,9 +1181,9 @@ function paginationBar(paging, shown) {
     ? `${offset + 1}–${offset + count} of ${fmtNum(total)}`
     : `offset ${fmtNum(offset)} of ${fmtNum(total)}`;
   return `<div class="pagination">
-    <button class="btn" data-act="browse-page" data-offset="${prevOffset}" ${hasPrev ? "" : "disabled"}>← prev</button>
+    <button class="btn" data-act="${act}" data-offset="${prevOffset}" ${hasPrev ? "" : "disabled"}>← prev</button>
     <span>${label}</span>
-    <button class="btn" data-act="browse-page" data-offset="${nextOffset}" ${hasNext ? "" : "disabled"}>next →</button>
+    <button class="btn" data-act="${act}" data-offset="${nextOffset}" ${hasNext ? "" : "disabled"}>next →</button>
   </div>`;
 }
 
@@ -1160,7 +1203,9 @@ async function loadDetail(type, id) {
   const url = `/api/v1/${kind}/${encodeURIComponent(id)}?profile_id=${encodeURIComponent(state.profileId)}`;
   try {
     const dossier = await api(url);
-    view.innerHTML = detailHtml(dossier);
+    const flash = state.detailFlash ? `<div class="card"><span class="ok-inline">${esc(state.detailFlash)}</span></div>` : "";
+    state.detailFlash = null;
+    view.innerHTML = flash + detailHtml(dossier);
     document.title = `MnemoSeed console — ${type} ${id}`;
     setUpdatedAt();
   } catch (error) {
@@ -1183,8 +1228,41 @@ function detailHtml(dossier) {
   </div>`;
   const content = isNode ? nodeContentCard(dossier) : chunkContentCard(dossier);
   const states = isNode ? nodeStatesCard(dossier) : chunkStatesCard(dossier);
+  const actions = actionsCard(dossier);
   const provenance = provenanceCard(dossier.provenance);
-  return `${head}${content}${states}${provenance}`;
+  return `${head}${content}${states}${actions}${provenance}`;
+}
+
+// FR-7.9 / G-AC1: the dossier actions card. Forget is confirm-twice; pin flips
+// never_decay (node-only); the weight control is a bounded [0,1] input with the
+// old -> new change displayed after the write. Every action is audited server-side.
+function actionsCard(dossier) {
+  const isNode = dossier.type === "node";
+  const id = isNode ? dossier.node_id : dossier.chunk_id;
+  const neverDecay = isNode && dossier.weights && dossier.weights.never_decay === true;
+  const pinBtn = isNode
+    ? `<button class="btn" data-act="detail-pin" data-id="${esc(id)}" data-pinned="${neverDecay ? "false" : "true"}" title="${neverDecay ? "unpin — resume decay" : "pin — never decay"}">${neverDecay ? "unpin" : "pin"}</button>`
+    : "";
+  const current = dossier.weights && dossier.weights.decay_weight;
+  return `<div class="card">
+    <h2>actions</h2>
+    <div class="toolbar">
+      ${pinBtn}
+      <button class="btn btn-danger" data-act="detail-forget" data-type="${isNode ? "node" : "chunk"}" data-id="${esc(id)}" title="forget this memory (audited)">forget</button>
+    </div>
+    <h3>manual decay adjustment</h3>
+    <form data-weight-form data-kind="${isNode ? "node" : "chunk"}" data-id="${esc(id)}">
+      <div class="filter-grid">
+        <div class="field"><label for="weight-${esc(id)}">decay weight (0–1)</label><input type="number" id="weight-${esc(id)}" name="decay_weight" min="0" max="1" step="0.05" value="${esc(String(current ?? ""))}" required /></div>
+      </div>
+      <div class="toolbar">
+        <span class="toolbar-note">current ${esc(String(current ?? "—"))} → new; the audit records both values</span>
+        <span class="spacer"></span>
+        <button class="btn btn-primary" type="submit">apply weight</button>
+      </div>
+      <output class="feedback" data-weight-feedback></output>
+    </form>
+  </div>`;
 }
 
 function chunkContentCard(dossier) {
@@ -1396,6 +1474,528 @@ function provenanceHistoryHtml(events) {
   return `<div class="table-wrap"><table>
     <thead><tr><th>at</th><th>action</th><th>actor</th><th>detail</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
+}
+
+// ---------------------------------------------------------------- memory writes (FR-7.9 / G-AC1)
+
+// Forget is confirm-twice on the button itself: the first click arms it (the
+// label flips to a warning), the second click fires the POST. An unarmed click
+// never erases anything.
+async function forgetDetail(type, id) {
+  const view = document.getElementById("view");
+  const payload = { profile_id: state.profileId };
+  if (type === "node") payload.node_id = id;
+  else payload.chunk_id = id;
+  try {
+    await api("/api/v1/forget", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.browseFlash = `forgot ${type} ${id} (audited)`;
+    location.hash = "#/browse";
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`forget failed: ${error.message}`));
+  }
+}
+
+async function togglePin(id, pinned) {
+  const view = document.getElementById("view");
+  try {
+    const result = await api("/api/v1/pin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: state.profileId, node_id: id, pinned }),
+    });
+    state.detailFlash = result.changed
+      ? `pin ${result.never_decay ? "on" : "off"} — version ${result.version} (audited)`
+      : `already ${pinned ? "pinned" : "unpinned"} — nothing changed`;
+    loadDetail("node", id);
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`pin failed: ${error.message}`));
+  }
+}
+
+async function adjustWeight(form) {
+  const view = document.getElementById("view");
+  const feedback = form.querySelector("[data-weight-feedback]");
+  const kind = form.dataset.kind;
+  const id = form.dataset.id;
+  const raw = String(new FormData(form).get("decay_weight") || "").trim();
+  const weight = Number(raw);
+  if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
+    if (feedback) feedback.innerHTML = errorInline("decay weight must be a number between 0 and 1");
+    return;
+  }
+  if (feedback) feedback.innerHTML = '<span class="dim">applying…</span>';
+  try {
+    const result = await api("/api/v1/weights", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profile_id: state.profileId,
+        kind,
+        target_id: id,
+        decay_weight: weight,
+      }),
+    });
+    state.detailFlash = `decay weight ${result.old_decay_weight} → ${result.decay_weight} (audited)`;
+    loadDetail(kind === "node" ? "node" : "chunk", id);
+  } catch (error) {
+    if (feedback) feedback.innerHTML = errorInline(`weight adjust failed: ${error.message}`);
+  }
+}
+
+// ---------------------------------------------------------------- profiles (FR-7.3)
+
+async function loadProfiles() {
+  const view = document.getElementById("view");
+  try {
+    await ensureProfile();
+  } catch (_err) {
+    /* fall through to the empty state */
+  }
+  try {
+    const status = await api("/api/v1/status");
+    state.dashboard = status;
+    state.profiles = status.profiles || [];
+    syncProfileFromStatus();
+    renderProfilePicker();
+    view.innerHTML = profilesHtml(state.profiles);
+    setUpdatedAt();
+  } catch (error) {
+    view.innerHTML = errorPanel(`Profiles request failed: ${error.message}`);
+  }
+}
+
+function profilesHtml(rows) {
+  const toolbar = `<div class="toolbar">
+    <button class="btn" data-act="go-home">← dashboard</button>
+    <button class="btn" data-act="profiles-refresh">Refresh</button>
+    <span class="spacer"></span>
+    <span class="toolbar-note">profile writes are audited; token secrets are shown once</span>
+  </div>`;
+  const createCard = `<form class="card" data-profiles-create-form>
+    <h2>create profile</h2>
+    <div class="filter-grid">
+      <div class="field"><label for="profile-id">profile id</label><input type="text" id="profile-id" name="profile_id" required pattern="[A-Za-z0-9._-]+" placeholder="e.g. work" autocomplete="off" /></div>
+      <div class="field"><label for="profile-name">display name</label><input type="text" id="profile-name" name="display_name" placeholder="optional" autocomplete="off" /></div>
+    </div>
+    <div class="toolbar"><button class="btn btn-primary" type="submit">create</button></div>
+    <output class="feedback" data-profiles-feedback></output>
+  </form>`;
+  const cards = rows.map((row) => profileAdminCard(row)).join("");
+  return toolbar + createCard + (cards || emptyPanel("No profiles yet."));
+}
+
+function profileAdminCard(row) {
+  const counts = row.counts || {};
+  const archived = row.archived === true;
+  const issuedTokens = Object.values(state.profilesPage.tokens).filter(
+    (token) => token.profile_id === row.profile_id,
+  );
+  const tokenRows = issuedTokens.length
+    ? issuedTokens
+        .map(
+          (token) => `<div class="resolve-row">
+            <span class="mono">${esc(token.token_id.slice(0, 8))}…</span>
+            <span class="badge badge-accent">${esc((token.scopes || []).join(", ") || "all")}</span>
+            <span class="dim">${token.expires_at ? `expires ${esc(fmtEpoch(token.expires_at))}` : "no expiry"}</span>
+            <span class="spacer"></span>
+            <button class="btn" data-act="token-revoke" data-token-id="${esc(token.token_id)}">revoke</button>
+          </div>`,
+        )
+        .join("")
+    : '<p class="dim">No tokens issued this session — issue one below (the bearer secret shows once).</p>';
+  return `<div class="card">
+    <h2>${esc(row.profile_id)} ${esc(row.display_name || "")} ${archived ? '<span class="badge badge-warn">archived</span>' : ""}</h2>
+    <div class="tiles">
+      ${tile(fmtNum(counts.chunks), "chunks")}
+      ${tile(fmtNum(counts.nodes), "nodes")}
+      ${tile(fmtNum(counts.needs_reconcile), "needs reconcile")}
+      ${tile(fmtNum(counts.pending_consolidation), "pending consolidation")}
+    </div>
+    <h3>manage</h3>
+    <div class="toolbar">
+      <form data-profile-rename-form data-profile-id="${esc(row.profile_id)}">
+        <input type="text" name="display_name" value="${esc(row.display_name || "")}" placeholder="display name" autocomplete="off" />
+        <button class="btn" type="submit">rename</button>
+      </form>
+      <span class="spacer"></span>
+      <button class="btn" data-act="profile-archive" data-profile-id="${esc(row.profile_id)}" data-archived="${archived ? "false" : "true"}">${archived ? "unarchive" : "archive"}</button>
+      <button class="btn btn-primary" data-act="token-issue" data-profile-id="${esc(row.profile_id)}">issue token</button>
+    </div>
+    <output class="feedback" data-token-issue data-profile-id="${esc(row.profile_id)}"></output>
+    <h3>session tokens</h3>
+    ${tokenRows}
+  </div>`;
+}
+
+async function createProfile(form) {
+  const feedback = form.querySelector("[data-profiles-feedback]");
+  const data = new FormData(form);
+  const profile_id = String(data.get("profile_id") || "").trim();
+  const display_name = String(data.get("display_name") || "").trim();
+  if (!profile_id) {
+    if (feedback) feedback.innerHTML = errorInline("profile id is required");
+    return;
+  }
+  if (feedback) feedback.innerHTML = '<span class="dim">creating…</span>';
+  try {
+    await api("/api/v1/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id, display_name }),
+    });
+    await loadProfiles();
+  } catch (error) {
+    if (feedback) feedback.innerHTML = errorInline(`create failed: ${error.message}`);
+  }
+}
+
+async function renameProfile(form) {
+  const view = document.getElementById("view");
+  const profile_id = form.dataset.profileId;
+  const display_name = String(new FormData(form).get("display_name") || "").trim();
+  try {
+    await api(`/api/v1/profiles/${encodeURIComponent(profile_id)}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name }),
+    });
+    await loadProfiles();
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`rename failed: ${error.message}`));
+  }
+}
+
+async function toggleArchive(profile_id, archived) {
+  const view = document.getElementById("view");
+  try {
+    await api(`/api/v1/profiles/${encodeURIComponent(profile_id)}/archive`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived }),
+    });
+    await loadProfiles();
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`archive update failed: ${error.message}`));
+  }
+}
+
+async function issueToken(profile_id) {
+  const view = document.getElementById("view");
+  const output = view ? view.querySelector(`[data-token-issue][data-profile-id="${profile_id}"]`) : null;
+  if (output) output.innerHTML = '<span class="dim">issuing…</span>';
+  try {
+    const result = await api(`/api/v1/profiles/${encodeURIComponent(profile_id)}/tokens`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    // The bearer secret rides back exactly once and is never stored client-side
+    // (not in state, not in localStorage); the token record above it is kept
+    // for the session's revoke buttons.
+    state.profilesPage.tokens[result.token_id] = {
+      profile_id: result.profile_id,
+      scopes: result.scopes || [],
+      expires_at: result.expires_at,
+    };
+    if (output) {
+      output.innerHTML = `<div class="ok-inline"><strong>token issued — copy it now, it will never be shown again:</strong>
+        <div class="mono" style="overflow-wrap:anywhere">${esc(result.token_secret)}</div>
+        <button class="btn" data-act="token-copy" data-secret="${esc(result.token_secret)}">copy</button></div>`;
+    }
+  } catch (error) {
+    if (output) output.innerHTML = errorInline(`token issue failed: ${error.message}`);
+  }
+}
+
+async function copyToken(secret) {
+  try {
+    await navigator.clipboard.writeText(secret);
+  } catch (_err) {
+    const view = document.getElementById("view");
+    if (view) view.insertAdjacentHTML("beforeend", errorInline("clipboard unavailable — select the secret manually"));
+  }
+}
+
+async function revokeToken(token_id) {
+  const view = document.getElementById("view");
+  try {
+    await api(`/api/v1/tokens/${encodeURIComponent(token_id)}/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    delete state.profilesPage.tokens[token_id];
+    await loadProfiles();
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`revoke failed: ${error.message}`));
+  }
+}
+
+// ---------------------------------------------------------------- settings (FR-7.11 / G-AC3)
+
+async function loadSettings() {
+  const view = document.getElementById("view");
+  try {
+    const loaded = await Promise.all([
+      api("/api/v1/config"),
+      api("/api/v1/config/versions"),
+      api("/api/v1/status"),
+    ]);
+    state.settings.config = loaded[0] && loaded[0].config;
+    state.settings.versions = loaded[1] && loaded[1].versions;
+    state.dashboard = loaded[2];
+    state.profiles = (loaded[2] && loaded[2].profiles) || [];
+    syncProfileFromStatus();
+    renderProfilePicker();
+    view.innerHTML = settingsHtml();
+    setUpdatedAt();
+  } catch (error) {
+    state.settings.config = null;
+    state.settings.versions = null;
+    view.innerHTML = errorPanel(`Settings request failed: ${error.message}`);
+  }
+}
+
+function configLeaf(config, path) {
+  let node = config;
+  for (const part of path.split(".")) {
+    if (!node || typeof node !== "object") return undefined;
+    node = node[part];
+  }
+  return node;
+}
+
+function restartRequiredBadge(config) {
+  const rr = config && config.restart_required;
+  const names = Object.keys(rr || {}).filter((key) => rr[key] === true);
+  if (!names.length) return "";
+  return `<span class="badge badge-warn" title="${esc(names.join(", "))}">restart required</span>`;
+}
+
+function settingsHtml() {
+  const config = state.settings.config || {};
+  const banner = state.settings.message
+    ? `<div class="card"><span class="ok-inline">${esc(state.settings.message)}</span></div>`
+    : "";
+  state.settings.message = null;
+  const toolbar = `<div class="toolbar">
+    <button class="btn" data-act="go-home">← dashboard</button>
+    <button class="btn" data-act="settings-refresh">Refresh</button>
+    <span class="spacer"></span>
+    ${restartRequiredBadge(config)}
+    <span class="toolbar-note">every change is audited and versioned</span>
+  </div>`;
+  const dream = config.dream || {};
+  const autoTrigger = dream.auto_trigger === true;
+  const budget = dream.token_budget_usd;
+  const editable = `<form class="card" data-settings-form>
+    <h2>dream engine</h2>
+    <div class="filter-grid">
+      <div class="field">
+        <label for="settings-auto-trigger">auto-trigger dream</label>
+        <input type="checkbox" id="settings-auto-trigger" name="dream.auto_trigger" ${autoTrigger ? "checked" : ""} />
+      </div>
+      <div class="field">
+        <label for="settings-budget">token budget (USD per month)</label>
+        <input type="number" id="settings-budget" name="dream.token_budget_usd" min="0" step="0.01" value="${esc(budget === null || budget === undefined ? "" : String(budget))}" placeholder="blank = no cap" autocomplete="off" />
+      </div>
+    </div>
+    <div class="toolbar">
+      <span class="toolbar-note">model routes and key env vars live on the Models page</span>
+      <span class="spacer"></span>
+      <button class="btn btn-primary" type="submit">save settings</button>
+    </div>
+    <output class="feedback" data-settings-feedback></output>
+  </form>`;
+  const storageState = profilesStorageState();
+  const storage = `<div class="card">
+    <h2>storage driver</h2>
+    <p class="dim">Managed by the daemon from MNEMOSEED_HOME. The driver and vector index are
+    selected at boot; switching requires a restart of the daemon.</p>
+    ${storageState}
+  </div>`;
+  const versions = versionsTable(state.settings.versions);
+  return banner + toolbar + editable + storage + versions;
+}
+
+function profilesStorageState() {
+  const rows = state.profiles || [];
+  const anyData = rows.some((row) => (row.counts && (row.counts.chunks > 0 || row.counts.nodes > 0)) || row.needs_reconcile > 0);
+  return `<p><span class="badge ${anyData ? "badge-accent" : ""}">${anyData ? "in use — switch requires a full re-sync" : "empty — safe to switch at next boot"}</span></p>
+  <div class="tiles">${rows.map((row) => tile(fmtNum(row.counts ? row.counts.chunks : 0), `${row.profile_id} chunks`)).join("")}</div>`;
+}
+
+function versionsTable(versions) {
+  if (!versions || !versions.length) return '<div class="card"><h2>config versions</h2><p class="dim">No versions recorded yet.</p></div>';
+  const rows = versions
+    .map(
+      (version) => `<tr>
+        <td><span class="mono">${esc(version.version_id)}</span></td>
+        <td><span class="mono">${esc(version.key)}</span></td>
+        <td>v${esc(version.version)}</td>
+        <td>${fmtEpoch(version.updated_at)}</td>
+        <td>${detailCell(version.value)}</td>
+        <td><button class="btn" data-act="config-rollback" data-version-id="${esc(version.version_id)}" title="restore this version's config (audited)">rollback</button></td>
+      </tr>`,
+    )
+    .join("");
+  return `<div class="card"><h2>config versions</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>version</th><th>key</th><th>#</th><th>at</th><th>value</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div></div>`;
+}
+
+async function saveSettings(form) {
+  const feedback = form.querySelector("[data-settings-feedback]");
+  const data = new FormData(form);
+  const autoTrigger = data.get("dream.auto_trigger") !== null;
+  const rawBudget = String(data.get("dream.token_budget_usd") || "").trim();
+  let budget = null;
+  if (rawBudget) {
+    budget = Number(rawBudget);
+    if (!Number.isFinite(budget) || budget < 0) {
+      if (feedback) feedback.innerHTML = errorInline("token budget must be a non-negative number, or blank");
+      return;
+    }
+  }
+  if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
+  try {
+    const writes = [];
+    if (configLeaf(state.settings.config, "dream.auto_trigger") !== autoTrigger) {
+      writes.push({ key_path: "dream.auto_trigger", value: autoTrigger });
+    }
+    if ((configLeaf(state.settings.config, "dream.token_budget_usd") ?? null) !== budget) {
+      writes.push({ key_path: "dream.token_budget_usd", value: budget });
+    }
+    if (!writes.length) {
+      if (feedback) feedback.innerHTML = '<span class="ok-inline">no changes</span>';
+      return;
+    }
+    let lastVersion = null;
+    let restartRequired = false;
+    for (const set of writes) {
+      const result = await api("/api/v1/config/set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(set),
+      });
+      lastVersion = result.version_id;
+      if (result.restart_required === true) restartRequired = true;
+    }
+    state.settings.message = `settings saved — config version ${lastVersion} (audited)${restartRequired ? "; restart required" : ""}`;
+    await loadSettings();
+  } catch (error) {
+    if (feedback) feedback.innerHTML = errorInline(`save failed: ${error.message}`);
+  }
+}
+
+async function rollbackConfig(version_id) {
+  const view = document.getElementById("view");
+  try {
+    const result = await api("/api/v1/config/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version_id }),
+    });
+    state.settings.message = `rolled back to version ${result.version_id} — restored ${result.restored} (audited)`;
+    await loadSettings();
+  } catch (error) {
+    if (view) view.insertAdjacentHTML("beforeend", errorInline(`rollback failed: ${error.message}`));
+  }
+}
+
+// ---------------------------------------------------------------- audit log (⑩)
+
+async function loadAudit() {
+  const view = document.getElementById("view");
+  const query = new URLSearchParams();
+  if (state.audit.filters.actor) query.set("actor", state.audit.filters.actor);
+  if (state.audit.filters.action) query.set("action", state.audit.filters.action);
+  if (state.audit.filters.since) query.set("since", String(state.audit.filters.since));
+  if (state.audit.offset > 0) query.set("offset", String(state.audit.offset));
+  query.set("limit", String(state.audit.limit));
+  const suffix = query.toString();
+  try {
+    const result = await api(`/api/v1/audit${suffix ? `?${suffix}` : ""}`);
+    state.audit.data = result;
+    view.innerHTML = auditHtml(result);
+    setUpdatedAt();
+  } catch (error) {
+    view.innerHTML = errorPanel(`Audit request failed: ${error.message}`);
+  }
+}
+
+function auditHtml(result) {
+  const entries = (result && result.items) || [];
+  const paging = result && result.paging;
+  const toolbar = `<div class="toolbar">
+    <button class="btn" data-act="go-home">← dashboard</button>
+    <button class="btn" data-act="audit-refresh">Refresh</button>
+    <button class="btn" data-act="audit-reset">reset filters</button>
+    <span class="spacer"></span>
+    <span class="toolbar-note">append-only provenance trail</span>
+  </div>`;
+  const filterForm = `<form class="card" data-audit-form>
+    <h2>filters</h2>
+    <div class="filter-grid">
+      <div class="field"><label for="audit-actor">actor</label><input type="text" id="audit-actor" name="actor" value="${esc(state.audit.filters.actor || "")}" placeholder="console | cli | daemon" autocomplete="off" /></div>
+      <div class="field"><label for="audit-action">action</label><input type="text" id="audit-action" name="action" value="${esc(state.audit.filters.action || "")}" placeholder="e.g. capture" autocomplete="off" /></div>
+      <div class="field"><label for="audit-since">since</label><input type="datetime-local" id="audit-since" name="since" value="${esc(auditSinceInput())}" /></div>
+    </div>
+    <div class="toolbar"><button class="btn btn-primary" type="submit">apply filters</button></div>
+    <output class="feedback" data-audit-feedback></output>
+  </form>`;
+  const table = entries.length
+    ? `<div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>at</th><th>actor</th><th>action</th><th>detail</th></tr></thead>
+        <tbody>${entries
+          .map(
+            (entry) => `<tr>
+              <td>${fmtEpoch(entry.at)}</td>
+              <td>${esc(entry.actor || "—")}</td>
+              <td><span class="badge badge-accent">${esc(entry.action)}</span></td>
+              <td>${detailCell(entry.detail)}</td>
+            </tr>`,
+          )
+          .join("")}</tbody>
+      </table></div>${paginationBar(paging, entries.length, "audit-page")}</div>`
+    : emptyPanel("No audit entries match the current filters.");
+  return toolbar + filterForm + table;
+}
+
+// datetime-local (YYYY-MM-DDTHH:MM) <-> epoch seconds, matching the audit `since` filter.
+function auditSinceInput() {
+  const since = state.audit.filters.since;
+  if (!since) return "";
+  const date = new Date(since * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+async function applyAuditFilters(form) {
+  const data = new FormData(form);
+  const rawSince = String(data.get("since") || "").trim();
+  let since = null;
+  if (rawSince) {
+    const epoch = Date.parse(rawSince) / 1000;
+    if (Number.isNaN(epoch)) {
+      const feedback = form.querySelector("[data-audit-feedback]");
+      if (feedback) feedback.innerHTML = errorInline("invalid since value");
+      return;
+    }
+    since = Math.floor(epoch);
+  }
+  state.audit.filters.actor = String(data.get("actor") || "").trim() || undefined;
+  state.audit.filters.action = String(data.get("action") || "").trim() || undefined;
+  state.audit.filters.since = since;
+  state.audit.offset = 0;
+  await loadAudit();
 }
 
 // ---------------------------------------------------------------- dream writes
@@ -1676,15 +2276,20 @@ async function loadLLM() {
     const loaded = await Promise.all([
       api("/api/v1/llm/routes"),
       api("/api/v1/llm/oauth-availability"),
+      api("/api/v1/config"),
     ]);
     state.llm.routes = loaded[0];
     state.llm.oauth = loaded[1];
+    // Resolved config carries each role's max_tokens (the routes payload does
+    // not); both stay env-var NAMES only.
+    state.llm.config = (loaded[2] && loaded[2].config) || null;
     if (view) view.innerHTML = llmShellHtml(loaded[0], loaded[1], state.llm.message);
     state.llm.message = null;
     setUpdatedAt();
   } catch (error) {
     state.llm.routes = null;
     state.llm.oauth = null;
+    state.llm.config = null;
     if (view) view.innerHTML = errorPanel(`Models request failed: ${error.message}`);
   }
 }
@@ -1764,6 +2369,7 @@ function llmRoleCard(role, drivers) {
       ${tile(esc(role.base_url || "default"), "base URL")}
       ${tile(esc(envRows.join(", ") || "—"), "api key env")}
       ${tile(esc(role.provider || "—"), "oauth provider")}
+      ${tile(esc(fmtNum(configRoleMaxTokens(role.role))), "max tokens")}
     </div>
     <h3>connectivity</h3>
     <div class="toolbar">
@@ -1779,6 +2385,7 @@ function llmRoleCard(role, drivers) {
 }
 
 function llmEditFormHtml(role, driverOptions) {
+  const maxTokens = configRoleMaxTokens(role.role);
   return `<form class="card" data-llm-route-form data-role="${esc(role.role)}">
     <h3>edit route · ${esc(role.role)}</h3>
     <div class="filter-grid">
@@ -1787,9 +2394,10 @@ function llmEditFormHtml(role, driverOptions) {
       <div class="field"><label for="llm-url-${esc(role.role)}">base URL</label><input type="text" id="llm-url-${esc(role.role)}" name="base_url" value="${esc(role.base_url || "")}" placeholder="blank = default" autocomplete="off" /></div>
       <div class="field"><label for="llm-env-${esc(role.role)}">api key env var</label><input type="text" id="llm-env-${esc(role.role)}" name="api_key_env" value="${esc(role.api_key_env || "")}" placeholder="MY_API_KEY" autocomplete="off" /></div>
       <div class="field"><label for="llm-provider-${esc(role.role)}">oauth provider</label><input type="text" id="llm-provider-${esc(role.role)}" name="provider" value="${esc(role.provider || "")}" placeholder="codex | grok" autocomplete="off" /></div>
+      <div class="field"><label for="llm-tokens-${esc(role.role)}">max tokens</label><input type="number" id="llm-tokens-${esc(role.role)}" name="max_tokens" value="${esc(maxTokens === null ? "" : String(maxTokens))}" min="1" placeholder="blank = role default" autocomplete="off" /></div>
     </div>
     <div class="toolbar">
-      <span class="toolbar-note">blank base URL / env var clears the override, restoring defaults</span>
+      <span class="toolbar-note">blank base URL / env var / max tokens clears the override, restoring defaults</span>
       <span class="spacer"></span>
       <button class="btn" type="button" data-act="llm-test-edit" data-role="${esc(role.role)}">test connection</button>
       <button class="btn btn-primary" type="submit">save route</button>
@@ -1814,6 +2422,19 @@ function findLLMRoute(role) {
   return routes && routes.roles ? routes.roles.find((entry) => entry.role === role) : null;
 }
 
+function configRoleMaxTokens(role) {
+  const cfg = state.llm.config;
+  if (!cfg || !cfg.dream || !cfg.dream.llm || !cfg.dream.llm[role]) return null;
+  const value = cfg.dream.llm[role].max_tokens;
+  return value === null || value === undefined || value === "" ? null : Number(value);
+}
+
+// The probe signature covers exactly the fields the connectivity probe sees;
+// max_tokens does not affect reachability and deliberately does not gate a save.
+function llmProbeSignature(driver, model, baseUrl, apiKeyEnv, provider) {
+  return JSON.stringify([driver, model, baseUrl, apiKeyEnv, provider]);
+}
+
 async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feedbackEl) {
   if (!driver || !model) {
     if (feedbackEl) feedbackEl.innerHTML = errorInline("driver and model are required to probe");
@@ -1830,16 +2451,39 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
       body: JSON.stringify(payload),
     });
     const detail = String(result.detail && typeof result.detail === "object" ? JSON.stringify(result.detail) : result.detail || "");
+    if (result.ok) {
+      // A passing probe for the exact current form values arms the save gate.
+      state.llm.probeOk[role] = llmProbeSignature(driver, model, baseUrl || "", apiKeyEnv || "", provider || "");
+    } else {
+      delete state.llm.probeOk[role];
+    }
     if (feedbackEl) {
       feedbackEl.innerHTML = result.ok
         ? `<span class="ok-inline">reachable — ${esc(detail)}</span>`
         : errorInline(`unreachable — ${esc(detail)}`);
     }
   } catch (error) {
+    delete state.llm.probeOk[role];
     if (feedbackEl) feedbackEl.innerHTML = errorInline(`test failed: ${error.message}`);
   }
 }
 
+function llmRoleConfig(role) {
+  const route = findLLMRoute(role);
+  return {
+    driver: route ? route.driver || "" : "",
+    model: route ? route.model || "" : "",
+    base_url: route ? route.base_url || "" : "",
+    api_key_env: route ? route.api_key_env || "" : "",
+    provider: route ? route.provider || "" : "",
+    max_tokens: configRoleMaxTokens(role),
+  };
+}
+
+// FR-7.11 / G-AC2: saves flow through the versioned config service one key at a
+// time (the llm routes endpoint does not accept max_tokens and is kept read-only
+// here). A save is blocked unless a probe passed for the exact current form
+// values; only keys that differ from the resolved config are written.
 async function saveRoute(role, form) {
   const feedback = form.querySelector("[data-llm-feedback]");
   const data = new FormData(form);
@@ -1849,19 +2493,51 @@ async function saveRoute(role, form) {
     if (feedback) feedback.innerHTML = errorInline("driver and model are required to save");
     return;
   }
-  if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
-  const payload = { driver, model };
-  for (const name of ["base_url", "api_key_env", "provider"]) {
-    payload[name] = String(data.get(name) || "").trim();
+  const baseUrl = String(data.get("base_url") || "").trim();
+  const apiKeyEnv = String(data.get("api_key_env") || "").trim();
+  const provider = String(data.get("provider") || "").trim();
+  const rawTokens = String(data.get("max_tokens") || "").trim();
+  let maxTokens = null;
+  if (rawTokens) {
+    maxTokens = Number(rawTokens);
+    if (!Number.isInteger(maxTokens) || maxTokens < 1) {
+      if (feedback) feedback.innerHTML = errorInline("max tokens must be a positive integer, or blank");
+      return;
+    }
   }
+  if (state.llm.probeOk[role] !== llmProbeSignature(driver, model, baseUrl, apiKeyEnv, provider)) {
+    if (feedback) feedback.innerHTML = errorInline("test connection first — a route may only be saved after a passing probe of these exact values");
+    return;
+  }
+  const current = llmRoleConfig(role);
+  const sets = [];
+  const keyPath = (leaf) => `dream.llm.${role}.${leaf}`;
+  if (current.driver !== driver) sets.push({ key_path: keyPath("driver"), value: driver });
+  if (current.model !== model) sets.push({ key_path: keyPath("model"), value: model });
+  if ((current.base_url || "") !== baseUrl) sets.push({ key_path: keyPath("base_url"), value: baseUrl || null });
+  if ((current.api_key_env || "") !== apiKeyEnv) sets.push({ key_path: keyPath("api_key_env"), value: apiKeyEnv || null });
+  if ((current.provider || "") !== provider) sets.push({ key_path: keyPath("provider"), value: provider || null });
+  if ((current.max_tokens ?? null) !== maxTokens) sets.push({ key_path: keyPath("max_tokens"), value: maxTokens });
+  if (!sets.length) {
+    if (feedback) feedback.innerHTML = '<span class="ok-inline">no changes — the resolved route already matches</span>';
+    return;
+  }
+  if (feedback) feedback.innerHTML = '<span class="dim">saving…</span>';
   try {
-    const result = await api(`/api/v1/llm/routes/${encodeURIComponent(role)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    let lastVersion = null;
+    let restartRequired = false;
+    for (const set of sets) {
+      const result = await api("/api/v1/config/set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(set),
+      });
+      lastVersion = result.version_id;
+      if (result.restart_required === true) restartRequired = true;
+    }
+    delete state.llm.probeOk[role];
     state.llm.editingRole = null;
-    state.llm.message = `route ${result.role} saved → ${result.driver} / ${result.model} (audited)`;
+    state.llm.message = `route ${role} saved — config version ${lastVersion} (audited)${restartRequired ? "; restart required for the change to take effect" : ""}`;
     await loadLLM();
   } catch (error) {
     if (feedback) feedback.innerHTML = errorInline(`save failed: ${error.message}`);
@@ -1928,6 +2604,8 @@ function handleClick(event) {
     case "llm-edit": {
       const editRole = el.dataset.role;
       state.llm.editingRole = state.llm.editingRole === editRole ? null : editRole;
+      // Any re-entry into the editor invalidates a previously passing probe.
+      delete state.llm.probeOk[editRole];
       renderLLM();
       break;
     }
@@ -1983,6 +2661,54 @@ function handleClick(event) {
     case "sign-out":
       signOut();
       break;
+    case "profiles-refresh":
+      loadProfiles();
+      break;
+    case "profile-archive": {
+      toggleArchive(el.dataset.profileId, el.dataset.archived === "true");
+      break;
+    }
+    case "token-issue":
+      issueToken(el.dataset.profileId);
+      break;
+    case "token-revoke":
+      revokeToken(el.dataset.tokenId);
+      break;
+    case "token-copy":
+      copyToken(el.dataset.secret);
+      break;
+    case "detail-forget": {
+      const forgetBtn = el;
+      if (forgetBtn.dataset.armed !== "true") {
+        forgetBtn.dataset.armed = "true";
+        forgetBtn.textContent = "confirm forget";
+        forgetBtn.title = "click again to erase this memory (audited)";
+        break;
+      }
+      forgetDetail(el.dataset.type, el.dataset.id);
+      break;
+    }
+    case "detail-pin":
+      togglePin(el.dataset.id, el.dataset.pinned === "true");
+      break;
+    case "settings-refresh":
+      loadSettings();
+      break;
+    case "config-rollback":
+      rollbackConfig(el.dataset.versionId);
+      break;
+    case "audit-refresh":
+      loadAudit();
+      break;
+    case "audit-reset":
+      state.audit.filters = {};
+      state.audit.offset = 0;
+      loadAudit();
+      break;
+    case "audit-page":
+      state.audit.offset = Number(el.dataset.offset || 0);
+      loadAudit();
+      break;
     default:
       break;
   }
@@ -2031,6 +2757,26 @@ function handleSubmit(event) {
   if (form.hasAttribute("data-llm-wizard-form")) {
     event.preventDefault();
     submitWizard(form);
+  }
+  if (form.hasAttribute("data-weight-form")) {
+    event.preventDefault();
+    adjustWeight(form);
+  }
+  if (form.hasAttribute("data-profiles-create-form")) {
+    event.preventDefault();
+    createProfile(form);
+  }
+  if (form.hasAttribute("data-profile-rename-form")) {
+    event.preventDefault();
+    renameProfile(form);
+  }
+  if (form.hasAttribute("data-settings-form")) {
+    event.preventDefault();
+    saveSettings(form);
+  }
+  if (form.hasAttribute("data-audit-form")) {
+    event.preventDefault();
+    applyAuditFilters(form);
   }
   if (form.dataset && form.dataset.authForm === "setup") {
     event.preventDefault();

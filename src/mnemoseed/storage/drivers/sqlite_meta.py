@@ -169,14 +169,15 @@ class SqliteMetaDriver:
     def upsert_profile(self, profile: StoredProfile) -> None:
         created = profile.created_at if profile.created_at else time.time()
         self._conn.execute(
-            "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?) "
+            "INSERT INTO profiles (profile_id, display_name, created_at, archived) "
+            "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(profile_id) DO UPDATE SET display_name = excluded.display_name",
-            (profile.profile_id, profile.display_name, iso8601_utc(created)),
+            (profile.profile_id, profile.display_name, iso8601_utc(created), int(profile.archived)),
         )
 
     def get_profile(self, profile_id: str) -> StoredProfile | None:
         row = self._conn.execute(
-            "SELECT profile_id, display_name, created_at FROM profiles WHERE profile_id = ?",
+            "SELECT profile_id, display_name, created_at, archived FROM profiles WHERE profile_id = ?",
             (profile_id,),
         ).fetchone()
         if row is None:
@@ -185,21 +186,32 @@ class SqliteMetaDriver:
             profile_id=str(row["profile_id"]),
             display_name=str(row["display_name"]),
             created_at=epoch_from_iso(str(row["created_at"])),
+            archived=bool(int(row["archived"])),
         )
 
     def delete_profile(self, profile_id: str) -> None:
         # tokens cascade via FK
         self._conn.execute("DELETE FROM profiles WHERE profile_id = ?", (profile_id,))
 
+    def archive_profile(self, profile_id: str, archived: bool) -> None:
+        with _transaction(self._conn):
+            cursor = self._conn.execute(
+                "UPDATE profiles SET archived = ? WHERE profile_id = ?",
+                (int(archived), profile_id),
+            )
+            if cursor.rowcount == 0:
+                raise StorageError(f"cannot archive unknown profile {profile_id!r}")
+
     def list_profiles(self) -> list[StoredProfile]:
         rows = self._conn.execute(
-            "SELECT profile_id, display_name, created_at FROM profiles ORDER BY created_at"
+            "SELECT profile_id, display_name, created_at, archived FROM profiles ORDER BY created_at"
         ).fetchall()
         return [
             StoredProfile(
                 profile_id=str(r["profile_id"]),
                 display_name=str(r["display_name"]),
                 created_at=epoch_from_iso(str(r["created_at"])),
+                archived=bool(int(r["archived"])),
             )
             for r in rows
         ]
