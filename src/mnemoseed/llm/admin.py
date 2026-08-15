@@ -28,12 +28,21 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from mnemoseed.config import LEGACY_LOCAL_TRACK_ROLE, LLM_ROLES, LOCAL_TRACK_DEPRECATION, Config
+from mnemoseed.config import (
+    DEFAULT_LLM_ROUTES,
+    LEGACY_LOCAL_TRACK_ROLE,
+    LLM_ROLES,
+    LOCAL_TRACK_DEPRECATION,
+    Config,
+    RoleLLMConfig,
+)
 from mnemoseed.configwrite.service import ConfigWriteError, ConfigWriteService
 from mnemoseed.llm.drivers.oauth import SUPPORTED_PROVIDERS, OAuthLLM
 from mnemoseed.llm.registry import LLM_DRIVERS, LLMRegistry
 from mnemoseed.llm.routing import RoleRouter
 from mnemoseed.llm.types import HealthReport, LLMError, LLMUnavailable
+from mnemoseed.secrets.refs import is_secrets_ref, secret_name_from_ref
+from mnemoseed.secrets.store import SecretStore
 from mnemoseed.storage.ports import AuditEntry
 
 #: How long a per-role connectivity probe stays cached before re-running the
@@ -81,6 +90,7 @@ class LLMAdminService:
         home: str | Path | None = None,
         env: Callable[[str], str | None] | None = None,
         configwrite: ConfigWriteService | None = None,
+        secrets: SecretStore | None = None,
     ) -> None:
         self._config = config
         self._meta = meta
@@ -88,6 +98,7 @@ class LLMAdminService:
         self._clock = clock if clock is not None else time.time
         self._home = Path(home).expanduser() if home is not None else None
         self._env = env if env is not None else os.environ.get
+        self._secrets = secrets
         self._connectivity_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         # Signature -> last successful probe time (in-process only; MUST-FIX 2).
         self._passed_tests: dict[str, float] = {}
@@ -200,10 +211,7 @@ class LLMAdminService:
         signature (driver + model + base_url + api_key_env + provider) passed
         within the grace window (see :class:`LLMTestRequiredError`).
         """
-        if role == LEGACY_LOCAL_TRACK_ROLE:
-            raise LLMAdminError(LOCAL_TRACK_DEPRECATION)
-        if role not in LLM_ROLES:
-            raise LLMAdminError(f"unknown llm role {role!r} (choose from: {', '.join(LLM_ROLES)})")
+        self._validate_role(role)
         current = self._config.llm[role]
 
         # Resolve the merged route: None keeps the current value, "" clears an
@@ -265,7 +273,6 @@ class LLMAdminService:
             merged_params.pop("provider", None)
             if provider.strip():
                 merged_params["provider"] = provider.strip()
-        from mnemoseed.config import RoleLLMConfig
 
         self._config.llm[role] = RoleLLMConfig(
             role=role, driver=new_driver, model=new_model, params=merged_params
@@ -283,6 +290,75 @@ class LLMAdminService:
             "persisted_to": str(path),
             "audited": audited,
         }
+
+    # ---------------------------------------------------------------- keys (T2-3)
+
+    def set_key(self, role: str, key: str, *, actor: str = "console") -> dict[str, Any]:
+        """Store one role's API key and pin the ``secrets:`` reference.
+
+        The key VALUE lands in the SecretStore (a restricted file under the
+        config dir) and the config carries only the reference — persisted
+        through the single config writer, so the write is versioned + audited
+        and the role-generation bump hot-applies it to the next dream run
+        (no restart). The value never reaches the response, the audit entry,
+        or the config file.
+        """
+        self._validate_role(role)
+        key = key.strip()
+        if not key:
+            raise LLMAdminError("key must be a non-empty string")
+        if self._secrets is None:
+            raise LLMAdminError("the secret store is not available")
+        ref = f"secrets:mnemoseed/dream/{role}"
+        self._secrets.set(f"mnemoseed/dream/{role}", key)
+        try:
+            self._configwrite.set(f"dream.llm.{role}.api_key_env", ref, actor=actor)
+        except ConfigWriteError as exc:
+            raise LLMAdminError(str(exc)) from exc
+        return {
+            "ok": True,
+            "role": role,
+            "masked_tail": self._secrets.masked_tail(f"mnemoseed/dream/{role}"),
+            "restart_required": False,
+        }
+
+    def delete_key(self, role: str, *, actor: str = "console") -> dict[str, Any]:
+        """Remove a stored key and clear its reference.
+
+        The role falls back to the env-var chain (the loader default, or an
+        explicitly configured env chain) once the reference is gone.
+        """
+        self._validate_role(role)
+        if self._secrets is None:
+            raise LLMAdminError("the secret store is not available")
+        self._secrets.delete(f"mnemoseed/dream/{role}")
+        current = self._config.llm[role]
+        if is_secrets_ref(str(current.params.get("api_key_env"))):
+            try:
+                self._configwrite.set(f"dream.llm.{role}.api_key_env", "", actor=actor)
+            except ConfigWriteError as exc:
+                raise LLMAdminError(str(exc)) from exc
+            # The explicit reference is gone; restore the loader-default env
+            # chain into the live role so the router falls back to env vars
+            # without waiting for a reload.
+            params = dict(self._config.llm[role].params)
+            params.pop("api_key_env", None)
+            default_chain = DEFAULT_LLM_ROUTES[role].params.get("api_key_env")
+            if default_chain:
+                params["api_key_env"] = default_chain
+            self._config.llm[role] = RoleLLMConfig(
+                role=role,
+                driver=current.driver,
+                model=current.model,
+                params=params,
+            )
+        return {"ok": True, "role": role, "restart_required": False}
+
+    def _validate_role(self, role: str) -> None:
+        if role == LEGACY_LOCAL_TRACK_ROLE:
+            raise LLMAdminError(LOCAL_TRACK_DEPRECATION)
+        if role not in LLM_ROLES:
+            raise LLMAdminError(f"unknown llm role {role!r} (choose from: {', '.join(LLM_ROLES)})")
 
     # ---------------------------------------------------------------- probe
 
@@ -328,16 +404,22 @@ class LLMAdminService:
         ):
             if value:
                 params[name] = value
-        # A proposed KEY is referenced by env-var NAME; resolve it against the
-        # process environment exactly like the role router does (never a value
-        # over the wire).
+        # A proposed KEY is referenced by env-var NAME or a secrets:
+        # reference; resolve it exactly like the role router does (never a
+        # value over the wire).
         api_key = ""
         if table.get("api_key_env"):
-            for name in (entry.strip() for entry in str(table["api_key_env"]).split(",")):
-                env_value = self._env(name) if name else None
-                if env_value:
-                    api_key = env_value
-                    break
+            key_source = str(table["api_key_env"])
+            if is_secrets_ref(key_source):
+                secret_key = secret_name_from_ref(key_source)
+                if secret_key and self._secrets is not None:
+                    api_key = self._secrets.get(secret_key) or ""
+            else:
+                for name in (entry.strip() for entry in key_source.split(",")):
+                    env_value = self._env(name) if name else None
+                    if env_value:
+                        api_key = env_value
+                        break
         params["model"] = merged_model
         params["api_key"] = api_key
         try:
@@ -476,7 +558,9 @@ class LLMAdminService:
         cached = self._connectivity_cache.get(role)
         if cached is not None and now - cached[0] < _CONNECTIVITY_TTL:
             return cached[1]
-        report = RoleRouter(routes=dict(self._config.llm), audit=None, clock=self._clock).check(role)
+        report = RoleRouter(
+            routes=dict(self._config.llm), audit=None, clock=self._clock, secrets=self._secrets
+        ).check(role)
         payload: dict[str, Any] = {
             "ok": report.ok,
             "detail": report.detail,

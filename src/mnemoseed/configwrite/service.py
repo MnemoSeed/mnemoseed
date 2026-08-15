@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from mnemoseed.config import CONFIG_PATH, LLM_ROLES, Config, DreamConfig, RoleLLMConfig
+from mnemoseed.secrets.refs import SECRETS_REF_RE, is_secrets_ref
 from mnemoseed.storage.ports import AuditEntry, ConfigEntry
 
 logger = logging.getLogger("mnemoseed.configwrite")
@@ -131,15 +132,27 @@ def _validate_optional_str(value: Any) -> str | None:
 
 
 def _validate_env_name_list(value: Any) -> str | None:
-    """Comma-separated env-var NAMES only; a literal key is never accepted.
+    """Env-var NAME lists OR a single ``secrets:`` reference (T2-2).
 
     The failure message never echoes the offending token: a key value must not
-    travel back over the wire in an error response either.
+    travel back over the wire in an error response either. A reference is
+    validated for shape AND must name a live dream role; mixing a reference
+    with env names is rejected.
     """
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("must be a comma-separated list of env-var names")
+        raise ValueError("must be a comma-separated list of env-var names or a secrets: reference")
+    stripped = value.strip()
+    if is_secrets_ref(stripped):
+        match = SECRETS_REF_RE.fullmatch(stripped)
+        if match is None:
+            raise ValueError("must be env-var NAMES or a 'secrets:mnemoseed/dream/<role>' reference")
+        if match.group(1) not in LLM_ROLES:
+            raise ValueError(
+                f"a secrets: reference must name a live dream role (one of {', '.join(LLM_ROLES)})"
+            )
+        return stripped
     names = [token.strip() for token in value.split(",") if token.strip()]
     if not names:
         return None
@@ -208,7 +221,7 @@ def _role_key_specs(role: str) -> dict[str, ConfigKey]:
         "driver": ("string", _validate_nonempty_str, False),
         "model": ("string", _validate_nonempty_str, False),
         "base_url": ("string", _validate_optional_str, False),
-        "api_key_env": ("env-var name list", _validate_env_name_list, True),
+        "api_key_env": ("env-var names or secrets: reference", _validate_env_name_list, True),
         "max_tokens": ("positive integer", _validate_optional_positive_int, False),
         "provider": ("string", _validate_optional_str, False),
     }
@@ -703,8 +716,10 @@ class ConfigWriteService:
 
 
 def _redact_env_names(value: Any) -> str:
-    """Keep env-var NAMES only: a literal key value never surfaces on a read."""
+    """Keep env-var NAMES and ``secrets:`` references only: a literal key value
+    never surfaces on a read (a reference is not a value)."""
     if not isinstance(value, str):
         return ""
     names = [token.strip() for token in value.split(",") if token.strip()]
-    return ",".join(name for name in names if _ENV_NAME_RE.fullmatch(name))
+    kept = [name for name in names if _ENV_NAME_RE.fullmatch(name) or is_secrets_ref(name)]
+    return ",".join(kept)

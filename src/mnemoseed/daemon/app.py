@@ -26,7 +26,7 @@ from mnemoseed import __version__
 from mnemoseed.capture import ScoringPipeline, StrippingPipeline, TurnScorer, TurnSegmenter, WritingPipeline
 from mnemoseed.capture.pool import PoolEvent, ScorePool
 from mnemoseed.capture.stamper import WriteContext
-from mnemoseed.config import Config, load_config
+from mnemoseed.config import CONFIG_DIR, Config, load_config
 from mnemoseed.configwrite.routes import router as configwrite_router
 from mnemoseed.configwrite.service import ConfigWriteService
 from mnemoseed.console import ConsoleService, GuardedStaticFiles
@@ -58,6 +58,7 @@ from mnemoseed.llm.types import (
 )
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.schema.turn import Turn
+from mnemoseed.secrets import FileSecretStore
 from mnemoseed.storage.factory import Stores, build_stores
 from mnemoseed.storage.ports import CapabilityIssue, GraphStore
 
@@ -218,7 +219,7 @@ class _DreamRelay:
 
 
 def _build_capture(
-    stores: Stores, config: Config, configwrite: ConfigWriteService
+    stores: Stores, config: Config, configwrite: ConfigWriteService, secrets: FileSecretStore
 ) -> tuple[WritingPipeline, DreamTrigger, DreamPipeline, _DreamRelay, RoleRouter]:
     """Serving capture funnel: strip -> score -> pool -> stamp/write over the
     resolved storage stack. /ingest stays submit-only; the funnel drains on
@@ -259,6 +260,7 @@ def _build_capture(
         routes=config.llm,
         audit=stores.meta,
         generation=configwrite.generation_for,
+        secrets=secrets,
     )
 
     # Per-run resolver: materialize the reflect route fresh at run start so a
@@ -330,6 +332,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     stores = build_stores(config)
     app.state.config = config
     app.state.stores = stores
+    # SecretStore (T2-1): per-user restricted key files under the config
+    # home's secrets/ subdirectory. The store lives on the app state so the
+    # role router and the LLM admin/key surfaces share one instance.
+    secrets_home = config.source.parent if config.source is not None else CONFIG_DIR
+    app.state.secrets = FileSecretStore(secrets_home)
     # ConfigWriteService (PRD-07 FR-7.11 / design/07 section 9): the daemon's
     # single config writer behind every console/CLI settings change. It is
     # created BEFORE the serving funnel because the funnel consumes its F2
@@ -348,7 +355,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.dream_pipeline,
         app.state.dream_relay,
         app.state.role_router,
-    ) = _build_capture(stores, config, app.state.configwrite)
+    ) = _build_capture(stores, config, app.state.configwrite, app.state.secrets)
     app.state.segmenter = TurnSegmenter(app.state.capture)
     # The memory surface (T4) owns one retrieval engine whose track executor is
     # shut down in teardown, before the stores close (no worker outlives boot).
@@ -365,7 +372,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # OAuth availability, and the pre-write connectivity probe. It audits
     # through the same meta store the console writes do and persists role
     # changes through the ConfigWriteService into the live config.
-    app.state.llm_admin = LLMAdminService(config, stores.meta, configwrite=app.state.configwrite)
+    app.state.llm_admin = LLMAdminService(
+        config, stores.meta, configwrite=app.state.configwrite, secrets=app.state.secrets
+    )
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,

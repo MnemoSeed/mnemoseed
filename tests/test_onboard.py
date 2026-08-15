@@ -24,6 +24,7 @@ import pytest
 
 from mnemoseed.cli import main
 from mnemoseed.installer.doctor import Check, DoctorReport
+from mnemoseed.onboard import OnboardService
 
 BASE_URL = "http://localhost:7788"
 
@@ -314,6 +315,102 @@ def test_onboard_refuses_non_loopback_baseurl(tmp_path, monkeypatch, capsys) -> 
     assert code == 1
     assert "loopback" in captured.err.lower()
     assert daemon.calls == []  # nothing was sent anywhere
+
+
+# ---------------------------------------------------------------- llm key paste
+
+
+class _RecordingClient:
+    """A minimal daemon stand-in for the onboard LLM step (key paste path)."""
+
+    base_url = BASE_URL
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def post(self, path: str, body: dict[str, object] | None = None) -> dict[str, object]:
+        self.calls.append((path, body or {}))
+        if path.endswith("/api/v1/llm/test"):
+            return {"ok": True, "detail": {"status": "ok"}}
+        return {"ok": True}
+
+
+def _onboard_service(**answers) -> OnboardService:
+    return OnboardService(answers=answers, out=print)
+
+
+def test_onboard_llm_step_pastes_key_posts_it_before_probe_and_persists_ref(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """T2-4: the wizard collects the pasted API key, POSTs it to the key
+    endpoint BEFORE the connectivity probe (the probe resolves the stored
+    key), and persists the ``secrets:`` reference with the route."""
+    service = _onboard_service(
+        llm_provider="1", llm_model="kimi-k3", llm_api_key="sk-pasted-key-4321", llm_share=False
+    )
+    client = _RecordingClient()
+    ok, message = service._step_llm(client)
+    captured = capsys.readouterr()
+    assert ok is True
+    assert "stored locally" in captured.out  # the teaching print
+    assert "never shown again" in captured.out
+    assert "Advanced" in captured.out  # the env-var alternative is noted
+
+    posts = client.calls
+    key_at = next(i for i, (path, _) in enumerate(posts) if path.endswith("/api/v1/llm/key"))
+    probe_at = next(i for i, (path, _) in enumerate(posts) if path.endswith("/api/v1/llm/test"))
+    persist_at = next(
+        i for i, (path, _) in enumerate(posts) if path.endswith("/api/v1/llm/routes/deep_reflection")
+    )
+    assert key_at < probe_at < persist_at  # key first, then probe, then persist
+
+    key_call = next((path, body) for path, body in posts if path.endswith("/api/v1/llm/key"))
+    assert key_call[1] == {"role": "deep_reflection", "key": "sk-pasted-key-4321"}
+    probe = next((path, body) for path, body in posts if path.endswith("/api/v1/llm/test"))
+    assert probe[1]["api_key_env"] == "secrets:mnemoseed/dream/deep_reflection"
+    persist = next(
+        (path, body) for path, body in posts if path.endswith("/api/v1/llm/routes/deep_reflection")
+    )
+    assert persist[1]["api_key_env"] == "secrets:mnemoseed/dream/deep_reflection"
+    # the pasted value itself never appears in the probe/persist bodies
+    assert "sk-pasted-key-4321" not in repr(probe[1])
+    assert "sk-pasted-key-4321" not in repr(persist[1])
+
+
+def test_onboard_llm_step_empty_paste_notes_the_env_var_fallback(tmp_path, monkeypatch, capsys) -> None:
+    """Leaving the paste empty keeps the env-var alternative: no key endpoint
+    call, and the route pins the provider's default env-var NAME instead."""
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    service = _onboard_service(llm_provider="1", llm_model="kimi-k3", llm_share=False)
+    client = _RecordingClient()
+    ok, message = service._step_llm(client)
+    captured = capsys.readouterr()
+    assert ok is True
+    assert not any(path.endswith("/api/v1/llm/key") for path, _ in client.calls)
+    persist = next(
+        (path, body) for path, body in client.calls if path.endswith("/api/v1/llm/routes/deep_reflection")
+    )
+    assert persist[1]["api_key_env"] == "FIREWORKS_API_KEY"
+    assert "env var" in captured.out
+
+
+def test_onboard_llm_step_share_posts_the_key_to_both_roles(tmp_path, monkeypatch, capsys) -> None:
+    """Sharing the configured model also shares the stored key: both roles get
+    their own key-endpoint write and their own reference."""
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    service = _onboard_service(
+        llm_provider="1", llm_model="kimi-k3", llm_api_key="sk-pasted-key-4321", llm_share=True
+    )
+    client = _RecordingClient()
+    ok, message = service._step_llm(client)
+    assert ok is True
+    key_calls = [(path, body) for path, body in client.calls if path.endswith("/api/v1/llm/key")]
+    roles = sorted(call[1]["role"] for call in key_calls)
+    assert roles == ["deep_reflection", "short_increment"]
+    short_persist = next(
+        (path, body) for path, body in client.calls if path.endswith("/api/v1/llm/routes/short_increment")
+    )
+    assert short_persist[1]["api_key_env"] == "secrets:mnemoseed/dream/short_increment"
 
 
 # ---------------------------------------------------------------- setup exact-once + doctor failure

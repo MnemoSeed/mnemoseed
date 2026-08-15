@@ -1052,6 +1052,25 @@ def cmd_llm_set(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.api_key is not None:
+        # T2-4: a key VALUE is written through the REST key endpoint — stored
+        # under ~/.mnemoseed/secrets and referenced from config, never echoed.
+        # No --force bypass exists for secrets: a down daemon is a hard error.
+        if not args.api_key.strip():
+            print("error: --api-key must not be empty", file=sys.stderr)
+            return 1
+        try:
+            result = client.post("/api/v1/llm/key", {"role": args.role, "key": args.api_key})
+        except DaemonRestError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            return _client_error(exc)
+        masked = result.get("masked_tail")
+        tail = f" (masked tail {masked})" if masked else ""
+        print(f"{result.get('role')}: api key stored locally{tail}")
+        print("no restart needed: the new key is effective on the next dream run")
+        return 0
     body: dict[str, Any] = {}
     for field, value in (
         ("driver", args.driver),
@@ -1292,7 +1311,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_llm_status.set_defaults(func=cmd_llm_status)
     p_llm_set = llm_sub.add_parser(
         "set",
-        help="update one role route (--driver/--model/--base-url/--api-key-env/--provider)",
+        help="update one role route (--driver/--model/--base-url/--api-key-env/--provider) "
+        "or store a key (--api-key)",
     )
     p_llm_set.add_argument(
         "role",
@@ -1313,6 +1333,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--api-key-env",
         default=None,
         help="env-var NAME whose value the router resolves (comma-separated fallback chain)",
+    )
+    p_llm_set.add_argument(
+        "--api-key",
+        default=None,
+        help="paste an API key VALUE: stored under ~/.mnemoseed/secrets via the daemon "
+        "(no restart needed; effective on the next dream run)",
     )
     p_llm_set.add_argument("--provider", default=None, help="oauth provider (codex|grok) for driver=oauth")
     p_llm_set.set_defaults(func=cmd_llm_set)

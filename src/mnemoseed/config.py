@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from mnemoseed.secrets.refs import SECRETS_REF_RE, is_secrets_ref
+
 logger = logging.getLogger("mnemoseed.config")
 
 CONFIG_DIR = Path(os.environ.get("MNEMOSEED_HOME", Path.home() / ".mnemoseed"))
@@ -127,9 +129,9 @@ class RoleLLMConfig:
     """One role's resolved LLM route: driver + model + params.
 
     Keys are config attestations, never values: an API key is referenced by
-    env-var NAME in ``params["api_key_env"]`` and resolved at materialization
-    time by the RoleRouter (mnemoseed.llm.routing) — a literal key in config is
-    an error.
+    env-var NAME or a ``secrets:mnemoseed/dream/<role>`` reference in
+    ``params["api_key_env"]`` and resolved at materialization time by the
+    RoleRouter (mnemoseed.llm.routing) — a literal key in config is an error.
     """
 
     role: str
@@ -231,6 +233,31 @@ def _require_table(value: Any, key: str) -> dict[str, Any]:
     return value
 
 
+def _validate_api_key_ref(role: str, value: Any) -> None:
+    """Shape-check an ``api_key_env`` param (T2-2).
+
+    A ``secrets:`` reference must be well-formed and name a live dream role;
+    a malformed reference can never resolve, so it is a load error naming the
+    key. Anything else (env-var NAME lists, and hand-edited literal keys)
+    passes through unchanged — literal keys stay the pre-existing
+    tolerated-then-redacted contract.
+    """
+    if not isinstance(value, str) or not is_secrets_ref(value):
+        return
+    key = f"dream.llm.{role}.api_key_env"
+    match = SECRETS_REF_RE.fullmatch(value)
+    if match is None:
+        raise ConfigError(
+            key,
+            "a secrets: reference must look like 'secrets:mnemoseed/dream/<role>'",
+        )
+    if match.group(1) not in LLM_ROLES:
+        raise ConfigError(
+            key,
+            f"a secrets: reference must name a live dream role (one of {', '.join(LLM_ROLES)})",
+        )
+
+
 def _optional_driver(value: Any, key: str) -> str | None:
     if value is None:
         return None
@@ -325,6 +352,8 @@ def load_config(path: Path | None = None) -> Config:
                 model = _optional_driver(entry_table.get("model"), f"{role_path}.model")
                 base = DEFAULT_LLM_ROUTES[role]
                 params = {k: v for k, v in entry_table.items() if k not in ("driver", "model")}
+                if "api_key_env" in params:
+                    _validate_api_key_ref(role, params["api_key_env"])
                 llm_routes[role] = RoleLLMConfig(
                     role=role,
                     driver=driver if driver is not None else base.driver,
@@ -381,8 +410,9 @@ baseurl = "http://localhost:7788"
 # path = "~/.mnemoseed/isolated.db"
 
 # Dream LLM role routing (T6 / FR-2.14): pick the driver + model per role.
-# API keys are referenced by ENV-VAR NAME only — never a literal key here;
-# the router reads them from the process environment at materialization time.
+# API keys are referenced by ENV-VAR NAME or a secrets:mnemoseed/dream/<role>
+# reference — never a literal key here; the router resolves the value from the
+# process environment / the local secret store at materialization time.
 # Other params (base_url, max_tokens, ...) override the per-role defaults.
 # [dream.llm.deep_reflection]
 # driver = "anthropic"

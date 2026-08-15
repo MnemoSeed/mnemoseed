@@ -33,7 +33,7 @@ There is **no** Fireworks or OpenRouter driver, and **none** needs to be built �
 
 ### 2.2 Routing payload semantics (`admin.py:104-130`)
 
-`GET /api/v1/llm/routes` returns per role: `driver`, `model`, `base_url`, `api_key_env`, `provider` — but `base_url`/`api_key_env`/`provider` are returned **only when explicitly set** (`table.get(...)`), so the effective defaults (`https://api.fireworks.ai/inference/v1`, the `MNEMOSEED_DEEP_REFLECTION_API_KEY,FIREWORKS_API_KEY` fallback chain) are **invisible** to the console edit form. The user opens "Edit route" and sees a blank base URL and blank key fields, with no knowledge of the defaults in effect.
+`GET /api/v1/llm/routes` returns per role: `driver`, `model`, `base_url`, `api_key_env`, `provider` — but `base_url`/`api_key_env`/`provider` are returned **only when explicitly set** (`table.get(...)`), so the effective defaults (`https://api.fireworks.ai/inference/v1`, the `MNEMOSEED_DEEP_REFLECTION_API_KEY,FIREWORKS_API_KEY` fallback chain) are **invisible** to the console edit form. The user opens "Edit route" and sees a blank base URL and blank key fields, with no knowledge of the defaults in effect. Once the SecretStore path is enabled (§5, §8 D1), `api_key_env` may also return a reference (`secrets:mnemoseed/dream/<role>`) — the UI must render that as a "key saved" state (masked tail), not a blank field.
 
 ### 2.3 Exact locations of the dead inputs
 
@@ -54,9 +54,13 @@ Why it exists: `provider` is a real routing parameter and the OAuth path needs i
 
 Prompts for `llm driver (e.g. ollama, anthropic, stub)` and `llm model` — no `base_url`, no `api_key_env`. As a result Fireworks/OpenRouter/Anthropic users **cannot** configure a cloud provider from the CLI at all (no key env var is collected → probe 401 → the step silently skips with "connectivity test failed"). The example drivers are all jargon and omit the actual default driver.
 
-### 2.6 The env-var timing truth (must be taught)
+### 2.6 The two ways a key is held (must be taught)
 
-`RoleRouter.resolve()` reads keys from the **daemon process environment** at **first materialization** and caches the instance (`routing.py:56-88`). The UI must teach the consequences: (a) env vars set in a *new terminal* are invisible to an *already running* daemon; (b) on Windows, `setx` only affects subsequently launched processes, not a running daemon; (c) the fix = "set the variable, then restart the daemon". The current wizard hint — "the daemon reads the key from the named env var at run time" — is misleading and incomplete.
+**Primary path — SecretStore file backend, no restart.** An API key can be **pasted once** in console ⑧ / wizard / CLI; the daemon writes it to `~/.mnemoseed/secrets/<role>.key` (POSIX: file 0600, dir 0700; Windows: user-profile ACL). The config stores only a reference `secrets:mnemoseed/dream/<role>` — the key never enters the settings DB and is never echoed back to the UI. Changes apply **without a daemon restart**: routes re-resolve by generation, so a key change is picked up immediately (generation-bump re-resolve). The key is visible only at the moment it is pasted; afterwards only a masked tail `****1234` is shown, and it can be deleted with one click.
+
+**Secondary path — environment variables (headless/CI).** Env-var names remain supported for headless deployments and CI (12-factor convention). The honest cost: `RoleRouter.resolve()` reads keys from the **daemon process environment** at **first materialization** and caches the instance (`routing.py:56-88`), so a **new env-var value** set in a *new terminal* is invisible to an *already running* daemon (on Windows, `setx` likewise affects only subsequently launched processes); the fix = "set the variable, then restart the daemon". This cost is now **optional** — interactive users take the primary path and skip the restart; headless environments accept it by default.
+
+The UI must teach both paths: interactive surfaces steer to the primary path (paste = immediate effect); the env-var path appears only in headless/script scenarios; teaching blocks never say "must restart" for a key change (only for the env-var path, stated honestly). Industry basis (verified): Codex CLI `~/.codex/auth.json`, gh keychain-with-file-fallback + `GH_TOKEN`, Docker `config.json` base64, 12-factor env.
 
 ### 2.7 Doc vs code drift (must be resolved, not designed around)
 
@@ -95,7 +99,7 @@ A group of radio cards, one per available path. Each card explains in one senten
 
 Internal mapping (never shown verbatim to users, but reused in copy):
 
-| Card | driver | base_url (pre-filled, editable) | key env var (pre-filled, editable) |
+| Card | driver | base_url (pre-filled, editable) | key source (pre-filled, editable) |
 |---|---|---|---|
 | Fireworks | openai_compatible | `https://api.fireworks.ai/inference/v1` | `FIREWORKS_API_KEY` |
 | OpenRouter | openai_compatible | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
@@ -103,20 +107,31 @@ Internal mapping (never shown verbatim to users, but reused in copy):
 | Ollama | ollama | `http://localhost:11434` | (none — no key needed) |
 | Other | openai_compatible | blank → required | default `MNEMOSEED_DEEP_REFLECTION_API_KEY` |
 
-**The OAuth path is a row of separate buttons above the cards** (wizard only, see §6) — never a card, never a text field.
+The key-source column holds env-var names (headless/CI path); the user may instead choose to **paste a key**, stored locally via the SecretStore (§2.6, §5) — both routes work.
+
+**The OAuth path is a dual-path entry beside the provider selection** (identical in the wizard and the ⑧ editor, see §6): host-login cards (Codex / Grok, rendered in three states from `oauth-availability`) + a "paste a token instead" path — never a free-text field.
 
 ### 3.2 Step two — the morphing form
 
 The form body changes with the selection (progressive disclosure):
 
 - **The key field renders only for providers that need a key.** For Ollama the key block disappears.
-- **The API key field asks only for the env-var name** (never the value — G-AC2 red line), pre-filled with the provider's standard name, with a collapsible OS-split "how to set it" teaching block below (§5).
+- **The API key field supports two inputs**: (a) **paste a key** (primary path — the old "never ask for a key value" red line is superseded by the SecretStore: the value is handed to the daemon once over a local channel, written to `~/.mnemoseed/secrets/<role>.key`, never shown again, only the masked tail `****1234`, deletable); (b) **an env-var name** (headless/CI path, §2.6). A collapsible, OS-split "how to set it" teaching block sits below (§5).
 - **base_url** pre-filled and editable, with a one-click "reset to <provider> default". Folded under "Advanced: endpoint" in the guided surfaces; fully expanded in the ⑧ editor.
-- **model** is a combo box: live catalog from the probe (§7) + curated suggestions + free input. For Ollama the catalog comes from `GET /api/tags`, with a "pull it first" hint when the model is missing (`ollama pull llama3.1:8b`).
+- **model** is a **provider-scoped model picker** (§3.4): a live catalog (from the probe's `detail.models`) + curated per-provider suggestions visible before any probe + a **Load model list** button (fetches that endpoint's catalog without a probe) + free input always allowed. For Ollama the catalog comes from `GET /api/tags`, with a "pull it first" hint when the model is missing (`ollama pull llama3.1:8b`).
 
 ### 3.3 Step three — role assignment + test + save
 
 The wizard states in one sentence which role it is configuring (§4); the ⑧ editor repeats that sentence on each role card. Then: **Test connection** → on success **Save is enabled**; on probe failure the form is kept with repair guidance (§7).
+
+### 3.4 Provider-scoped model picker (industry pattern reference)
+
+Making model selection "provider-scoped" — listing only that provider's models on that endpoint — is the de facto standard in today's IDEs and aggregators. Two reference implementations (verified; URLs recorded in §12):
+
+- **OpenRouter** models page (https://openrouter.ai/models ): a provider-aggregated live catalog with instant search/filter and a copyable model id per row; the catalog is namespaced by provider (`provider/model`), matching `GET /api/v1/models`.
+- **Cursor** models page (https://cursor.com/docs/models ): a pick-one model set with a pricing table, readable descriptions, and switch entry points per model — the user picks from a set rather than typing a model id.
+
+Three behaviors are fixed accordingly (landed in §3.2 / §7): (1) the catalog is scoped to provider + endpoint, never mixing in another provider's models; (2) live catalogs usually run into the thousands, so the picker offers local search/filter; (3) free input is always available — the catalog is an accelerator, not a constraint.
 
 ---
 
@@ -133,38 +148,35 @@ The dream engine has exactly two roles (§8 D10). One plain-language sentence pe
 
 **Quality-hint rule**: when either role **picks Ollama**, a one-line quality hint shows directly under the card/form — `Lower synthesis quality than cloud models — you accept this for privacy or cost.` Non-blocking, no second confirmation, informational only; identical in the wizard, the ⑧ editor, and the CLI (§11). Both roles pointing at Ollama = fully offline, and the header shows the derived badge (§9, §10.1).
 
-The following terms must come with a tooltip/expander when they appear: **endpoint** ("the address where the provider receives MnemoSeed's requests"), **env var** ("a named value stored in your computer's environment — MnemoSeed reads the key from it and never stores the key itself"), **context / max tokens** ("how much text the model is allowed to produce in one run"), **OpenAI compatible** ("the same API dialect spoken by Fireworks and OpenRouter — one code path serves both").
+The following terms must come with a tooltip/expander when they appear: **endpoint** ("the address where the provider receives MnemoSeed's requests"), **env var** ("a named value stored in your computer's environment — on the headless/CI path MnemoSeed reads the key from it; interactive surfaces prefer handing the key to MnemoSeed for local storage"), **context / max tokens** ("how much text the model is allowed to produce in one run"), **OpenAI compatible** ("the same API dialect spoken by Fireworks and OpenRouter — one code path serves both").
 
 ---
 
 ## 5. The API key teaching block ("where the key actually goes")
 
-Rendered under the key field for every provider that needs a key. Layout (console/wizard):
+Rendered under the key field for every provider that needs a key. **The primary path is paste-once, no restart** (SecretStore file backend, §2.6, §8 D1); env vars are the headless/CI fallback. Layout (console/wizard):
 
 ```
 API key
-[ FIREWORKS_API_KEY        ]  ← env-var name (MnemoSeed stores this name, never the key)
+[ FIREWORKS_API_KEY        ]  ← env-var name (headless/CI)  ·  or paste a key once
+[ •••••••••••••••••1234    ]  ← paste here once — never shown again
+                               (key saved — ****1234)  [delete]
 
-Your key lives in an environment variable. MnemoSeed reads it from there at run time —
-you never paste the key into MnemoSeed, and MnemoSeed never stores it.
+Paste your key once. MnemoSeed stores it locally under ~/.mnemoseed/secrets and
+never displays it again — only this masked tail (****1234) is shown. It is never
+written into settings, never uploaded to any MnemoSeed server, and you can
+delete it any time. Changes apply immediately — no daemon restart.
 
 1. Create a key:  https://app.fireworks.ai/settings/users/api-keys   [open]
-2. Set it as an env var, then restart the daemon:
-
-   Windows (Command Prompt):   setx FIREWORKS_API_KEY "your-key"
-   Windows (PowerShell):       $env:FIREWORKS_API_KEY = "your-key"    (current window)
-                               [setx FIREWORKS_API_KEY "your-key"]     (permanent)
-   macOS / Linux:              export FIREWORKS_API_KEY="your-key"     (add to ~/.zshrc)
-
-   Then restart MnemoSeed so it picks the variable up:  [how to restart] → (shows the
-   one-line restart command for this machine)
+2. Paste it here — or, for headless/CI, set it as an env var instead:
+   (env fallback below; a NEW env value still needs a daemon restart)
 ```
 
 Behavior points:
 
-- `setx` is Windows' permanent form but only affects **newly started** processes — a running daemon does not see it. The teaching block says this plainly, and the probe (§7) confirms visibility (401 ⇒ set it and restart).
+- **Paste path (primary)**: the key is visible only at the moment it is pasted; afterwards only the masked tail `****1234` shows, the saved chip carries a `delete` action, and deleting returns to the empty paste state. Changes apply immediately, **no daemon restart required**.
+- **Env-var path (fallback, headless/CI)**: env-var names remain supported (12-factor convention). The honest cost is kept: `setx` / a **new** value in a new terminal is invisible to a running daemon — only on the env-var path does a key change need "set the variable, then restart the daemon" (§2.6). The teaching block says this plainly, and the probe (§7) confirms visibility (401 ⇒ re-paste the key or fix the env var).
 - The copy is **customized per provider**: key-creation URL, standard env-var name, exact commands. macOS and Windows each get their own command tabs; a Windows GUI user never sees pure bash instructions and vice versa.
-- The restart guidance gives one line per platform and per startup method (autostart vs `mnemoseed up`), inside the same collapsible block.
 
 Provider quick-start facts (verified against official docs; URLs recorded in §12):
 
@@ -173,31 +185,34 @@ Provider quick-start facts (verified against official docs; URLs recorded in §1
 | Fireworks | app.fireworks.ai/settings/users/api-keys | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `GET /models` |
 | OpenRouter | openrouter.ai (account → keys) | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `GET /api/v1/models` |
 | Anthropic | platform.claude.com/settings/keys | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `GET /v1/models` |
+| xAI (Grok) | console.x.ai (API Keys page, sign-in required) | `XAI_API_KEY` | `https://api.x.ai/v1` | `GET /models` (OpenAI-compatible) |
 | Ollama | none | none | `http://localhost:11434` | `GET /api/tags` |
 
 ---
 
 ## 6. OAuth visibility logic (killing the dead input)
 
-**Rule: OAuth controls appear only when the OAuth path is genuinely offered, and the `provider` value can only be set by a dedicated button — never from a free-text field.**
+**Rule: OAuth controls appear only when the OAuth path is genuinely offered, and the `provider` value can only be set by a dedicated control — never from a free-text field. The OAuth dual path (host-login cards / paste-a-token) exists identically in the wizard and the ⑧ editor.**
 
 1. **Never** render a free-text `oauth provider` field in any BYOK/driver form. Remove it from `dreamSetupHtml` and `llmEditFormHtml`.
-2. **Wizard only** — the "reuse a login on this computer" panel renders above the provider cards, listing only the providers whose logins were detected (`oauth-availability`):
-   - `present && !expired` → `[Use Codex login]` is available. Clicking switches the form to **OAuth mode**: driver=oauth, provider=codex, the model field stays, base_url and key fields are hidden, and a banner shows: "MnemoSeed will use the Codex login on this machine — no key needed. It refreshes itself while you're signed in."
-   - `present && expired` → the row shows "expired — sign in again with the Codex CLI, then come back here", button disabled, with a one-line re-login command.
-   - `!present` → the row greys out: "no Codex login detected on this machine".
+2. **Host-login cards (identical in wizard and ⑧ editor)** — the "reuse a login on this computer" panel renders above the provider cards, listing only the Codex / Grok host logins reported by `oauth-availability`, one card per provider, in three states:
+   - `present && !expired` → **selectable card** `Use Codex login`. Clicking switches to **OAuth mode**: driver=oauth, provider=codex, the model field stays, base_url and key fields are hidden, and a banner shows: "MnemoSeed will use the Codex login on this machine — no key needed. It refreshes itself while you're signed in."
+   - `present && expired` → **disabled card** "log in again first": the copy gives the **exact CLI command** (Codex: `codex login`, verified against official docs) and is copy-to-clipboard; saving that route is blocked until the user logs in again and returns.
+   - `!present` → **disabled card** "log in to the <provider> CLI first" (the Codex host login lives in `~/.codex/auth.json`, Grok's in `~/.grok/auth.json`).
    - The model field in OAuth mode keeps curated suggestions (`gpt-5.6-codex` etc. **must be verified before release** — do not ship the current unverified placeholder).
-3. **console ⑧** — the OAuth status line (badge) stays read-only. Inside the route editor, "Reuse Codex login" is a *provider card* in the picker (only when detected), not a text field. Editing an existing oauth route opens in OAuth mode.
-4. **CLI** — `--provider` remains a legitimate flag for `llm set` (scripting parity), but the interactive `onboard` wizard never asks for it as free text; it lists detected logins as numbered options.
+3. **Paste-a-token path (second path, identical in wizard and ⑧ editor)** — "or paste a token instead": writes the token to the SecretStore via the key endpoint (same mechanism as §5), with **official doc links**: Codex → https://developers.openai.com/codex/auth (API-key sign-in section, verified); Grok → https://docs.x.ai/developers/quickstart (API Keys page at https://console.x.ai/team/default/api-keys, pointed to by the official docs; the console requires sign-in, marked "entry page"). OAuth providers stay configurable even when no host login exists.
+4. **Save gate (that route only)** — an OAuth route whose login is unavailable (expired / absent) has **save blocked**, scoped to that route only, never touching the BYOK cards; the blocked copy gives the fix (log in again or paste a token, §11).
+5. **CLI** — `--provider` remains a legitimate flag for `llm set` (scripting parity), but the interactive `onboard` wizard never asks for it as free text; it lists detected logins as numbered options and offers a "paste a token" alternative.
 
 The per-field × per-provider-selection decision table (single source of truth for implementers):
 
 | Field | openai_compatible (Fireworks/OR/other) | anthropic | ollama | oauth mode |
 |---|---|---|---|---|
-| API key env-var name | ✅ visible, pre-filled | ✅ visible, pre-filled | hidden | hidden |
+| API key (paste / env-var name) | ✅ visible, pre-filled | ✅ visible, pre-filled | hidden | hidden |
 | base_url | ✅ visible (advanced) | ✅ visible (advanced) | ✅ visible (advanced) | hidden |
 | model | ✅ visible + catalog | ✅ visible + catalog | ✅ visible + catalog | ✅ visible (suggestions) |
-| oauth provider text field | **never** | **never** | **never** | **never** (buttons only) |
+| oauth provider text field | **never** | **never** | **never** | **never** (controls only) |
+| OAuth host-login card (Codex/Grok, three states) | ✅ top area | ✅ top area | ✅ top area | selected |
 | max tokens (⑧ only) | ✅ advanced | ✅ advanced | hidden | ✅ advanced |
 
 ---
@@ -210,7 +225,8 @@ The per-field × per-provider-selection decision table (single source of truth f
 |---|---|
 | in progress | `Testing connection to Fireworks…`, standard loading style, button disabled |
 | success | `Connected to Fireworks — key in FIREWORKS_API_KEY works. Found 1,204 models.` (green). The model dropdown fills from `detail.models`; **Save route** is armed. |
-| 401 / 403 | `Fireworks rejected the key in FIREWORKS_API_KEY. It's missing, wrong, or expired — check it at <provider key URL>, set it again, then restart MnemoSeed.` |
+| probe ok but catalog empty | `No models listed — pick a suggestion, type the exact model id, or use Load model list.` |
+| 401 / 403 | `Fireworks rejected the key in FIREWORKS_API_KEY. It's missing, wrong, or expired — check it at <provider key URL>, then paste a new key here.` (on the env-var path append "then fix the env var and restart") |
 | connection refused / DNS (Ollama) | `Can't reach Ollama at http://localhost:11434. Is the Ollama app running? Install from ollama.com, then pull a model (ollama pull llama3.1:8b).` |
 | connection refused / DNS (cloud) | `Couldn't reach <provider>. Check your internet connection or firewall, then try again.` |
 | timeout | `Timed out talking to <provider>. The endpoint may be slow or blocked — check <endpoint> and try again.` |
@@ -220,19 +236,19 @@ The per-field × per-provider-selection decision table (single source of truth f
 ### 7.2 Behavior
 
 - A failed probe **keeps every field**; nothing is lost. The fix block is inline, focused, and points precisely at the field to change.
-- The 401 case reuses the §5 key teaching block (collapsed) with a "restart the daemon" action so the user can fix it without re-entering anything.
-- On success the catalog refreshes: the model combo box re-fills from the probe's `models` list (no backend change needed — it already rides on `detail["models"]`). The cleaner long-term option is D2.
+- The 401 case reuses the §5 key teaching block (collapsed), steering to "paste a new key" (primary path) or "fix the env var and restart" (headless path) — the user stays in the form and does not need a restart.
+- On success the catalog refreshes: the model picker re-fills from the probe's `models` list (no backend change needed — it already rides on `detail["models"]`). Catalog refresh also has a **Load model list** button: fetches that endpoint's model list without a probe; while loading the button shows a spinner and is disabled (§3.2, §3.4). The cleaner long-term option is D2.
 - The old raw renderings (`reachable — {"error":...}` JSON, the "unreachable" badge) are replaced everywhere, including the ⑧ role-card probe badges → `connected` / `needs attention`, with the same plain-language message on the card.
 
 ---
 
 ## 8. Decisions to make (orchestrator / product)
 
-> D1 finalized: **Option B chosen** — settings DB as the primary store + hot-apply + a reserved scope column; keys still come exclusively from env vars and never go into the store; SaaS key hosting is deferred to the TEE milestone.
+> D1 finalized: **SecretStore file backend** — an API key can be pasted once, written to `~/.mnemoseed/secrets/<role>.key` (POSIX file 0600, dir 0700; Windows user-profile ACL); the settings DB stays the primary store with a reserved scope column; the config stores only a reference `secrets:mnemoseed/dream/<role>`; changes apply **without a restart** (generation-bump re-resolve). Env-var names remain supported (headless/CI). SaaS key hosting is deferred to the TEE milestone.
 
 | # | Question | Options | Recommendation |
 |---|---|---|---|
-| D1 | key handling: pure env vars (current) vs "paste a key and MnemoSeed writes it into your env var / OS credential store"? | (a) pure env vars + teaching (current, G-AC2 clean); (b) write a `~/.mnemoseed/.env` or an OS keychain entry from the console; (c) full OS credential-store integration | **finalized** — settings DB primary + hot-apply, keys still env-sourced, never stored; see note above. |
+| D1 | key handling: pure env vars (current) vs "paste a key and MnemoSeed writes it into your env var / OS credential store"? | (a) pure env vars + teaching (current); (b) write a `~/.mnemoseed/.env` or an OS keychain entry from the console; (c) full OS credential-store integration | **finalized** — SecretStore file backend (paste once, stored locally, no restart) + env-var fallback (headless/CI); see note above. Industry precedents (verified): Codex CLI `~/.codex/auth.json`, gh keychain-with-file-fallback + `GH_TOKEN`, Docker `config.json` base64, 12-factor env. |
 | D2 | live model catalog: reuse the probe `detail["models"]` (zero backend change) vs a new `GET /api/v1/llm/catalog?driver=&base_url=` endpoint? | (a) probe only; (b) dedicated catalog endpoint | **(a) this round** — ship the UX first; (b) as a post-launch polish (the probe is on-demand, so the catalog is not visible until the user tests — acceptable on the happy path). |
 | D3 | native drivers: nothing to build — Fireworks/OpenRouter = openai_compatible, Anthropic native, Ollama native. Confirm? | — | **Confirmed; no driver work.** |
 | D4 | wizard role scope: deep_reflection only (current) vs an "also apply to short_increment" checkbox (writes both roles) vs having the wizard configure all two? | (a) current; (b) + share checkbox; (c) full two-role wizard | **(b)** — one checkbox, one line of copy, covers the common "one key, one provider" user without dragging TTFM past 3 minutes; each role can later be changed independently in ⑧ (including switching to Ollama, see D10). |
@@ -268,7 +284,9 @@ The per-field × per-provider-selection decision table (single source of truth f
 | loading (wizard/⑧) | reuse the existing `Loading…` skeleton with role/provider placeholders; never leave a blank page. |
 | `oauth-availability` fetch fails | the OAuth panel hides; the provider cards + BYOK remain usable (the `showDreamSetup` catch already does this). |
 | no provider detected (wizard) | the OAuth panel shows one greyed line: "No Codex/Grok login detected on this machine — you can still use an API key below." |
-| probe succeeds but catalog empty | the model combo box falls back to curated suggestions + free input; hint: "The catalog returned no models — pick from the suggestions or type the exact model id." |
+| probe succeeds but catalog empty | the model picker falls back to curated suggestions + free input; hint: "The catalog returned no models — pick from the suggestions or type the exact model id." |
+| model list loading (Load model list) | the button shows a spinner and is disabled; on success the picker fills with that endpoint's live catalog; on failure it falls back to suggestions with a message. |
+| pasted key saved | a chip shows `key saved — ****1234` (masked tail) + `[delete]`; deleting returns to the empty paste state; the change applies immediately, no restart. |
 | daemon down / fetch failure (⑧) | reuse the existing error panel + Retry, unchanged. |
 | save → 409 (test-required race) | map to the plain-language "Test the connection first", never the raw 409 detail. |
 | route card with no explicit config (⑧) | a "defaults" badge replaces the empty block — the effective base URL / key chain / model are visible on the card, not only while editing. |
@@ -293,7 +311,8 @@ The per-field × per-provider-selection decision table (single source of truth f
 ```
 ┌─ models & routing ───────────────────────────────────────────────────┐
 │  per-role dream models: what each role does, and which model serves   │
-│  it. Key values never appear here — only env-var names.               │
+│  it. Key values never appear here — only env-var names or a masked    │
+│  key tail (****1234).                                                  │
 │                                                                       │
 │  fully-offline badge (derived — shown only when BOTH roles resolve    │
 │  to local ollama;  ⇢ (this page is a cloud+local mix Fireworks+Ollama,│
@@ -301,6 +320,9 @@ The per-field × per-provider-selection decision table (single source of truth f
 │  ◉ fully offline — nothing leaves this machine                        │
 │                                                                       │
 │  host logins: [codex: logged in] [grok: not detected]                 │
+│  OAuth dual path: [Use Codex login] (card) · or [Paste a token        │
+│  instead]; expired → "log in again first" + codex login; absent →     │
+│  disabled card "log in to the <provider> CLI first"                   │
 │                                                                       │
 │  ┌─ deep_reflection ── the careful model ──────────────────────────┐  │
 │  │  connected · Fireworks · accounts/fireworks/models/kimi-k3      │  │
@@ -348,8 +370,9 @@ The ⑧ page footer always shows one line: `Model routing is system-scoped — s
 │  ○ Another OpenAI-compatible endpoint                                │
 │                                                                      │
 │  ── or reuse a login on this computer ──                             │
-│  [Codex: logged in]  → [Use Codex login]      (expired/absent → fix │
-│  copy, never a dead button)                                          │
+│  [Codex: logged in] → [Use Codex login] · or [Paste a token instead] │
+│  (expired → "log in again first" + codex login; absent → disabled    │
+│  card)                                                               │
 │                                                                      │
 │  [continue]                                            [skip for now]│
 └───────────────────────────────────────────────────────────────────────┘
@@ -378,10 +401,13 @@ Mirrors the same steps as numbered prompts, adapted to a terminal (no radio UI, 
   2) OpenRouter                4) Ollama on this computer
   provider [1]: 1
   Create a key at https://app.fireworks.ai/settings/users/api-keys
-  Set it as an env var and restart MnemoSeed:
+  Paste the key once — stored locally under ~/.mnemoseed/secrets, never
+  shown again (masked tail ****1234, deletable). Or set an env var for
+  headless/CI use (a NEW env value still needs a daemon restart):
     Windows:  setx FIREWORKS_API_KEY "your-key"
     macOS/Linux: export FIREWORKS_API_KEY="your-key"   # add to ~/.zshrc
-  api key env var [FIREWORKS_API_KEY]:
+  api key (paste once) or env var name [FIREWORKS_API_KEY]:
+  key saved — ****1234
   model [accounts/fireworks/models/kimi-k3]:            ← verified default
   (if 4 Ollama is chosen, print a quality-hint line first, then run the test:)
   ⚠ Ollama chosen for this role — lower synthesis quality than cloud
@@ -425,16 +451,30 @@ The following are the product UI string assets. Keep them in English, verbatim.
 - OAuth hint: `MnemoSeed uses that login's access — you don't paste a key. No key value is
   read, sent, or stored.`
 - OAuth live: `Codex login found — sign in is current.` / button `Use Codex login`
-- OAuth expired: `Codex login found but expired — sign in again with the Codex CLI, then
-  return here.` (button disabled)
-- OAuth absent: `No Codex login detected on this machine.` (muted)
+- OAuth expired: `Codex login found but expired — log in again first, then return here.` (card
+  disabled) / command line `codex login` (copy-to-clipboard)
+- OAuth absent: `Log in to the Codex CLI first, then come back.` (card disabled;
+  per-provider: `<provider>` = Codex / Grok)
+- Paste-token affordance (second path): `or paste a token instead` → official doc links:
+  `How to create a Codex token` → https://developers.openai.com/codex/auth · `How to create
+  an xAI API key` → https://docs.x.ai/developers/quickstart
+- OAuth blocked-save: `This route can't be saved until a login is available — log in to the
+  Codex CLI first, or paste a token instead.`
 - OAuth banner (after selection): `Using the Codex login on this machine — no key needed.
   It refreshes itself while you're signed in.`
-- Key label: `api key env var`
-- Key teaching intro: `Your key lives in an environment variable. MnemoSeed reads it from
-  there — you never paste the key here and it is never stored.`
+- Key label: `api key` — `paste once (stored locally, never shown again)` / `or an env var
+  name for headless/CI use`
+- Key teaching intro: `Paste your key once — MnemoSeed stores it locally under
+  ~/.mnemoseed/secrets and never shows it again (only the masked tail ****1234). For
+  headless/CI you can use an env var instead.`
+- Key saved chip: `key saved — ****1234` (button `delete`)
+- Key saved note: `Stored under ~/.mnemoseed/secrets. Not shown again; only this masked
+  tail. Deletable any time.`
+- Delete key confirm: `Delete this key? Routes using it fail until a new key is set.`
 - Key 401 fix: `Fireworks rejected the key in FIREWORKS_API_KEY — it's missing, wrong, or
-  expired. Set it again, then restart MnemoSeed.` (per-provider substitution)
+  expired. Check it at <provider key URL>, then paste a new key here.` (per-provider
+  substitution; the env-var path appends `or fix the env var and restart for headless/CI.`)
+- Load model list button: `Load model list`
 - Endpoint label: `endpoint` / advanced header: `Advanced: endpoint`
 - Endpoint reset: `reset to Fireworks default`
 - Model label: `model`
@@ -452,7 +492,7 @@ The following are the product UI string assets. Keep them in English, verbatim.
 
 - Page title: `models & routing`
 - Page note: `What each role does, and which model serves it. Key values never appear here —
-  only the env-var names MnemoSeed reads them from.`
+  only env-var names or a masked key tail (****1234).`
 - Role subtitles (§4) — two roles only: `deep_reflection` / `short_increment`.
 - Offline badge (derived): `fully offline — nothing leaves this machine` (meaning: shown
   only when all configured roles resolve to local ollama; hidden if any cloud role exists —
@@ -474,9 +514,19 @@ The following are the product UI string assets. Keep them in English, verbatim.
 - Provider group in editor: `Which provider?` (same cards, minus "recommended")
 - max tokens label: `max tokens` (advanced), note: `blank = role default`
 - Saved banner: `route deep_reflection saved — config version <v> (audited)`
-- Restart note (first time a new env var is introduced): `Remember: the daemon reads env
-  vars from its own startup environment. If you set a new one, restart MnemoSeed.`
+- Restart note (env-fallback only): `Note for headless/CI: a NEW env-var value is picked up
+  only after the daemon restarts. Pasted keys apply immediately.`
 - OAuth line: `host logins: codex — logged in · grok — not detected`
+- OAuth card available (⑧ editor): `Use Codex login` (selectable card)
+- OAuth card expired (⑧ editor): `Codex login expired — log in again first` + command
+  `codex login` (card disabled)
+- OAuth card absent (⑧ editor): `Log in to the Codex CLI first` (card disabled;
+  per-provider `<provider>`)
+- Paste-token affordance (⑧ editor): `Paste a token instead` (+ official doc links, §11.1)
+- OAuth blocked-save (⑧ editor): `This route can't be saved until a login is available —
+  log in to the Codex CLI first, or paste a token instead.`
+- Key saved chip (⑧ editor): `key saved — ****1234` + `[delete]`
+- Load model list button (⑧ editor): `Load model list`
 
 ### 11.3 CLI (onboard LLM step + llm set)
 
@@ -485,8 +535,9 @@ The following are the product UI string assets. Keep them in English, verbatim.
   you started; change any role later with 'mnemoseed llm set'.`
 - Provider prompt: `provider [1]: ` (list printed as §10.3)
 - Key URL line: `Create a key at <url>`
-- Env-var teaching (printed once, §10.3 block)
-- `api key env var [FIREWORKS_API_KEY]: `
+- Key teaching (printed once, §10.3 block): paste-once path + env-var fallback
+- `api key (paste once, stored locally) or env var name [FIREWORKS_API_KEY]: `
+- `key saved — ****1234`
 - `model [accounts/fireworks/models/kimi-k3]: `
 - `testing connection to Fireworks…`
 - `connected — key works. saving…`
@@ -494,8 +545,12 @@ The following are the product UI string assets. Keep them in English, verbatim.
 - Ollama quality line (printed first when provider = Ollama): `Ollama chosen for this role — lower
   synthesis quality than cloud models; you accept this for privacy or cost.`
 - Success: `✓ dream model configured (<driver>/<model>)`
-- Fail 401: `error: Fireworks rejected the key in FIREWORKS_API_KEY — set it and restart
-  the daemon, then re-run onboard (it resumes here).`
+- Fail 401: `error: Fireworks rejected the key — paste a new one, or fix the env var (then
+  restart for headless/CI), and re-run onboard (it resumes here).`
+- OAuth expired (CLI): `Codex login expired — run 'codex login' first, then re-run onboard
+  (it resumes here).`
+- OAuth absent (CLI): `No Codex login detected — log in to the Codex CLI first, or paste a
+  token instead.`
 - Ollama fail: `error: can't reach Ollama at http://localhost:11434 — is it running?
   Install from ollama.com and pull a model (ollama pull llama3.1:8b).`
 - Skip: `skipping the LLM wizard: the daemon stays capture-only (dreaming disabled until a
@@ -513,9 +568,13 @@ The following are the product UI string assets. Keep them in English, verbatim.
 - **OpenRouter**: quickstart (base `https://openrouter.ai/api/v1`, `OPENROUTER_API_KEY`, catalog `GET /api/v1/models`, OpenAI-compatible) — https://openrouter.ai/docs/quickstart
 - **Anthropic**: API overview (base `https://api.anthropic.com`, Messages `POST /v1/messages`, `x-api-key` + `anthropic-version`, keys from `platform.claude.com/settings/keys`, models `GET /v1/models`) — https://platform.claude.com/docs/en/api/overview
 - **Ollama**: API reference (`POST /api/chat` stream=false, `GET /api/tags`, no auth, `model:tag` naming) — https://github.com/ollama/ollama/blob/main/docs/api.md
+- **Codex / OpenAI auth** (official doc link for paste-a-token): `~/.codex/auth.json` plaintext credential cache, `codex login` and `codex login --with-api-key`, API keys created at platform.openai.com/api-keys — https://developers.openai.com/codex/auth
+- **xAI / Grok** (official doc link for paste-a-token): quickstart (`XAI_API_KEY`, base `https://api.x.ai/v1`, API Keys page https://console.x.ai/team/default/api-keys — the console requires sign-in, anonymous fetch 403, marked "entry page") — https://docs.x.ai/developers/quickstart
+- **OpenRouter models page** (§3.4 pattern reference) — https://openrouter.ai/models
+- **Cursor models page** (§3.4 pattern reference) — https://cursor.com/docs/models
 
 ### 12.1 Verification notes (grounding for this spec)
 
 - Code reading: `console/static/app.js` (wizard + ⑧ render/edit/probe; line numbers referenced inline above), `config.py` `DEFAULT_LLM_ROUTES`, `llm/admin.py` + `admin_routes.py` (explicit payload only, probe signature, 409-gated saves), `llm/routing.py` (env resolution + instance caching), `llm/drivers/*` (the five drivers; the catalog rides in the probe detail), `configwrite/service.py` (env-name validation), `onboard/service.py` (LLM step), `cli.py` (`llm status/set`, `onboard`).
 - Local empirical test: with a temporary `MNEMOSEED_HOME` on a spare port (embedded preset, `127.0.0.1:18764`), walked through: owner setup → login → `/api/v1/llm/routes` (confirmed explicit-payload-only) → `/api/v1/llm/oauth-availability` (both local logins detected but expired) → `/api/v1/llm/test` probe shapes (no-key Fireworks 401; offline Ollama connection refused; unknown driver; save-without-probe → 409). Observed `stub` in the drivers directory and confirmed defaults are invisible in the live payload.
-- Unverified: the current model placeholders `claude-opus-5` / config samples `claude-sonnet-5` (D9), and the `gpt-5.6-codex` placeholder in OAuth mode.
+- Unverified: the current model placeholders `claude-opus-5` / config samples `claude-sonnet-5` (D9), and the `gpt-5.6-codex` placeholder in OAuth mode. The Grok host-login re-login command (varies by installed CLI) is not verified in the official docs — the UI falls back to "log in to the <provider> CLI first" plus paste-a-token. console.x.ai requires sign-in (anonymous 403); its API Keys page URL is taken from the official docs' pointer.

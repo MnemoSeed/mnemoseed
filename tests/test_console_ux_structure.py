@@ -19,6 +19,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 APP_JS = REPO / "src" / "mnemoseed" / "console" / "static" / "app.js"
+STYLES_CSS = REPO / "src" / "mnemoseed" / "console" / "static" / "styles.css"
 SERVICE = REPO / "src" / "mnemoseed" / "onboard" / "service.py"
 CLI = REPO / "src" / "mnemoseed" / "cli.py"
 
@@ -31,6 +32,11 @@ def app_js() -> str:
 @pytest.fixture(scope="module")
 def service() -> str:
     return SERVICE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def styles_css() -> str:
+    return STYLES_CSS.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -91,6 +97,111 @@ def test_editor_form_has_the_route_fields(app_js: str) -> None:
 def test_dead_wizard_inputs_removed(app_js: str) -> None:
     assert 'placeholder="e.g. claude-opus-5"' not in app_js
     assert "the daemon reads the key from the named env var at run time" not in app_js
+
+
+# ------------------------------------------------- ⑧ editor host-login cards (§6.3)
+
+
+def test_editor_oauth_cards_cover_all_visibility_states(app_js: str) -> None:
+    """§6.3: the editor renders a "Reuse <provider> login" card per oauth
+    provider in every availability state — live selectable, expired and absent
+    visible-but-disabled with a re-login command; never a free-text field."""
+    for string in (
+        "Reuse ",
+        "login expired — run ",
+        " CLI login detected — log in first",
+        "codex login",
+        "grok login",
+    ):
+        assert string in app_js
+
+
+def test_editor_oauth_paste_a_token_affordance(app_js: str) -> None:
+    """The paste-a-token path under the oauth cards: an openable key paste
+    field bound to the provider, the daemon key endpoint, and the official
+    docs link for the token (verified: developers.openai.com/codex/auth)."""
+    for string in (
+        "paste a token instead",
+        'data-act="llm-key-paste"',
+        "/api/v1/llm/key",
+        "developers.openai.com/codex/auth",
+    ):
+        assert string in app_js
+
+
+def test_editor_oauth_gate_blocks_expired_route(app_js: str) -> None:
+    """JH: SAVE/TEST is blocked for a route whose oauth login is expired or
+    absent until availability returns; the block is per-route, enforced in the
+    probe and save paths, with the fix message rendered inline."""
+    assert "llmOauthLive" in app_js
+    assert "llmOauthBlockMessage" in app_js
+    assert "llmSyncEditorGate" in app_js
+
+
+# ------------------------------------------------- provider-scoped model picker (§3.2/§7.2)
+
+
+def test_provider_scoped_curated_model_ids_are_verified(app_js: str) -> None:
+    """§7.2/D9: curated suggestions are per-provider and every id was verified
+    against a live catalog or the provider's official docs before shipping
+    (Fireworks live catalog, openrouter.ai/api/v1/models keyless fetch,
+    platform.claude.com model docs, ollama library tags)."""
+    block = _providers_block(app_js)
+    for string in (
+        # fireworks — default routes, verified in config.py comments
+        "accounts/fireworks/models/kimi-k3",
+        "accounts/fireworks/models/deepseek-v4-flash-0731",
+        # openrouter — served ids confirmed on openrouter.ai/api/v1/models
+        "deepseek/deepseek-v4-flash",
+        "moonshotai/kimi-k3",
+        "anthropic/claude-opus-5",
+        "qwen/qwen3-coder-plus",
+        # anthropic — current API ids from the official models overview
+        "claude-opus-5",
+        "claude-sonnet-5",
+        # ollama — ollama.com/library tags
+        "llama3.1:8b",
+        "qwen3:8b",
+        "deepseek-r1:8b",
+    ):
+        assert string in block
+
+
+def test_load_model_list_control_present(app_js: str) -> None:
+    """§7.2: before any probe the picker offers curated suggestions plus a
+    "Load model list" button that runs the probe to fetch the catalog."""
+    for string in ("Load model list", 'data-act="llm-load-models"'):
+        assert string in app_js
+
+
+def test_editor_model_datalist_follows_selected_provider(app_js: str) -> None:
+    """The editor datalist is provider-scoped (per-provider probe catalog in
+    state), never the stale route's catalog when the card switches."""
+    assert "state.llm.catalog" in app_js
+    assert "llmRoleDefaultModel" in app_js
+
+
+def test_role_card_model_reflects_live_editor_model(app_js: str) -> None:
+    """Picking a provider in the editor must re-seed the model and the role
+    card tile must reflect that live value — no 'anthropic picked, kimi-k3
+    still shown' state."""
+    assert "data-model-tile" in app_js
+    assert "state.llm.editModel" in app_js
+
+
+# ------------------------------------------------- overflow containment (role-card values)
+
+
+def test_role_card_overflow_css_rules_present(styles_css: str) -> None:
+    """Long unbroken role-card values (model ids, env chains) must wrap or be
+    clamped, never spill out of the tile or the card at any width."""
+    tile_value_rule = re.search(r"\.tile \.tile-value \{([^}]*)\}", styles_css)
+    assert tile_value_rule is not None, ".tile .tile-value rule missing"
+    assert "overflow-wrap: anywhere" in tile_value_rule.group(1)
+    assert "word-break: break-word" in tile_value_rule.group(1)
+    tile_rule = re.search(r"\.tile \{([^}]*)\}", styles_css)
+    assert tile_rule is not None, ".tile rule missing"
+    assert "min-width: 0" in tile_rule.group(1)
 
 
 # ---------------------------------------------------------------- ⑧ models & routing copy (§11.2)
@@ -184,7 +295,7 @@ def test_wizard_share_checkbox_copy(app_js: str) -> None:
 def test_wizard_share_writes_both_roles_in_spa(app_js: str) -> None:
     """§6/D4: checking the share box must make wizardSave POST the payload to
     BOTH roles — this block is the only transport for the share semantics."""
-    assert 'if (wizard.share)' in app_js
+    assert "if (wizard.share)" in app_js
     assert '"/api/v1/llm/routes/short_increment"' in app_js
     assert '"/api/v1/llm/routes/deep_reflection"' in app_js
 
@@ -254,6 +365,11 @@ def test_onboard_llm_step_verbatim_copy(service: str) -> None:
         "provider [1]:",
         "api key env var [FIREWORKS_API_KEY]:",
         "model [accounts/fireworks/models/kimi-k3]:",
+        (
+            "Paste your API key now — stored locally under ~/.mnemoseed/secrets, "
+            "never shown again (no restart needed; the next dream run picks it up)."
+        ),
+        "Advanced: leave it empty to use the ",
         "testing connection to ",
         "connected — key works. saving…",
         "also apply to short_increment? [y/N]:",
@@ -262,7 +378,10 @@ def test_onboard_llm_step_verbatim_copy(service: str) -> None:
             "you accept this for privacy or cost."
         ),
         "dream model configured (",
-        "— set it and restart the daemon, then re-run onboard (it resumes here).",
+        (
+            "as an env var) and re-run onboard (it resumes here); no restart "
+            "needed, the next dream run picks the key up."
+        ),
         "can't reach Ollama at ",
         "— is it running? Install from ollama.com and pull a model (ollama pull llama3.1:8b).",
         (

@@ -24,7 +24,7 @@ from mnemoseed.rest_client import (
 
 STATE_FILE_NAME = "onboard.json"
 
-#: The provider picker of the dream-LLM wizard (模型路由配置-UX §11.3). Only the
+#: The provider picker of the dream-LLM wizard (models-routing-ux.md §11.3). Only the
 #: Fireworks default model id was verified against the live catalog — every
 #: other provider defaults to free text, never an unverified suggestion (D9).
 _LLM_PROVIDERS: dict[str, dict[str, str]] = {
@@ -257,13 +257,17 @@ class OnboardService:
         return True, f"storage preset set to {preset}"
 
     def _step_llm(self, client: Any) -> tuple[bool, str]:
-        """③ dream LLM wizard: connectivity-test-before-persist, skippable."""
+        """③ dream LLM wizard: key-paste first, then connectivity-test-before-
+        persist, skippable (T2-4: a pasted key is stored through the REST key
+        endpoint and the role references it — no restart needed; the env-var
+        path stays as the advanced alternative)."""
         if not is_loopback(client.base_url):
             return False, f"config operations are loopback-only; refusing {client.base_url}"
         driver = self.llm_driver or self.answers.get("llm_driver")
         model = self.llm_model or self.answers.get("llm_model")
         base_url = ""
         key_env = ""
+        api_key = ""
         meta: dict[str, str] | None = None
         if not driver or not model:
             if self.yes:
@@ -272,7 +276,7 @@ class OnboardService:
                     "(dreaming disabled until a model is configured)"
                 )
                 return True, "llm skipped (capture-only daemon)"
-            driver, model, base_url, key_env, meta = self._llm_interactive()
+            driver, model, base_url, key_env, meta, api_key = self._llm_interactive()
             if not driver or not model:
                 self._print(
                     "  skipping the LLM wizard: the daemon stays capture-only "
@@ -282,13 +286,22 @@ class OnboardService:
 
         probe: dict[str, Any] = {"role": "deep_reflection", "driver": driver, "model": model}
         persist: dict[str, Any] = {"driver": driver, "model": model}
+        stored_key = False
         if meta is not None:
+            if api_key:
+                try:
+                    client.post("/api/v1/llm/key", {"role": "deep_reflection", "key": api_key})
+                except DaemonRestError as exc:
+                    self._error(f"storing the api key failed: {exc}")
+                    return False, "llm api key rejected"
+                stored_key = True
             if base_url:
                 probe["base_url"] = base_url
                 persist["base_url"] = base_url
-            if key_env:
-                probe["api_key_env"] = key_env
-                persist["api_key_env"] = key_env
+            key_source = "secrets:mnemoseed/dream/deep_reflection" if stored_key else key_env
+            if key_source:
+                probe["api_key_env"] = key_source
+                persist["api_key_env"] = key_source
             probe["provider"] = meta["provider"]
             persist["provider"] = meta["provider"]
             self._print(f"  testing connection to {meta['name']}…")
@@ -313,12 +326,30 @@ class OnboardService:
             share = answer in ("y", "yes")
         client.post("/api/v1/llm/routes/deep_reflection", persist)
         if share:
-            client.post("/api/v1/llm/routes/short_increment", persist)
+            if stored_key:
+                # the shared role gets its own stored key + reference, and the
+                # probe arms its own persist signature (MUST-FIX 2).
+                client.post("/api/v1/llm/key", {"role": "short_increment", "key": api_key})
+                shared_probe = dict(probe)
+                shared_probe["role"] = "short_increment"
+                shared_probe["api_key_env"] = "secrets:mnemoseed/dream/short_increment"
+                shared_persist = dict(persist)
+                shared_persist["api_key_env"] = "secrets:mnemoseed/dream/short_increment"
+                client.post("/api/v1/llm/test", shared_probe)
+                client.post("/api/v1/llm/routes/short_increment", shared_persist)
+            else:
+                client.post("/api/v1/llm/routes/short_increment", persist)
         return True, f"dream model configured ({driver}/{model})"
 
-    def _llm_interactive(self) -> tuple[str | None, str | None, str, str, dict[str, str] | None]:
-        """The provider-first picker (模型路由配置-UX §11.3), run only when the
-        caller did not pass ``--llm-driver`` / ``--llm-model``."""
+    def _llm_interactive(self) -> tuple[str | None, str | None, str, str, dict[str, str] | None, str]:
+        """The provider-first picker (models-routing-ux.md §11.3), run only when the
+        caller did not pass ``--llm-driver`` / ``--llm-model``.
+
+        Returns (driver, model, base_url, key_env, meta, api_key): the pasted
+        key VALUE is returned separately so the caller stores it through the
+        REST key endpoint — it is never printed, persisted, or sent over the
+        probe/persist wire.
+        """
         self._print(
             "  Pick the model that distills your sessions into long-term memory. "
             "One model gets you started; change any role later with "
@@ -335,25 +366,26 @@ class OnboardService:
         meta = _LLM_PROVIDERS.get(choice)
         if meta is None:
             self._error("That connection type isn't built in — go back and pick a provider.")
-            return None, None, "", "", None
+            return None, None, "", "", None, ""
         if meta["provider"] == "ollama":
             self._print(
                 "  Ollama chosen for this role — lower synthesis quality than cloud "
                 "models; you accept this for privacy or cost."
             )
         key_env = meta["key_env"]
+        api_key = ""
         if key_env:
             if meta["key_url"]:
                 self._print(f"  Create a key at {meta['key_url']}")
             self._print(
-                f"  Set {key_env} as an env var and restart MnemoSeed:\n"
-                f'    Windows:  setx {key_env} "your-key"\n'
-                f'    macOS/Linux: export {key_env}="your-key"   # add to ~/.zshrc'
+                "  Paste your API key now — stored locally under ~/.mnemoseed/secrets, "
+                "never shown again (no restart needed; the next dream run picks it up)."
             )
-            value = str(self.answers.get("llm_key_env") or "").strip()
+            self._print(f"  Advanced: leave it empty to use the {key_env} env var instead.")
+            value = str(self.answers.get("llm_api_key") or "").strip()
             if not value:
-                value = input(meta["key_prompt"] + " ").strip()
-            key_env = value or meta["key_env"]
+                value = input("api key (empty = env var): ").strip()
+            api_key = value
         base_url = meta["base_url"]
         if meta["provider"] == "other":
             endpoint = str(self.answers.get("llm_endpoint") or "").strip()
@@ -364,7 +396,7 @@ class OnboardService:
         model = str(self.answers.get("llm_model") or "").strip()
         if not model:
             model = input(meta["model_prompt"] + " ").strip()
-        return meta["driver"], model or None, base_url, key_env, meta
+        return meta["driver"], model or None, base_url, key_env, meta, api_key
 
     def _llm_probe_message(
         self,
@@ -381,8 +413,9 @@ class OnboardService:
         name = meta["name"]
         if re.search(r"401|403", error_text):
             return (
-                f"  error: {name} rejected the key in {key_env} — set it and restart "
-                "the daemon, then re-run onboard (it resumes here)."
+                f"  error: {name} rejected the key — re-paste it (or set {key_env} "
+                "as an env var) and re-run onboard (it resumes here); no restart "
+                "needed, the next dream run picks the key up."
             )
         if meta["provider"] == "ollama":
             return (

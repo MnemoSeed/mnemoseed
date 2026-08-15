@@ -5,10 +5,12 @@ driver + model + params. The RoleRouter materializes drivers lazily, only when a
 role is first resolved, so a missing or misconfigured route for a role nothing
 uses never breaks boot (FR-2.14 boot safety). API keys are referenced by
 env-var NAME in config and resolved from the environment at materialization
-time — the secret value is never stored anywhere. A materialized route is
-audit-logged through the MetaStore ``audit_append`` seam (the same mechanism
-T4's salvage writer used); the entry records the env var name, never the value.
-``check()`` is the console's live-check probe (design/07 section 8): it never raises.
+time — the secret value is never stored anywhere; with a ``secrets:``
+reference (T2-2) the value resolves through the SecretStore port instead,
+still never stored in config. A materialized route is audit-logged through the
+MetaStore ``audit_append`` seam (the same mechanism T4's salvage writer used);
+the entry records the env var name / reference, never the value. ``check()``
+is the console's live-check probe (design/07 section 8): it never raises.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from typing import Protocol, cast
 from mnemoseed.config import RoleLLMConfig
 from mnemoseed.llm.registry import LLM_DRIVERS, LLMRegistry
 from mnemoseed.llm.types import DreamLLM, HealthReport, LLMError, LLMRouteError
+from mnemoseed.secrets.refs import is_secrets_ref, secret_name_from_ref
+from mnemoseed.secrets.store import SecretStore
 from mnemoseed.storage.ports import AuditEntry
 
 
@@ -42,6 +46,7 @@ class RoleRouter:
         env: Callable[[str], str | None] | None = None,
         clock: Callable[[], float] | None = None,
         generation: Callable[[str], int] | None = None,
+        secrets: SecretStore | None = None,
     ) -> None:
         # Live reference, never a snapshot: config writes hot-apply into the
         # same mapping (F2). Caching is keyed by the per-role generation, so a
@@ -52,6 +57,7 @@ class RoleRouter:
         self._env = env if env is not None else os.environ.get
         self._clock = clock if clock is not None else time.time
         self._generation = generation
+        self._secrets = secrets
         self._cache: dict[str, tuple[int, DreamLLM]] = {}
 
     def roles(self) -> tuple[str, ...]:
@@ -80,17 +86,25 @@ class RoleRouter:
             raise LLMRouteError(f"no llm route configured for role {role!r}")
         params = dict(cfg.params)
         env_name = params.pop("api_key_env", None)
-        # api_key_env may name a comma-separated fallback chain ("role-specific
-        # var, shared provider var"): the first variable actually set wins, so
-        # a single provider key covers every role by default while any role can
-        # be pointed at a different provider/key on its own.
+        # api_key_env may be a single secrets: reference (the value resolves
+        # through the SecretStore port) or a comma-separated fallback chain
+        # ("role-specific var, shared provider var"): the first variable
+        # actually set wins, so a single provider key covers every role by
+        # default while any role can be pointed at a different provider/key on
+        # its own. A reference takes precedence over the environment chain
+        # because it is the explicit, write-created key path (T2-2).
         api_key = ""
         if env_name:
-            for name in (n.strip() for n in env_name.split(",")):
-                value = self._env(name) if name else None
-                if value:
-                    api_key = value
-                    break
+            if is_secrets_ref(env_name):
+                name = secret_name_from_ref(env_name)
+                if name and self._secrets is not None:
+                    api_key = self._secrets.get(name) or ""
+            else:
+                for name in (n.strip() for n in env_name.split(",")):
+                    value = self._env(name) if name else None
+                    if value:
+                        api_key = value
+                        break
         params["model"] = cfg.model
         params["api_key"] = api_key
         instance = cast(DreamLLM, self._registry.build(cfg.driver, params))

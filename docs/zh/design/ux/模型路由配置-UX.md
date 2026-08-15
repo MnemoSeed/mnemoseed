@@ -31,7 +31,7 @@
 
 ### 2.2 路由 payload 语义（`admin.py:104-130`）
 
-`GET /api/v1/llm/routes` 每角色返回：`driver`、`model`、`base_url`、`api_key_env`、`provider`——但 `base_url`/`api_key_env`/`provider` **仅在显式设置时**返回（`table.get(...)`），因此生效默认值（`https://api.fireworks.ai/inference/v1`、`MNEMOSEED_DEEP_REFLECTION_API_KEY,FIREWORKS_API_KEY` 回退链）对 console 编辑表单**不可见**。用户打开"编辑路由"，看到空白的 base URL 和空白 key 字段，对正在生效的默认值一无所知。
+`GET /api/v1/llm/routes` 每角色返回：`driver`、`model`、`base_url`、`api_key_env`、`provider`——但 `base_url`/`api_key_env`/`provider` **仅在显式设置时**返回（`table.get(...)`），因此生效默认值（`https://api.fireworks.ai/inference/v1`、`MNEMOSEED_DEEP_REFLECTION_API_KEY,FIREWORKS_API_KEY` 回退链）对 console 编辑表单**不可见**。用户打开"编辑路由"，看到空白的 base URL 和空白 key 字段，对正在生效的默认值一无所知。启用 SecretStore 路径后（§5、§8 D1），`api_key_env` 也可能返回一条引用（`secrets:mnemoseed/dream/<role>`）——UI 必须把它渲染成"key 已保存"状态（掩码尾缀），而不是空白字段。
 
 ### 2.3 死输入的具体位置（exact dead-input）
 
@@ -52,9 +52,13 @@
 
 提示 `llm driver (e.g. ollama, anthropic, stub)` 与 `llm model`——没有 `base_url`，没有 `api_key_env`。因此 Fireworks/OpenRouter/Anthropic 用户**根本无法**从 CLI 配置云服务商（没有 key 环境变量被采集 → 探测 401 → 步骤静默跳过，显示"connectivity test failed"）。提示的示例驱动全是术语，且漏掉了实际默认驱动。
 
-### 2.6 环境变量时序真相（必须被教会）
+### 2.6 key 存放的两种路径（必须被教会）
 
-`RoleRouter.resolve()` 在**首次物化**时从**守护进程进程环境**读取 key，并缓存实例（`routing.py:56-88`）。UI 必须教会用户的后果：(a) 在*新终端*里设置的环境变量，对*已在运行的*守护进程不可见；(b) Windows 的 `setx` 只对后续新进程生效，不影响运行中的守护进程；(c) 修复方式 = "设置变量，然后重启守护进程"。当前向导的提示——"the daemon reads the key from the named env var at run time"——具有误导性且不完整。
+**主路径——SecretStore 文件后端，免重启。** API key 可在 console ⑧ / 向导 / CLI 里**粘贴一次**；守护进程把它写入 `~/.mnemoseed/secrets/<role>.key`（POSIX：文件 0600、目录 0700；Windows：用户配置文件 ACL）。配置里只存一条引用 `secrets:mnemoseed/dream/<role>`——key 永不进入 settings DB、永不回显到 UI。改动**无需重启守护进程**即生效：路由按 generation 重新解析，key 变更被立即拾取（generation-bump re-resolve）。key 只在粘贴的那一次可见；此后仅显示掩码尾缀 `****1234`，可一键删除。
+
+**次路径——环境变量（headless/CI）。** 环境变量名仍然受支持，供无头部署与 CI 使用（12-factor 惯例）。诚实的代价：`RoleRouter.resolve()` 在**首次物化**时从**守护进程进程环境**读取 key 并缓存实例（`routing.py:56-88`），因此在 *新终端* 里设置的**新环境变量值**对 *已在运行的* 守护进程不可见（Windows 的 `setx` 同理只影响后续新进程）；修复方式 = "设置变量，然后重启守护进程"。此代价现在只是**可选的**——有交互界面的用户走主路径即可免重启；无头环境默认承担它。
+
+UI 必须同时教会这两条路径：交互界面优先引导主路径（粘贴即生效）；环境变量路径只在无头/脚本场景出现；教学块绝不再对 key 变更说"必须重启"（只对环境变量路径如实说明）。行业依据（已核实）：Codex CLI `~/.codex/auth.json`、gh keychain 回退文件 + `GH_TOKEN`、Docker `config.json` base64、12-factor 环境变量。
 
 ### 2.7 文档 vs 代码漂移（必须解决，而非绕过设计）
 
@@ -93,7 +97,7 @@
 
 内部映射（对用户绝不原样展示，但复用于文案）：
 
-| 卡片 | driver | base_url（预填、可编辑） | key 环境变量（预填、可编辑） |
+| 卡片 | driver | base_url（预填、可编辑） | key 来源（预填、可编辑） |
 |---|---|---|---|
 | Fireworks | openai_compatible | `https://api.fireworks.ai/inference/v1` | `FIREWORKS_API_KEY` |
 | OpenRouter | openai_compatible | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
@@ -101,20 +105,31 @@
 | Ollama | ollama | `http://localhost:11434` | （无——不需要 key） |
 | 其他 | openai_compatible | 空 → 必填 | 默认 `MNEMOSEED_DEEP_REFLECTION_API_KEY` |
 
-**OAuth 路径是卡片上方的一排独立按钮**（仅向导，见 §6），永远不是一张卡片、也永远不是文本字段。
+key 来源列是环境变量名（headless/CI 路径）；用户也可选择**粘贴 key**，改由 SecretStore 本地落盘（§2.6、§5）——两路都有效。
+
+**OAuth 路径是服务商选择之外的双路径入口**（向导与 ⑧ 编辑器一致，见 §6）：宿主登录卡片（Codex / Grok，按 `oauth-availability` 三态渲染）+ "改为粘贴 token"路径——永远不是自由文本字段。
 
 ### 3.2 第二步——变形表单
 
 表单体随选择变化（渐进披露）：
 
 - **key 字段只为需要 key 的服务商渲染。** Ollama 时 key 块消失。
-- **API key 字段只索要环境变量名**（永不要值——G-AC2 红线），预填该服务商的标准名，下方带一个可折叠的、按操作系统拆分的"如何设置"教学块（§5）。
+- **API key 字段支持两种输入**：(a) **粘贴 key**（主路径——"永不索要 key 值"的旧红线由 SecretStore 取代：值只经本地通道交给守护进程一次，写入 `~/.mnemoseed/secrets/<role>.key`，此后永不再显示，仅掩码尾缀 `****1234`，可删除）；(b) **环境变量名**（headless/CI 路径，§2.6）。字段下方是一个可折叠的、按操作系统拆分的"如何设置"教学块（§5）。
 - **base_url** 预填且可编辑，带一键"重置为 <服务商> 默认"。在引导表面收进"Advanced: endpoint"；在 ⑧ 编辑器完全展开。
-- **model** 是组合框：探测结果里的实时目录（§7）+ 精选建议 + 自由输入。Ollama 的目录来自 `GET /api/tags`，模型缺失时给出"先 pull"提示（`ollama pull llama3.1:8b`）。
+- **model** 是**服务商作用域的模型选择器**（§3.4）：live catalog（来自探测结果 `detail.models`）+ 探测前的服务商精选建议 + **Load model list** 按钮（主动拉取该端点目录，无需先跑探测）+ 自由输入始终允许。Ollama 的目录来自 `GET /api/tags`，模型缺失时给出"先 pull"提示（`ollama pull llama3.1:8b`）。
 
 ### 3.3 第三步——角色分配 + 测试 + 保存
 
 向导用一句话说明它要配置的角色（§4），⑧ 编辑器在每个角色卡片上重复这句话。然后：**Test connection** → 通过则**启用 Save**，探测失败则保留表单并显示修复指引（§7）。
+
+### 3.4 服务商作用域的模型选择器（业界模式参考）
+
+模型选择做成"服务商作用域"——只列该服务商在该端点上的模型——是当前 IDE / 聚合器的事实标准。两个参考实现（已核实，URL 记录在 §12）：
+
+- **OpenRouter** 模型目录页（https://openrouter.ai/models ）：按服务商聚合的 live catalog + 即时搜索/过滤 + 每行可复制 model id；目录按服务商命名空间（`provider/model`），与 `GET /api/v1/models` 的返回一致。
+- **Cursor** 模型页（https://cursor.com/docs/models ）：展示"一键选择的模型集合 + 定价表 + 每个模型的可读说明与切换入口"，用户从集合里选，而不是手敲 model id。
+
+据此定下的三条行为（已在 §3.2 / §7 落地）：(1) 目录按服务商 + 端点作用域，绝不混入别的服务商的模型；(2) live catalog 通常上千条，组合框提供本地搜索/过滤；(3) 自由输入始终可用——目录只是加速器，不是约束。
 
 ---
 
@@ -131,38 +146,35 @@
 
 **质量提示规则**：任一角色**选择 Ollama** 时，紧贴卡片/表单显示一行质量提示——`Lower synthesis quality than cloud models — you accept this for privacy or cost.` 不阻断、不二次确认，只是告知；向导、⑧ 编辑器、CLI 三处一致（§11）。两个角色都指向 Ollama = 全离线，页头显示派生徽章（§9、§10.1）。
 
-出现以下术语时必须带 tooltip/展开器：**endpoint**（"服务商接收 MnemoSeed 请求的地址"）、**env var**（"存于你电脑环境里的具名值——MnemoSeed 从中读取 key，它本身绝不存 key"）、**context / max tokens**（"模型单次允许产出的文本量"）、**OpenAI compatible**（"Fireworks 与 OpenRouter 说的同一种 API 方言——一条代码路径即可通吃"）。
+出现以下术语时必须带 tooltip/展开器：**endpoint**（"服务商接收 MnemoSeed 请求的地址"）、**env var**（"存于你电脑环境里的具名值——无头/CI 路径下 MnemoSeed 从它读 key；交互界面首选把 key 直接交给 MnemoSeed 本地保存"）、**context / max tokens**（"模型单次允许产出的文本量"）、**OpenAI compatible**（"Fireworks 与 OpenRouter 说的同一种 API 方言——一条代码路径即可通吃"）。
 
 ---
 
 ## 5. API key 教学块（"key 到底放哪"的答案）
 
-渲染在 key 字段下方，所有需要 key 的服务商都显示。布局（console/向导）：
+渲染在 key 字段下方，所有需要 key 的服务商都显示。**主路径是粘贴一次、免重启**（SecretStore 文件后端，§2.6、§8 D1）；环境变量是 headless/CI 回退。布局（console/向导）：
 
 ```
 API key
-[ FIREWORKS_API_KEY        ]  ← env-var name (MnemoSeed stores this name, never the key)
+[ FIREWORKS_API_KEY        ]  ← env-var name (headless/CI)  ·  or paste a key once
+[ •••••••••••••••••1234    ]  ← paste here once — never shown again
+                               (key saved — ****1234)  [delete]
 
-Your key lives in an environment variable. MnemoSeed reads it from there at run time —
-you never paste the key into MnemoSeed, and MnemoSeed never stores it.
+Paste your key once. MnemoSeed stores it locally under ~/.mnemoseed/secrets and
+never displays it again — only this masked tail (****1234) is shown. It is never
+written into settings, never uploaded to any MnemoSeed server, and you can
+delete it any time. Changes apply immediately — no daemon restart.
 
 1. Create a key:  https://app.fireworks.ai/settings/users/api-keys   [open]
-2. Set it as an env var, then restart the daemon:
-
-   Windows (Command Prompt):   setx FIREWORKS_API_KEY "your-key"
-   Windows (PowerShell):       $env:FIREWORKS_API_KEY = "your-key"    (current window)
-                               [setx FIREWORKS_API_KEY "your-key"]     (permanent)
-   macOS / Linux:              export FIREWORKS_API_KEY="your-key"     (add to ~/.zshrc)
-
-   Then restart MnemoSeed so it picks the variable up:  [how to restart] → (shows the
-   one-line restart command for this machine)
+2. Paste it here — or, for headless/CI, set it as an env var instead:
+   (env fallback below; a NEW env value still needs a daemon restart)
 ```
 
 行为要点：
 
-- `setx` 是 Windows 的永久形式，但只对**新启动的**进程生效——运行中的守护进程看不到。教学块用大白话直说这一点，并由探测（§7）确认可见性（401 ⇒ 设置并重启）。
+- **粘贴路径（主）**：key 只在粘贴的那一次可见；此后仅显示掩码尾缀 `****1234`，保存 chip 带 `delete`，删除后回到空粘贴态。改动立即生效，**不要求重启守护进程**。
+- **环境变量路径（回退，headless/CI）**：环境变量名仍受支持（12-factor 惯例）。诚实代价保留：`setx` / 新终端里的**新**值对运行中的守护进程不可见——只有环境变量路径下变更 key 才需要"设置变量并重启守护进程"（§2.6）。教学块用大白话直说这一点，并由探测（§7）确认可见性（401 ⇒ 重贴 key 或修环境变量）。
 - 文案是**按服务商定制**的：key 创建 URL、标准环境变量名、精确命令。macOS 与 Windows 各带自己的命令标签页；Windows GUI 用户永远看不到纯 bash 指令，反之亦然。
-- 重启指引每个平台、每种启动方式（autostart vs `mnemoseed up`）各给一行，放进同一个可折叠块。
 
 服务商快速上手事实（已对照官方文档核实；URL 记录在 §12）：
 
@@ -171,31 +183,34 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 | Fireworks | app.fireworks.ai/settings/users/api-keys | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` | `GET /models` |
 | OpenRouter | openrouter.ai（账号 → keys） | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `GET /api/v1/models` |
 | Anthropic | platform.claude.com/settings/keys | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `GET /v1/models` |
+| xAI（Grok） | console.x.ai（API Keys 页，需登录） | `XAI_API_KEY` | `https://api.x.ai/v1` | `GET /models`（OpenAI 兼容） |
 | Ollama | 无 | 无 | `http://localhost:11434` | `GET /api/tags` |
 
 ---
 
 ## 6. OAuth 可见性逻辑（消灭死输入）
 
-**规则：OAuth 控件只在 OAuth 路径真正被提供时出现，且 `provider` 值只能由专用按钮设置——绝不来自自由文本字段。**
+**规则：OAuth 控件只在 OAuth 路径真正被提供时出现，且 `provider` 值只能由专用控件设置——绝不来自自由文本字段。OAuth 双路径（宿主登录卡片 / 粘贴 token）在向导与 ⑧ 编辑器中一致存在。**
 
 1. **永不**在任何 BYOK/驱动表单里渲染自由文本的 `oauth provider` 字段。从 `dreamSetupHtml` 与 `llmEditFormHtml` 中移除。
-2. **仅向导**——"复用本机已登录"面板渲染在服务商卡片上方，只列出检测到登录的服务商（`oauth-availability`）：
-   - `present && !expired` → `[Use Codex login]` 可用。点击后表单切入 **OAuth mode**：driver=oauth、provider=codex、model 字段保留，base_url 与 key 字段隐藏，并显示一条 banner："MnemoSeed will use the Codex login on this machine — no key needed. It refreshes itself while you're signed in."
-   - `present && expired` → 行显示"expired — sign in again with the Codex CLI, then come back here"，按钮禁用，附一行重新登录命令。
-   - `!present` → 行置灰："no Codex login detected on this machine"。
+2. **宿主登录卡片（向导与 ⑧ 编辑器一致）**——"复用本机登录"面板渲染在服务商卡片上方，只列出 `oauth-availability` 报告的 Codex / Grok 宿主登录，每个服务商一张卡片、三种状态：
+   - `present && !expired` → **可选卡片** `Use Codex login`。点击进入 **OAuth mode**：driver=oauth、provider=codex、model 字段保留，base_url 与 key 字段隐藏，banner："MnemoSeed will use the Codex login on this machine — no key needed. It refreshes itself while you're signed in."
+   - `present && expired` → **禁用卡片** "log in again first"：文案给出**精确 CLI 命令**（Codex：`codex login`，已对照官方文档核实）并可一键复制；该路由的保存被拦，直到重新登录后返回。
+   - `!present` → **禁用卡片** "log in to the <provider> CLI first"（Codex 宿主登录在 `~/.codex/auth.json`，Grok 在 `~/.grok/auth.json`）。
    - OAuth mode 的 model 字段保留精选建议（`gpt-5.6-codex` 等在发布前必须**核实**——不要发布当前这个未核实占位符）。
-3. **console ⑧**——OAuth 状态行（徽章）保持只读。在路由编辑器里，"Reuse Codex login" 是选择器里的一张*服务商卡片*（仅在检测到时），不是文本字段。编辑已有 oauth 路由时在 OAuth mode 打开。
-4. **CLI**——`--provider` 仍是 `llm set` 的合法 flag（脚本化对齐），但交互式 `onboard` 向导绝不把它当自由文本问；而是把检测到的登录列为编号选项。
+3. **粘贴 token 路径（第二条路，向导与 ⑧ 编辑器一致）**——"or paste a token instead"：以 key 端点把 token 写入 SecretStore（与 §5 同一机制），附**官方文档链接**：Codex → https://developers.openai.com/codex/auth（API-key 登录小节，已核实）；Grok → https://docs.x.ai/developers/quickstart（API Keys 页在 https://console.x.ai/team/default/api-keys，官方文档指向；console 需登录，标记"入口页"）。宿主未登录时，OAuth 服务商仍可由此配置。
+4. **保存门槛（仅该路由）**——OAuth 路由在登录不可用（expired / absent）时**保存被拦**，只针对那条路由，不波及 BYOK 卡片；被拦文案给出修复路径（重新登录或粘贴 token，见 §11）。
+5. **CLI**——`--provider` 仍是 `llm set` 的合法 flag（脚本化对齐），但交互式 `onboard` 向导绝不把它当自由文本问；而是把检测到的登录列为编号选项，并提供"粘贴 token"替代项。
 
 每个字段 × 每个服务商选择的决策表（实现者的单一事实来源）：
 
 | 字段 | openai_compatible（Fireworks/OR/其他） | anthropic | ollama | oauth mode |
 |---|---|---|---|---|
-| API key 环境变量名 | ✅ 可见，预填 | ✅ 可见，预填 | 隐藏 | 隐藏 |
+| API key（粘贴 / 环境变量名） | ✅ 可见，预填 | ✅ 可见，预填 | 隐藏 | 隐藏 |
 | base_url | ✅ 可见（高级） | ✅ 可见（高级） | ✅ 可见（高级） | 隐藏 |
 | model | ✅ 可见 + 目录 | ✅ 可见 + 目录 | ✅ 可见 + 目录 | ✅ 可见（建议） |
-| oauth provider 文本字段 | **绝不** | **绝不** | **绝不** | **绝不**（仅按钮设置） |
+| oauth provider 文本字段 | **绝不** | **绝不** | **绝不** | **绝不**（仅控件设置） |
+| OAuth 宿主登录卡片（Codex/Grok，三态） | ✅ 顶部区 | ✅ 顶部区 | ✅ 顶部区 | 已选中 |
 | max tokens（仅 ⑧） | ✅ 高级 | ✅ 高级 | 隐藏 | ✅ 高级 |
 
 ---
@@ -208,7 +223,8 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 |---|---|
 | 进行中 | `Testing connection to Fireworks…`，标准 loading 样式，按钮禁用 |
 | 成功 | `Connected to Fireworks — key in FIREWORKS_API_KEY works. Found 1,204 models.`（绿色）。model 下拉从 `detail.models` 填充；**Save route** 武装。 |
-| 401 / 403 | `Fireworks rejected the key in FIREWORKS_API_KEY. It's missing, wrong, or expired — check it at <provider key URL>, set it again, then restart MnemoSeed.` |
+| 探测成功但目录为空 | `No models listed — pick a suggestion, type the exact model id, or use Load model list.` |
+| 401 / 403 | `Fireworks rejected the key in FIREWORKS_API_KEY. It's missing, wrong, or expired — check it at <provider key URL>, then paste a new key here.`（环境变量路径下补一句"修好后重启守护进程"） |
 | 连接被拒 / DNS（Ollama） | `Can't reach Ollama at http://localhost:11434. Is the Ollama app running? Install from ollama.com, then pull a model (ollama pull llama3.1:8b).` |
 | 连接被拒 / DNS（云） | `Couldn't reach <provider>. Check your internet connection or firewall, then try again.` |
 | 超时 | `Timed out talking to <provider>. The endpoint may be slow or blocked — check <endpoint> and try again.` |
@@ -218,19 +234,19 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 ### 7.2 行为
 
 - 探测失败**保留全部字段**；什么都不丢。修复块内联、聚焦，精确指向要改的字段。
-- 401 情况复用 §5 的 key 教学块（折叠），带"重启守护进程"动作，让用户无需重新输入任何东西即可修复。
-- 成功时刷新目录：model 组合框从探测结果的 `models` 列表重新填充（无需后端改动——它已经搭在 `detail["models"]` 上）。更干净的长期方案见 D2。
+- 401 情况复用 §5 的 key 教学块（折叠），直接导向"粘贴新 key"（主路径）或"修环境变量并重启"（headless 路径），用户无需离开表单、无需重启。
+- 成功时刷新目录：model 选择器从探测结果的 `models` 列表重新填充（无需后端改动——它已经搭在 `detail["models"]` 上）。目录刷新另有 **Load model list** 按钮：主动拉取该端点模型列表，无需先跑探测；加载中按钮转 spinner 并禁用（§3.2、§3.4）。更干净的长期方案见 D2。
 - 旧的原始渲染（`reachable — {"error":...}` JSON、"unreachable" 徽章）处处替换，包括 ⑧ 角色卡片探测徽章 → 改为 `connected` / `needs attention`，卡片上显示同一条大白话消息。
 
 ---
 
 ## 8. 需要拍板的决策（orchestrator / 产品）
 
-> D1 已定案：**选 Option B**——设置入库为主（settings DB 为 primary）+ 热生效（hot-apply）+ 预留 scope 列；key 仍全部来自环境变量，绝不入库；SaaS key 托管推迟到 TEE 里程碑。
+> D1 已定案：**SecretStore 文件后端**——API key 可粘贴一次，写入 `~/.mnemoseed/secrets/<role>.key`（POSIX 文件 0600、目录 0700；Windows 用户配置文件 ACL）；settings DB 仍是设置主存储并预留 scope 列；配置只存引用 `secrets:mnemoseed/dream/<role>`；改动**免重启**生效（generation-bump 重新解析）。环境变量名仍受支持（headless/CI）。SaaS key 托管推迟到 TEE 里程碑。
 
 | # | 问题 | 选项 | 建议 |
 |---|---|---|---|
-| D1 | key 处理：纯环境变量（现状）vs"粘贴 key 由 MnemoSeed 写入用户环境变量 / 系统凭据库"？ | (a) 纯环境变量 + 教学（现状，G-AC2 干净）；(b) 从 console 写一个 `~/.mnemoseed/.env` 或 OS keychain 条目；(c) 完整 OS 凭据库集成 | **已定案**——设置 DB 为主 + 热生效，key 仍 env 来源、不入库；见上注。 |
+| D1 | key 处理：纯环境变量（现状）vs"粘贴 key 由 MnemoSeed 写入用户环境变量 / 系统凭据库"？ | (a) 纯环境变量 + 教学（现状）；(b) 从 console 写一个 `~/.mnemoseed/.env` 或 OS keychain 条目；(c) 完整 OS 凭据库集成 | **已定案**——SecretStore 文件后端（粘贴一次、本地落盘、免重启）+ 环境变量回退（headless/CI）；见上注。行业先例（已核实）：Codex CLI `~/.codex/auth.json`、gh keychain 回退文件 + `GH_TOKEN`、Docker `config.json` base64、12-factor 环境变量。 |
 | D2 | 实时模型目录：复用探测 `detail["models"]`（后端零改动）vs 新建 `GET /api/v1/llm/catalog?driver=&base_url=` 接口？ | (a) 仅探测；(b) 专用目录接口 | **(a) 本轮**——先交付 UX；(b) 作为发布打磨后续（探测是按需的，首次访问在用户测试前看不到目录——happy path 可接受）。 |
 | D3 | 原生驱动：无需新建——Fireworks/OpenRouter = openai_compatible，Anthropic 原生，Ollama 原生。确认？ | — | **确认；无需驱动工作。** |
 | D4 | 向导角色范围：仅 deep_reflection（现状）vs "同时用于 short_increment" 复选框（写两个角色）vs 让向导配置全部两个？ | (a) 现状；(b) +共享复选框；(c) 完整双角色向导 | **(b)**——一个复选框、一行文案，覆盖常见的"一把 key、一个服务商"用户，又不把 TTFM 拖过 3 分钟；每个角色后续都可在 ⑧ 独立改（含改指向 Ollama，见 D10）。 |
@@ -266,7 +282,9 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 | 加载（向导/⑧） | 沿用现有 `Loading…` 骨架，带角色/服务商占位；绝不让页面空白。 |
 | `oauth-availability` 拉取失败 | OAuth 面板隐藏，服务商卡片 + BYOK 仍可用（`showDreamSetup` 的 catch 已如此）。 |
 | 未检测到任何服务商（向导） | OAuth 面板显示一行置灰文字："No Codex/Grok login detected on this machine — you can still use an API key below." |
-| 探测成功但目录为空 | model 组合框回退到精选建议 + 自由输入；提示 "The catalog returned no models — pick from the suggestions or type the exact model id." |
+| 探测成功但目录为空 | model 选择器回退到精选建议 + 自由输入；提示 "The catalog returned no models — pick from the suggestions or type the exact model id." |
+| 模型列表加载中（Load model list） | 按钮转 spinner 并禁用；成功后组合框填充该端点 live 目录；失败回到精选建议并提示。 |
+| 粘贴的 key 已保存 | 显示 chip `key saved — ****1234`（掩码尾缀）+ `[delete]`；删除后回到空粘贴态；改动立即生效，无需重启。 |
 | daemon 宕机 / 拉取失败（⑧） | 沿用现有错误面板 + Retry，不变。 |
 | 保存 → 409（test-required 竞态） | 映射为大白话 "Test the connection first"，绝不给原始 409 详情。 |
 | 路由卡片无显式配置（⑧） | 用 "defaults" 徽章代替空块——生效 base URL / key 链 / model 现在在卡片上可见，而非只有编辑时可见。 |
@@ -291,13 +309,17 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 ```
 ┌─ models & routing ───────────────────────────────────────────────────┐
 │  per-role dream models: what each role does, and which model serves   │
-│  it. Key values never appear here — only env-var names.               │
+│  it. Key values never appear here — only env-var names or a masked    │
+│  key tail (****1234).                                                  │
 │                                                                       │
 │  fully-offline badge (derived — shown only when BOTH roles resolve    │
 │  to local ollama;  ⇢ 本页为云+本地混搭 Fireworks+Ollama，故不显示):   │
 │  ◉ fully offline — nothing leaves this machine                        │
 │                                                                       │
 │  host logins: [codex: logged in] [grok: not detected]                 │
+│  OAuth dual path: [Use Codex login] (card) · or [Paste a token        │
+│  instead]; expired → "log in again first" + codex login; absent →     │
+│  disabled card "log in to the <provider> CLI first"                   │
 │                                                                       │
 │  ┌─ deep_reflection ── the careful model ──────────────────────────┐  │
 │  │  connected · Fireworks · accounts/fireworks/models/kimi-k3      │  │
@@ -345,8 +367,9 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
 │  ○ Another OpenAI-compatible endpoint                                │
 │                                                                      │
 │  ── or reuse a login on this computer ──                             │
-│  [Codex: logged in]  → [Use Codex login]      (expired/absent → fix │
-│  copy, never a dead button)                                          │
+│  [Codex: logged in] → [Use Codex login] · or [Paste a token instead] │
+│  (expired → "log in again first" + codex login; absent → disabled    │
+│  card)                                                               │
 │                                                                      │
 │  [continue]                                            [skip for now]│
 └───────────────────────────────────────────────────────────────────────┘
@@ -375,10 +398,13 @@ you never paste the key into MnemoSeed, and MnemoSeed never stores it.
   2) OpenRouter                4) Ollama on this computer
   provider [1]: 1
   Create a key at https://app.fireworks.ai/settings/users/api-keys
-  Set it as an env var and restart MnemoSeed:
+  Paste the key once — stored locally under ~/.mnemoseed/secrets, never
+  shown again (masked tail ****1234, deletable). Or set an env var for
+  headless/CI use (a NEW env value still needs a daemon restart):
     Windows:  setx FIREWORKS_API_KEY "your-key"
     macOS/Linux: export FIREWORKS_API_KEY="your-key"   # add to ~/.zshrc
-  api key env var [FIREWORKS_API_KEY]:
+  api key (paste once) or env var name [FIREWORKS_API_KEY]:
+  key saved — ****1234
   model [accounts/fireworks/models/kimi-k3]:            ← verified default
   (若选 4 Ollama，先打一行质量提示，再进入测试：)
   ⚠ Ollama chosen for this role — lower synthesis quality than cloud
@@ -422,16 +448,30 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - OAuth hint: `MnemoSeed uses that login's access — you don't paste a key. No key value is
   read, sent, or stored.`
 - OAuth live: `Codex login found — sign in is current.` / button `Use Codex login`
-- OAuth expired: `Codex login found but expired — sign in again with the Codex CLI, then
-  return here.` (button disabled)
-- OAuth absent: `No Codex login detected on this machine.` (muted)
+- OAuth expired: `Codex login found but expired — log in again first, then return here.` (card
+  disabled) / command line `codex login` (copy-to-clipboard)
+- OAuth absent: `Log in to the Codex CLI first, then come back.` (card disabled;
+  per-provider: `<provider>` = Codex / Grok)
+- Paste-token affordance (second path): `or paste a token instead` → official doc links:
+  `How to create a Codex token` → https://developers.openai.com/codex/auth · `How to create
+  an xAI API key` → https://docs.x.ai/developers/quickstart
+- OAuth blocked-save: `This route can't be saved until a login is available — log in to the
+  Codex CLI first, or paste a token instead.`
 - OAuth banner (after selection): `Using the Codex login on this machine — no key needed.
   It refreshes itself while you're signed in.`
-- Key label: `api key env var`
-- Key teaching intro: `Your key lives in an environment variable. MnemoSeed reads it from
-  there — you never paste the key here and it is never stored.`
+- Key label: `api key` — `paste once (stored locally, never shown again)` / `or an env var
+  name for headless/CI use`
+- Key teaching intro: `Paste your key once — MnemoSeed stores it locally under
+  ~/.mnemoseed/secrets and never shows it again (only the masked tail ****1234). For
+  headless/CI you can use an env var instead.`
+- Key saved chip: `key saved — ****1234` (button `delete`)
+- Key saved note: `Stored under ~/.mnemoseed/secrets. Not shown again; only this masked
+  tail. Deletable any time.`
+- Delete key confirm: `Delete this key? Routes using it fail until a new key is set.`
 - Key 401 fix: `Fireworks rejected the key in FIREWORKS_API_KEY — it's missing, wrong, or
-  expired. Set it again, then restart MnemoSeed.` (per-provider substitution)
+  expired. Check it at <provider key URL>, then paste a new key here.` (per-provider
+  substitution; env-var path appends `or fix the env var and restart for headless/CI.`)
+- Load model list button: `Load model list`
 - Endpoint label: `endpoint` / advanced header: `Advanced: endpoint`
 - Endpoint reset: `reset to Fireworks default`
 - Model label: `model`
@@ -449,7 +489,7 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 
 - Page title: `models & routing`
 - Page note: `What each role does, and which model serves it. Key values never appear here —
-  only the env-var names MnemoSeed reads them from.`
+  only env-var names or a masked key tail (****1234).`
 - Role subtitles (§4) — two roles only: `deep_reflection` / `short_increment`.
 - Offline badge (derived): `fully offline — nothing leaves this machine`（含义：仅当所有已配置
   角色都解析为本地 ollama 时显示；任一云角色存在即隐藏——派生真相，无开关）
@@ -470,9 +510,19 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - Provider group in editor: `Which provider?` (same cards, minus "recommended")
 - max tokens label: `max tokens` (advanced), note: `blank = role default`
 - Saved banner: `route deep_reflection saved — config version <v> (audited)`
-- Restart note (first time a new env var is introduced): `Remember: the daemon reads env
-  vars from its own startup environment. If you set a new one, restart MnemoSeed.`
+- Restart note (env-fallback only): `Note for headless/CI: a NEW env-var value is picked up
+  only after the daemon restarts. Pasted keys apply immediately.`
 - OAuth line: `host logins: codex — logged in · grok — not detected`
+- OAuth card available (⑧ editor): `Use Codex login` (selectable card)
+- OAuth card expired (⑧ editor): `Codex login expired — log in again first` + command
+  `codex login` (card disabled)
+- OAuth card absent (⑧ editor): `Log in to the Codex CLI first` (card disabled;
+  per-provider `<provider>`)
+- Paste-token affordance (⑧ editor): `Paste a token instead` (+ official doc links, §11.1)
+- OAuth blocked-save (⑧ editor): `This route can't be saved until a login is available —
+  log in to the Codex CLI first, or paste a token instead.`
+- Key saved chip (⑧ editor): `key saved — ****1234` + `[delete]`
+- Load model list button (⑧ editor): `Load model list`
 
 ### 11.3 CLI（onboard LLM 步骤 + llm set）
 
@@ -481,8 +531,9 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
   you started; change any role later with 'mnemoseed llm set'.`
 - Provider prompt: `provider [1]: ` (list printed as §10.3)
 - Key URL line: `Create a key at <url>`
-- Env-var teaching (printed once, §10.3 block)
-- `api key env var [FIREWORKS_API_KEY]: `
+- Key teaching (printed once, §10.3 block): paste-once path + env-var fallback
+- `api key (paste once, stored locally) or env var name [FIREWORKS_API_KEY]: `
+- `key saved — ****1234`
 - `model [accounts/fireworks/models/kimi-k3]: `
 - `testing connection to Fireworks…`
 - `connected — key works. saving…`
@@ -490,8 +541,12 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - Ollama quality line (provider = Ollama 时先打): `Ollama chosen for this role — lower
   synthesis quality than cloud models; you accept this for privacy or cost.`
 - Success: `✓ dream model configured (<driver>/<model>)`
-- Fail 401: `error: Fireworks rejected the key in FIREWORKS_API_KEY — set it and restart
-  the daemon, then re-run onboard (it resumes here).`
+- Fail 401: `error: Fireworks rejected the key — paste a new one, or fix the env var (then
+  restart for headless/CI), and re-run onboard (it resumes here).`
+- OAuth expired (CLI): `Codex login expired — run 'codex login' first, then re-run onboard
+  (it resumes here).`
+- OAuth absent (CLI): `No Codex login detected — log in to the Codex CLI first, or paste a
+  token instead.`
 - Ollama fail: `error: can't reach Ollama at http://localhost:11434 — is it running?
   Install from ollama.com and pull a model (ollama pull llama3.1:8b).`
 - Skip: `skipping the LLM wizard: the daemon stays capture-only (dreaming disabled until a
@@ -509,9 +564,13 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - **OpenRouter**：quickstart（base `https://openrouter.ai/api/v1`、`OPENROUTER_API_KEY`、目录 `GET /api/v1/models`、OpenAI 兼容）—— https://openrouter.ai/docs/quickstart
 - **Anthropic**：API overview（base `https://api.anthropic.com`、Messages `POST /v1/messages`、`x-api-key` + `anthropic-version`、key 来自 `platform.claude.com/settings/keys`、models `GET /v1/models`）—— https://platform.claude.com/docs/en/api/overview
 - **Ollama**：API reference（`POST /api/chat` stream=false、`GET /api/tags`、无鉴权、`model:tag` 命名）—— https://github.com/ollama/ollama/blob/main/docs/api.md
+- **Codex / OpenAI 认证**（粘贴 token 的官方文档链接）：`~/.codex/auth.json` 明文凭据缓存、`codex login` 与 `codex login --with-api-key`、API key 创建于 platform.openai.com/api-keys—— https://developers.openai.com/codex/auth
+- **xAI / Grok**（粘贴 token 的官方文档链接）：quickstart（`XAI_API_KEY`、base `https://api.x.ai/v1`、API Keys 页 https://console.x.ai/team/default/api-keys——console 需登录，匿名抓取 403，标记"入口页"）—— https://docs.x.ai/developers/quickstart
+- **OpenRouter 模型目录**（§3.4 模式参考）—— https://openrouter.ai/models
+- **Cursor 模型页**（§3.4 模式参考）—— https://cursor.com/docs/models
 
 ### 12.1 核实说明（本规格的落地依据）
 
 - 代码阅读：`console/static/app.js`（向导 + ⑧ 渲染/编辑/探测，行号已在文中内联引用）、`config.py` `DEFAULT_LLM_ROUTES`、`llm/admin.py` + `admin_routes.py`（仅显式 payload、探测签名、409 门槛化保存）、`llm/routing.py`（env 解析 + 实例缓存）、`llm/drivers/*`（五个驱动，目录在探测 detail 中）、`configwrite/service.py`（env 名校验）、`onboard/service.py`（LLM 步骤）、`cli.py`（`llm status/set`、`onboard`）。
 - 本机实测：用临时 `MNEMOSEED_HOME` 在备用端口（嵌入式预设，`127.0.0.1:18764`）启动 daemon，走通：owner 设置 → 登录 → `/api/v1/llm/routes`（确认仅显式 payload）→ `/api/v1/llm/oauth-availability`（本机两个登录都已检测到但过期）→ `/api/v1/llm/test` 探测形态（无 key Fireworks 401；离线 Ollama 连接被拒；未知 driver；未探测直接保存 → 409）。在驱动目录里观察到 `stub`，并在线上 payload 中确认默认值不可见。
-- 未核实：当前 model 占位符 `claude-opus-5` / 配置样例 `claude-sonnet-5`（D9），以及 OAuth mode 的 `gpt-5.6-codex` 占位符。
+- 未核实：当前 model 占位符 `claude-opus-5` / 配置样例 `claude-sonnet-5`（D9），以及 OAuth mode 的 `gpt-5.6-codex` 占位符。Grok 宿主登录的重新登录命令（随已装 CLI 而异）未在官方文档核实——UI 以 "log in to the <provider> CLI first" + 粘贴 token 兜底。console.x.ai 需登录（匿名 403），其 API Keys 页 URL 以官方文档指向为准。

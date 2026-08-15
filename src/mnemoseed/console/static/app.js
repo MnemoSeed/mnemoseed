@@ -281,6 +281,12 @@ const state = {
     editingRole: null,
     message: null,
     probeOk: {},
+    // provider id -> model list fetched by a passing probe (the editor's
+    // provider-scoped datalist catalog, §7.2)
+    catalog: {},
+    // role -> live model text while that role's editor is open (the role
+    // card's model tile reflects the picked provider, not a stale route)
+    editModel: {},
     wizard: null,
   },
   profilesPage: { tokens: {} },
@@ -456,11 +462,13 @@ async function setupLoginAndDreamModels(credentials) {
   await showDreamSetup();
 }
 
-// ---------------------------------------------------------------- models & routing (模型路由配置-UX §11)
+// ---------------------------------------------------------------- models & routing (models-routing-ux.md §11)
 // The five provider cards shared by the first-run wizard and the ⑧ editor.
-// Curated model suggestions exist only where the ids were verified against the
-// live catalog (Fireworks) — never publish unverified ids (D9). Key values
-// never appear on this page: only env-var NAMES.
+// Curated model ids were verified before shipping (D9): Fireworks from the
+// live catalog, OpenRouter from the keyless openrouter.ai/api/v1/models fetch,
+// Anthropic from the official models overview, Ollama from the library tags —
+// never publish an unverified id. Key values never appear on this page: only
+// env-var NAMES.
 const LLM_PROVIDERS = [
   {
     id: "fireworks",
@@ -470,7 +478,11 @@ const LLM_PROVIDERS = [
     keyEnv: "FIREWORKS_API_KEY",
     keyUrl: "https://app.fireworks.ai/settings/users/api-keys",
     note: "Recommended starting point — MnemoSeed's default models run here.",
-    suggestions: {
+    models: [
+      "accounts/fireworks/models/kimi-k3",
+      "accounts/fireworks/models/deepseek-v4-flash-0731",
+    ],
+    defaults: {
       deep_reflection: "accounts/fireworks/models/kimi-k3",
       short_increment: "accounts/fireworks/models/deepseek-v4-flash-0731",
     },
@@ -483,6 +495,16 @@ const LLM_PROVIDERS = [
     keyEnv: "OPENROUTER_API_KEY",
     keyUrl: "https://openrouter.ai/settings/keys",
     note: "One API key, hundreds of models from many labs.",
+    models: [
+      "deepseek/deepseek-v4-flash",
+      "moonshotai/kimi-k3",
+      "anthropic/claude-opus-5",
+      "qwen/qwen3-coder-plus",
+    ],
+    defaults: {
+      deep_reflection: "moonshotai/kimi-k3",
+      short_increment: "deepseek/deepseek-v4-flash",
+    },
   },
   {
     id: "anthropic",
@@ -492,6 +514,11 @@ const LLM_PROVIDERS = [
     keyEnv: "ANTHROPIC_API_KEY",
     keyUrl: "https://platform.claude.com/settings/keys",
     note: "Requires an Anthropic API key from platform.claude.com.",
+    models: ["claude-opus-5", "claude-sonnet-5"],
+    defaults: {
+      deep_reflection: "claude-opus-5",
+      short_increment: "claude-sonnet-5",
+    },
   },
   {
     id: "ollama",
@@ -500,6 +527,11 @@ const LLM_PROVIDERS = [
     baseUrl: "http://localhost:11434",
     keyEnv: "",
     note: "Free and offline. Runs entirely on this machine; lower synthesis quality.",
+    models: ["llama3.1:8b", "qwen3:8b", "deepseek-r1:8b"],
+    defaults: {
+      deep_reflection: "deepseek-r1:8b",
+      short_increment: "llama3.1:8b",
+    },
   },
   {
     id: "other",
@@ -537,6 +569,58 @@ function llmProviderFor(driver, providerName) {
   return (
     LLM_PROVIDERS.find((provider) => provider.driver === driver && provider.id !== "other") || null
   );
+}
+
+// Curated model ids for a provider (datalist options before any probe).
+function llmCuratedModels(provider) {
+  return provider && Array.isArray(provider.models) ? provider.models.slice() : [];
+}
+
+// The role-appropriate curated default a provider card re-seeds the model
+// field with when it is picked (deep_reflection gets the strongest id,
+// short_increment the fast/cheap one).
+function llmRoleDefaultModel(provider, role) {
+  if (!provider || !provider.defaults || !provider.defaults[role]) return "";
+  return provider.defaults[role];
+}
+
+// Host-login CLI sign-in commands, verified against the providers' official
+// docs: Codex — developers.openai.com/codex/auth ("Run `codex login`, then
+// complete the browser flow"); Grok Build — docs.x.ai/build/cli/reference
+// ("grok login — Sign in").
+const LLM_OAUTH_LOGIN_CMD = {
+  codex: "codex login",
+  grok: "grok login",
+};
+
+// Official docs for each host-login provider's token / API-key sign-in (the
+// paste-a-token path). Codex auth page verified; the xAI console key page is
+// login-walled and unverifiable, so the verified docs root is linked instead.
+const LLM_OAUTH_TOKEN_DOCS = {
+  codex: "https://developers.openai.com/codex/auth",
+  grok: "https://docs.x.ai/",
+};
+
+function llmOauthEntry(provider) {
+  if (!provider) return null;
+  return (state.llm.oauth && state.llm.oauth.providers || []).find(
+    (entry) => entry.provider === provider,
+  ) || null;
+}
+
+function llmOauthLive(provider) {
+  const entry = llmOauthEntry(provider);
+  return Boolean(entry && entry.present === true && entry.expired !== true);
+}
+
+// The per-route block copy shown when a route's host login is expired or
+// absent (JH: only that route is blocked until availability returns).
+function llmOauthBlockMessage(provider) {
+  const name = cap(provider || "");
+  const cmd = LLM_OAUTH_LOGIN_CMD[provider] || `${provider} login`;
+  const entry = llmOauthEntry(provider);
+  if (entry && entry.present === true) return `login expired — run ${cmd} first`;
+  return `no local ${name} CLI login detected — log in first (${cmd})`;
 }
 
 function llmEffectiveBaseUrl(role) {
@@ -756,7 +840,7 @@ function wizardEndpointField(provider, wizard) {
 }
 
 function wizardModelOptions(provider, wizard) {
-  const curated = provider.suggestions ? Object.values(provider.suggestions) : [];
+  const curated = llmCuratedModels(provider);
   const catalog = (wizard.models || []).filter((model) => !curated.includes(model));
   return curated
     .concat(catalog)
@@ -778,10 +862,10 @@ function wizardStep2Html(wizard) {
       ${oauthMode ? "" : provider ? wizardEndpointField(provider, wizard) : ""}
       ${wizardQualityHint(wizard)}
       <div class="field"><label for="wz-model">model</label>
-        <input type="text" id="wz-model" name="model" list="wz-models" value="${esc(wizard.model || (provider && provider.suggestions ? provider.suggestions.deep_reflection : ""))}" placeholder="type or pick a model" required autocomplete="off" />
+        <input type="text" id="wz-model" name="model" list="wz-models" value="${esc(wizard.model || llmRoleDefaultModel(provider, "deep_reflection"))}" placeholder="type or pick a model" required autocomplete="off" />
         <datalist id="wz-models">${provider ? wizardModelOptions(provider, wizard) : ""}</datalist>
         ${provider && provider.id === "ollama" ? '<span class="toolbar-note">If the model is missing, pull it first: ollama pull llama3.1:8b</span>' : ""}
-        ${provider && !oauthMode && !provider.suggestions ? '<span class="toolbar-note">No models listed — pick a suggestion or type the exact model id.</span>' : ""}
+        ${provider && !oauthMode && !llmCuratedModels(provider).length ? '<span class="toolbar-note">No models listed — pick a suggestion or type the exact model id.</span>' : ""}
       </div>
       <div class="toolbar">
         <button class="btn" type="button" data-act="wz-back">back</button>
@@ -2692,13 +2776,17 @@ function llmRoleCard(role, drivers) {
   const probe = ok
     ? '<span class="badge badge-ok">connected</span>'
     : '<span class="badge badge-err">needs attention</span>';
+  const modelShown =
+    editing && state.llm.editModel[role.role] != null
+      ? String(state.llm.editModel[role.role])
+      : role.model || "—";
   return `<div class="card">
     <h2>${esc(role.role)} ${!role.explicit ? '<span class="badge">defaults</span>' : ""}</h2>
     ${subtitle ? `<p class="toolbar-note">${esc(subtitle)}</p>` : ""}
     ${role.driver === "ollama" ? '<p class="toolbar-note">lower synthesis quality than cloud models — you accept this for privacy or cost.</p>' : ""}
     <div class="tiles">
       ${tile(`<span class="mono">${llmDriverLabel(role)}</span>`, "driver")}
-      ${tile(`<span class="mono">${esc(role.model || "—")}</span>`, "model")}
+      <div class="tile"><div class="tile-value" data-model-tile data-role="${esc(role.role)}"><span class="mono">${esc(modelShown)}</span></div><div class="tile-label">model</div></div>
       ${tile(esc(baseUrl || "default"), "endpoint")}
       ${tile(esc(keyLine), "api key env")}
       ${tile(esc(fmtNum(configRoleMaxTokens(role.role))), "max tokens")}
@@ -2715,16 +2803,17 @@ function llmRoleCard(role, drivers) {
   </div>`;
 }
 
-function llmEditorModels(role) {
-  const provider = llmProviderFor(role.driver, role.provider);
-  const curated = provider && provider.suggestions ? Object.values(provider.suggestions) : [];
-  const detail = role.connectivity && role.connectivity.detail;
-  const catalog =
-    detail && Array.isArray(detail.models)
-      ? detail.models.filter((model) => typeof model === "string" && !curated.includes(model))
-      : [];
+// The editor's model datalist is provider-scoped (§3.2/§7.2): curated ids for
+// the provider currently picked in the form, plus any catalog a passing probe
+// fetched for THAT provider (state.llm.catalog) — never the stale catalog of a
+// previously saved route from another provider.
+function llmEditorModelOptions(provider) {
+  const curated = llmCuratedModels(provider);
+  const seen = new Set(curated);
+  const catalog = provider ? state.llm.catalog[provider.id] || [] : [];
+  const extra = catalog.filter((model) => typeof model === "string" && !seen.has(model));
   return curated
-    .concat(catalog)
+    .concat(extra)
     .map((model) => `<option value="${esc(model)}"></option>`)
     .join("");
 }
@@ -2738,18 +2827,148 @@ function llmEditorProviderCard(role, provider, activeProvider) {
   </label>`;
 }
 
-// §6.3: in the editor "Reuse <login>" is a provider CARD (only when a live host
-// login was detected) — never a free-text provider field.
-function llmEditorOAuthCard(role, liveOAuth, activeId) {
-  if (!liveOAuth) return "";
-  const providerName = cap(liveOAuth.provider);
-  const cardId = `oauth:${liveOAuth.provider}`;
-  const selected = activeId === cardId;
-  return `<label class="wizard-provider-card ${selected ? "selected" : ""}">
-    <input type="radio" name="llm-provider" value="${esc(cardId)}" ${selected ? "checked" : ""} />
-    <span class="wizard-provider-title">Reuse ${providerName} login</span>
-    <span class="toolbar-note">No key needed — uses the ${providerName} login already on this machine.</span>
-  </label>`;
+// §6.3: in the editor "Reuse <login>" is a provider CARD per detected oauth
+// provider, in every availability state — never a free-text provider field:
+//   live    -> selectable card
+//   expired -> visible but disabled, "login expired — run <cmd> first"
+//   absent  -> visible but disabled, "no local <provider> CLI login detected"
+function llmEditorOAuthCards(oauth, activeId) {
+  const providers = (oauth && oauth.providers) || [];
+  return providers
+    .map((entry) => {
+      const providerName = cap(entry.provider);
+      const cardId = `oauth:${entry.provider}`;
+      const live = entry.present === true && entry.expired !== true;
+      const selected = activeId === cardId;
+      const cmd = LLM_OAUTH_LOGIN_CMD[entry.provider] || `${entry.provider} login`;
+      const note = live
+        ? `No key needed — uses the ${providerName} login already on this machine.`
+        : entry.present === true
+          ? `login expired — run ${cmd} first`
+          : `no local ${providerName} CLI login detected — log in first (${cmd})`;
+      return `<label class="wizard-provider-card ${selected ? "selected" : ""} ${live ? "" : "muted"}">
+        <input type="radio" name="llm-provider" value="${esc(cardId)}" ${selected ? "checked" : ""} ${live ? "" : "disabled"} />
+        <span class="wizard-provider-title">Reuse ${providerName} login</span>
+        <span class="toolbar-note">${esc(note)}</span>
+      </label>`;
+    })
+    .join("");
+}
+
+// The dual path under the oauth cards: "paste a token instead" opens a key
+// paste field bound to the host login currently picked in the form and calls
+// the daemon's key endpoint (POST /api/v1/llm/key); the official docs link for
+// the token rides along. Rendered whenever any host login is known to the
+// daemon.
+function llmOauthPasteHtml(oauth, activeId) {
+  const providers = (oauth && oauth.providers) || [];
+  if (!providers.length) return "";
+  const picked = String(activeId).startsWith("oauth:")
+    ? String(activeId).replace(/^oauth:/, "")
+    : providers[0].provider;
+  const entry = providers.find((candidate) => candidate.provider === picked) || providers[0];
+  const providerName = cap(entry.provider);
+  const docs = LLM_OAUTH_TOKEN_DOCS[entry.provider];
+  const docsLink = docs
+    ? `<a href="${esc(docs)}" target="_blank" rel="noopener noreferrer">official docs for ${esc(providerName)} tokens</a>`
+    : "";
+  return `<details class="key-teaching" data-oauth-paste data-provider="${esc(entry.provider)}">
+    <summary>paste a token instead</summary>
+    <div class="field">
+      <label for="llm-oauth-token">API token for ${esc(providerName)}</label>
+      <input type="password" id="llm-oauth-token" name="oauth_token" placeholder="paste the ${esc(providerName)} API token" autocomplete="off" />
+    </div>
+    <p class="toolbar-note">The token goes straight to the daemon — never into browser storage. ${docsLink}</p>
+    <div class="toolbar">
+      <button class="btn" type="button" data-act="llm-key-paste" data-provider="${esc(entry.provider)}">store token</button>
+    </div>
+    <output class="feedback" data-key-paste-feedback></output>
+  </details>`;
+}
+
+// Keep the paste field bound to the host login currently picked in the form
+// (or the first known host login when no oauth card is selected).
+function llmBindOauthPaste(form, activeId) {
+  if (!form) return;
+  const paste = form.querySelector("[data-oauth-paste]");
+  if (!paste) return;
+  const providers = (state.llm.oauth && state.llm.oauth.providers) || [];
+  if (!providers.length) return;
+  const picked = String(activeId).startsWith("oauth:")
+    ? String(activeId).replace(/^oauth:/, "")
+    : providers[0].provider;
+  const entry = providers.find((candidate) => candidate.provider === picked) || providers[0];
+  paste.dataset.provider = entry.provider;
+  const label = paste.querySelector("label[for='llm-oauth-token']");
+  if (label) label.textContent = `API token for ${cap(entry.provider)}`;
+  const input = paste.querySelector("#llm-oauth-token");
+  if (input) input.placeholder = `paste the ${cap(entry.provider)} API token`;
+  const button = paste.querySelector('[data-act="llm-key-paste"]');
+  if (button) button.dataset.provider = entry.provider;
+}
+
+// Live role-card model tile: reflects the editor's current model while the
+// route is being edited (provider pick morphs it), the saved route otherwise.
+function updateModelTile(role) {
+  const tile = document.querySelector(`[data-model-tile][data-role="${role}"]`);
+  if (!tile) return;
+  const value = state.llm.editModel[role];
+  tile.textContent = value != null && String(value) !== "" ? String(value) : "—";
+}
+
+// The editor's per-route gate: while an expired/absent host login backs the
+// selected oauth route, Test/Save/Load-model-list are disabled for THIS route
+// only and a fix note is shown (availability refresh re-arms them).
+function llmSyncEditorGate(form, activeId) {
+  if (!form) return;
+  const isOAuth = String(activeId).startsWith("oauth:");
+  const oauthProvider = isOAuth ? String(activeId).replace(/^oauth:/, "") : "";
+  const blocked = isOAuth && !llmOauthLive(oauthProvider);
+  const driver = form.elements.driver ? String(form.elements.driver.value || "").trim() : "";
+  const model = form.elements.model ? String(form.elements.model.value || "").trim() : "";
+  const testBtn = form.querySelector('[data-act="llm-test-edit"]');
+  const saveBtn = form.querySelector('button[type="submit"]');
+  const loadBtn = form.querySelector('[data-act="llm-load-models"]');
+  if (testBtn) testBtn.disabled = blocked;
+  if (saveBtn) saveBtn.disabled = blocked;
+  if (loadBtn) loadBtn.disabled = blocked || isOAuth || !driver || !model;
+  const gateNote = form.querySelector("[data-llm-gate-note]");
+  if (gateNote) {
+    gateNote.hidden = !blocked;
+    if (blocked) gateNote.textContent = `${llmOauthBlockMessage(oauthProvider)} — this route only; the other role is unaffected.`;
+  }
+}
+
+async function llmKeyPaste(form, provider) {
+  const output = form.querySelector("[data-key-paste-feedback]");
+  const input = form.elements.oauth_token;
+  const token = input ? String(input.value || "").trim() : "";
+  if (!token) {
+    if (output) output.innerHTML = errorInline("paste the token first");
+    return;
+  }
+  const role = form.dataset.role || "";
+  if (!role) {
+    if (output) output.innerHTML = errorInline("no role bound to this editor");
+    return;
+  }
+  if (output) output.innerHTML = '<span class="dim">storing token…</span>';
+  try {
+    await api("/api/v1/llm/key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role, key: token }),
+    });
+    if (input) input.value = "";
+    if (output) output.innerHTML = '<span class="badge badge-ok">token stored</span>';
+  } catch (error) {
+    const cmd = LLM_OAUTH_LOGIN_CMD[provider] || `${provider} login`;
+    if (output) {
+      output.innerHTML = /HTTP (404|405|501|502)/.test(error.message)
+        ? errorInline(`key paste is not available on this daemon yet — run ${cmd} instead`)
+        : errorInline(`store failed: ${error.message}`);
+    }
+  }
 }
 
 // The provider card id currently in play for a role: a saved oauth route maps to
@@ -2765,8 +2984,11 @@ function llmActiveProviderId(role) {
 // §3.2 morphing: the editor form's fields follow the picked provider card.
 // ollama hides the key block; oauth mode hides key + endpoint; the residency
 // note is "Other"-only. ``morphValues`` (user switched cards) also rewrites the
-// field values to the provider defaults; a plain re-render only enforces the
-// oauth clearing so a save can never pin a key/endpoint to an oauth route.
+// field values to the provider defaults — including re-seeding the model with
+// the picked provider's role-appropriate curated id (kills the "anthropic
+// picked, kimi-k3 still shown" state) — and updates the live model tile; a
+// plain re-render only enforces the oauth clearing so a save can never pin a
+// key/endpoint to an oauth route.
 function llmApplyEditorProvider(form, activeId, morphValues) {
   if (!form) return;
   const isOAuth = String(activeId).startsWith("oauth:");
@@ -2793,6 +3015,14 @@ function llmApplyEditorProvider(form, activeId, morphValues) {
   if (residency) residency.hidden = !(provider && provider.id === "other");
   const teaching = form.querySelector("[data-key-teaching]");
   if (teaching) teaching.hidden = isOAuth || !needsKey;
+  const modelInput = form.elements.model;
+  if (morphValues && !isOAuth && provider && modelInput) {
+    const seed = llmRoleDefaultModel(provider, role);
+    if (seed) {
+      modelInput.value = seed;
+      state.llm.editModel[role] = seed;
+    }
+  }
 }
 
 // §5: the env-var teaching block under the key field (per-provider commands).
@@ -2808,35 +3038,40 @@ function llmKeyTeachingHtml(provider, role) {
 
 function llmEditFormHtml(role, drivers) {
   const maxTokens = configRoleMaxTokens(role.role);
-  const isOAuth = role.driver === "oauth";
-  const activeProvider = isOAuth ? null : llmProviderFor(role.driver, role.provider);
   const activeId = llmActiveProviderId(role);
-  const liveOAuth = (state.llm.oauth && state.llm.oauth.providers || []).find(
-    (entry) => entry.present === true && entry.expired !== true,
-  );
+  const isOAuth = String(activeId).startsWith("oauth:");
+  const activeProvider = isOAuth ? null : llmProviderById(activeId);
   const baseUrl = llmEffectiveBaseUrl(role);
   const keyEnv = llmEffectiveKeyEnv(role);
   const roleFallback = LLM_ROLE_KEY_ENV[role.role] || "";
   const keyProvider = activeProvider && activeProvider.keyEnv ? activeProvider : null;
   const cards =
     LLM_PROVIDERS.map((provider) => llmEditorProviderCard(role, provider, activeProvider)).join("") +
-    llmEditorOAuthCard(role, liveOAuth, activeId);
+    llmEditorOAuthCards(state.llm.oauth, activeId);
+  const modelValue =
+    state.llm.editModel[role.role] != null ? String(state.llm.editModel[role.role]) : role.model || "";
   return `<form class="card" data-llm-route-form data-role="${esc(role.role)}">
     <h3>Edit route — ${esc(role.role)}</h3>
     ${isOAuth ? `<p class="toolbar-note">This route uses the ${esc(role.provider || "host")} login on this machine — no key needed. Pick a provider below to change it.</p>` : ""}
     <input type="hidden" name="driver" value="${isOAuth ? "" : esc(role.driver)}" />
     <h4>Which provider?</h4>
     <div class="filter-grid">${cards}</div>
+    ${llmOauthPasteHtml(state.llm.oauth, activeId)}
     <div class="filter-grid">
       <div class="field"><label for="llm-model-${esc(role.role)}">model</label>
-        <input type="text" id="llm-model-${esc(role.role)}" name="model" list="llm-models-${esc(role.role)}" value="${esc(role.model || "")}" placeholder="type or pick a model" required autocomplete="off" />
-        <datalist id="llm-models-${esc(role.role)}">${llmEditorModels(role)}</datalist>
+        <input type="text" id="llm-model-${esc(role.role)}" name="model" list="llm-models-${esc(role.role)}" value="${esc(modelValue)}" placeholder="type or pick a model" required autocomplete="off" />
+        <datalist id="llm-models-${esc(role.role)}">${llmEditorModelOptions(activeProvider)}</datalist>
+        <div class="toolbar">
+          <button class="btn" type="button" data-act="llm-load-models" data-role="${esc(role.role)}">Load model list</button>
+          <span class="toolbar-note">Runs a connection probe to fetch the provider's model catalog.</span>
+        </div>
       </div>
       <div class="field" data-endpoint-field><label for="llm-url-${esc(role.role)}">endpoint</label><input type="text" id="llm-url-${esc(role.role)}" name="base_url" value="${esc(baseUrl)}" placeholder="blank = provider default" autocomplete="off" /></div>
       <div class="field" data-key-field><label for="llm-env-${esc(role.role)}">api key env var</label><input type="text" id="llm-env-${esc(role.role)}" name="api_key_env" value="${esc(keyEnv)}" placeholder="${esc(roleFallback || "MY_API_KEY")}" autocomplete="off" />${keyProvider ? llmKeyTeachingHtml(keyProvider, role.role) : ""}</div>
       <div class="field" data-tokens-field><label for="llm-tokens-${esc(role.role)}">max tokens</label><input type="number" id="llm-tokens-${esc(role.role)}" name="max_tokens" value="${esc(maxTokens === null ? "" : String(maxTokens))}" min="1" placeholder="blank = role default" autocomplete="off" /></div>
     </div>
     <p class="toolbar-note" data-residency-note hidden>Your memories leave this machine to the provider's servers.</p>
+    <p class="toolbar-note" data-llm-gate-note hidden></p>
     <div class="toolbar">
       <span class="toolbar-note">Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.</span>
       <span class="spacer"></span>
@@ -2859,7 +3094,12 @@ function renderLLM() {
     const form = Array.from(view.querySelectorAll("[data-llm-route-form]")).find(
       (candidate) => candidate.dataset.role === state.llm.editingRole,
     );
-    if (form) llmApplyEditorProvider(form, llmActiveProviderId(state.llm.editingRole), false);
+    if (form) {
+      const activeId = llmActiveProviderId(state.llm.editingRole);
+      llmApplyEditorProvider(form, activeId, false);
+      llmBindOauthPaste(form, activeId);
+      llmSyncEditorGate(form, activeId);
+    }
   }
   setUpdatedAt();
 }
@@ -2887,6 +3127,16 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
     if (feedbackEl) feedbackEl.innerHTML = errorInline("driver and model are required to probe");
     return;
   }
+  // JH: a route whose host login is expired or absent is blocked until
+  // availability returns — the probe never fires for THAT route, the fix
+  // message shows instead (other routes are unaffected).
+  if (driver === "oauth") {
+    if (!llmOauthLive(provider)) {
+      delete state.llm.probeOk[role];
+      if (feedbackEl) feedbackEl.innerHTML = errorInline(llmOauthBlockMessage(provider));
+      return;
+    }
+  }
   const payload = { role, driver, model, base_url: baseUrl || "" };
   if (apiKeyEnv && String(apiKeyEnv).trim()) payload.api_key_env = String(apiKeyEnv).trim();
   if (provider && String(provider).trim()) payload.provider = String(provider).trim();
@@ -2904,15 +3154,19 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
     if (result.ok) {
       // A passing probe for the exact current form values arms the save gate.
       state.llm.probeOk[role] = llmProbeSignature(driver, model, baseUrl || "", apiKeyEnv || "", provider || "");
-      // §7.2: the model combobox catalog refreshes from the probe's models list.
-      const models = result.detail && Array.isArray(result.detail.models) ? result.detail.models : null;
+      // §7.2: the model combobox catalog refreshes from the probe's models list
+      // and is cached per provider (so a card switch back re-lists it).
+      const models =
+        result.detail && Array.isArray(result.detail.models)
+          ? result.detail.models.filter((candidate) => typeof candidate === "string")
+          : null;
+      if (providerMeta && models && models.length) {
+        state.llm.catalog[providerMeta.id] = models;
+      }
       if (models && models.length) {
         const datalist = document.querySelector(`datalist[id="llm-models-${role}"]`);
         if (datalist) {
-          datalist.innerHTML = models
-            .filter((candidate) => typeof candidate === "string")
-            .map((candidate) => `<option value="${esc(candidate)}"></option>`)
-            .join("");
+          datalist.innerHTML = models.map((candidate) => `<option value="${esc(candidate)}"></option>`).join("");
         }
       }
     } else {
@@ -2958,6 +3212,12 @@ async function saveRoute(role, form) {
   const apiKeyEnv = String(data.get("api_key_env") || "").trim();
   const providerRadio = form.querySelector('input[name="llm-provider"]:checked');
   const provider = providerRadio ? String(providerRadio.value).replace(/^oauth:/, "") : "";
+  // JH: an expired/absent host login blocks saving THAT oauth route until
+  // availability returns; other routes are unaffected.
+  if (driver === "oauth" && !llmOauthLive(provider)) {
+    if (feedback) feedback.innerHTML = errorInline(llmOauthBlockMessage(provider));
+    return;
+  }
   const rawTokens = String(data.get("max_tokens") || "").trim();
   let maxTokens = null;
   if (rawTokens) {
@@ -3068,6 +3328,19 @@ function handleClick(event) {
       state.llm.editingRole = state.llm.editingRole === editRole ? null : editRole;
       // Any re-entry into the editor invalidates a previously passing probe.
       delete state.llm.probeOk[editRole];
+      if (state.llm.editingRole === editRole) {
+        const route = findLLMRoute(editRole);
+        state.llm.editModel[editRole] = route ? route.model || "" : "";
+        const detail = route && route.connectivity && route.connectivity.detail;
+        const models =
+          detail && Array.isArray(detail.models)
+            ? detail.models.filter((candidate) => typeof candidate === "string")
+            : [];
+        const provider = llmProviderFor(route ? route.driver : "", route ? route.provider : "");
+        // Seed the provider-scoped catalog from the saved route's last probe so
+        // the datalist opens with the route's provider already populated.
+        if (provider && models.length) state.llm.catalog[provider.id] = models;
+      }
       renderLLM();
       break;
     }
@@ -3104,6 +3377,28 @@ function handleClick(event) {
         editRadio ? String(editRadio.value).replace(/^oauth:/, "") : "",
         editForm.querySelector("[data-llm-feedback]"),
       );
+      break;
+    }
+    case "llm-load-models": {
+      const editForm = el.closest("form");
+      if (!editForm) break;
+      const editRole = el.dataset.role;
+      const editData = new FormData(editForm);
+      const editRadio = editForm.querySelector('input[name="llm-provider"]:checked');
+      testRoute(
+        editRole,
+        String(editData.get("driver") || "").trim(),
+        String(editData.get("model") || "").trim(),
+        String(editData.get("base_url") || "").trim(),
+        String(editData.get("api_key_env") || "").trim(),
+        editRadio ? String(editRadio.value).replace(/^oauth:/, "") : "",
+        editForm.querySelector("[data-llm-feedback]"),
+      );
+      break;
+    }
+    case "llm-key-paste": {
+      const editForm = el.closest("form");
+      if (editForm) llmKeyPaste(editForm, el.dataset.provider);
       break;
     }
     case "wz-next": {
@@ -3246,7 +3541,30 @@ function handleChange(event) {
     // carried by the card, never by a text input.
     const form = target.closest("form");
     if (!form) return;
+    const role = form.dataset.role;
+    const isOAuth = String(target.value).startsWith("oauth:");
     llmApplyEditorProvider(form, target.value, true);
+    // The datalist follows the picked card (curated + that provider's probe
+    // catalog) — never the stale catalog of a previously saved route.
+    if (role) {
+      const datalist = form.querySelector(`datalist[id="llm-models-${role}"]`);
+      if (datalist) {
+        const provider = isOAuth ? null : llmProviderById(target.value);
+        datalist.innerHTML = llmEditorModelOptions(provider);
+      }
+      updateModelTile(role);
+    }
+    llmBindOauthPaste(form, target.value);
+    llmSyncEditorGate(form, target.value);
+    return;
+  }
+  if (target.name === "model") {
+    const form = target.closest("form");
+    if (form && form.hasAttribute("data-llm-route-form") && form.dataset.role) {
+      // Keep the role card's model tile in lockstep while typing.
+      state.llm.editModel[form.dataset.role] = target.value;
+      updateModelTile(form.dataset.role);
+    }
     return;
   }
   if (target.hasAttribute && target.hasAttribute("data-resolution-branch")) {

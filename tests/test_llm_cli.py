@@ -342,3 +342,69 @@ def test_llm_set_refuses_non_loopback_baseurl(tmp_path, monkeypatch, capsys) -> 
     assert code == 1
     assert "loopback" in captured.err.lower()
     assert daemon.calls == []  # nothing was sent anywhere
+
+
+# ---------------------------------------------------------------- llm set --api-key
+
+
+def test_llm_set_api_key_posts_the_key_endpoint(tmp_path, monkeypatch, capsys) -> None:
+    _env(tmp_path, monkeypatch)
+    daemon = FakeDaemon()
+    daemon.on(
+        "POST",
+        f"{BASE_URL}/api/v1/llm/key",
+        body={"ok": True, "role": "deep_reflection", "masked_tail": "9012", "restart_required": False},
+    )
+    daemon.install(monkeypatch)
+    code = main(["llm", "set", "deep_reflection", "--api-key", _SECRET])
+    captured = capsys.readouterr()
+    assert code == 0
+    # the key write is the ONLY call: no connectivity probe, no route persist
+    assert len(daemon.calls) == 1
+    call = daemon.calls[0]
+    assert call["url"] == f"{BASE_URL}/api/v1/llm/key"
+    assert call["body"] == {"role": "deep_reflection", "key": _SECRET}
+    assert call["headers"]["X-MnemoSeed-Actor"] == "cli"
+    # the response reports the masked tail and the no-restart teaching, never
+    # the value itself
+    assert "9012" in captured.out
+    assert "restart" in captured.out.lower()
+    assert _SECRET not in captured.out
+
+
+def test_llm_set_api_key_daemon_down_is_a_clear_error(tmp_path, monkeypatch, capsys) -> None:
+    """No --force bypass exists for secrets: a down daemon is a hard error."""
+    _env(tmp_path, monkeypatch)
+
+    def _refuse(url: str, json: object = None, headers: dict[str, str] | None = None, timeout: object = None):
+        del url, json, headers, timeout
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "post", _refuse)
+    code = main(["llm", "set", "deep_reflection", "--api-key", _SECRET])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "cannot reach" in captured.err
+    assert _SECRET not in captured.err
+
+
+def test_llm_set_api_key_empty_value_exits_1(tmp_path, monkeypatch, capsys) -> None:
+    _env(tmp_path, monkeypatch)
+    daemon = FakeDaemon()
+    daemon.install(monkeypatch)
+    code = main(["llm", "set", "deep_reflection", "--api-key", "   "])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "empty" in captured.err.lower()
+    assert daemon.calls == []
+
+
+def test_llm_set_api_key_refuses_non_loopback_baseurl(tmp_path, monkeypatch, capsys) -> None:
+    _env(tmp_path, monkeypatch)
+    daemon = FakeDaemon()
+    daemon.install(monkeypatch)
+    code = main(["llm", "set", "deep_reflection", "--api-key", _SECRET, "--baseurl", "http://10.0.0.5:7788"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "loopback" in captured.err.lower()
+    assert daemon.calls == []
