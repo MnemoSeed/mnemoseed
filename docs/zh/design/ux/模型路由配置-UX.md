@@ -521,6 +521,11 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - OpenRouter card: label `OpenRouter`, blurb `One API key, hundreds of models from many labs.`
 - Anthropic card: label `Anthropic (Claude)`, blurb `Requires an Anthropic API key from
   platform.claude.com.`
+- opencode Zen card（Item 2 新增，editor + 向导通用）: label `opencode Zen (host's Go
+  subscription)`, blurb `Curated models the opencode team tests and vets, billed through your
+  opencode Zen / Go subscription.`（OpenAI 兼容 `https://opencode.ai/zen/v1`，Bearer key 来自
+  opencode.ai/auth；复用路径见 keyNote：`~/.local/share/opencode/auth.json` 的 `opencode-go`
+  条目）
 - Ollama card: label `Ollama on this computer`, blurb `Free and offline. Runs entirely on
   this machine; lower synthesis quality.`（Ollama 走连接卡③直达 Step 2）
 - Ollama quality hint (shown when the role being configured picks Ollama): `Lower
@@ -587,10 +592,18 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
   `codex login` (card disabled)
 - OAuth card absent (⑧ editor): `Log in to the Codex CLI first` (card disabled;
   per-provider `<provider>`)
-- Paste-token affordance (⑧ editor): `Paste a token instead` (+ official doc links, §11.1)
+- Paste affordance (⑧ editor, Item 1/P1 修复): ONE role-named paste module per role editor —
+  summary `Paste the API key for the careful model — once, stored locally, never shown again
+  (masked tail ****1234 only).`（short_increment → `the quick model`）; input label/placeholder
+  同样以角色 plain-name 命名; oauth 的 "paste a token instead" 折叠进同一模块（选宿主登录卡时
+  附该 provider 的官方 token 文档链接）; 整个模块仅对 ollama 隐藏。JH 原始投诉「选 Anthropic 却
+  显示 Codex API」根因：旧版 oauth-paste 块以宿主 provider 命名且对非 other 卡可见——已由
+  role-named 统一模块取代，paste 目标永远由角色 plain-name 指明。
+- Key saved chip (⑧ editor): `key stored — ****1234` + `delete stored key`（掩码尾缀仅来自
+  key 端点 masked_tail）; 删除后回退 env 链: `key deleted — this route falls back to its
+  env-var chain`
 - OAuth blocked-save (⑧ editor): `This route can't be saved until a login is available —
   log in to the Codex CLI first, or paste a token instead.`
-- Key saved chip (⑧ editor): `key saved — ****1234` + `[delete]`
 - Load model list button (⑧ editor): `Load model list`
 
 ### 11.3 CLI（onboard LLM 步骤 + llm set）
@@ -635,15 +648,17 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - **Ollama**：API reference（`POST /api/chat` stream=false、`GET /api/tags`、无鉴权、`model:tag` 命名）—— https://github.com/ollama/ollama/blob/main/docs/api.md
 - **Codex / OpenAI 认证**（粘贴 token 的官方文档链接）：`~/.codex/auth.json` 明文凭据缓存、`codex login` 与 `codex login --with-api-key`、API key 创建于 platform.openai.com/api-keys—— https://developers.openai.com/codex/auth
 - **xAI / Grok**（粘贴 token 的官方文档链接）：quickstart（`XAI_API_KEY`、base `https://api.x.ai/v1`、API Keys 页 https://console.x.ai/team/default/api-keys——console 需登录，匿名抓取 403，标记"入口页"）—— https://docs.x.ai/developers/quickstart
+- **opencode Zen**（Item 2 新增，2026-08-15 核实）：Zen docs（base `https://opencode.ai/zen/v1`、chat completions 端点 `/zen/v1/chat/completions`（OpenAI 兼容）、模型目录 `GET /zen/v1/models`、key 来自 opencode.ai/auth、config 内 model id 写作 `opencode/<id>` 是 opencode 自己的惯例、直接 API 用裸 id）—— https://opencode.ai/docs/zen/ ；模型目录直取 https://opencode.ai/zen/v1/models （公开抓取成功）；models.dev `OpenCode Zen` 条目（api `https://opencode.ai/zen/v1`、npm `@ai-sdk/openai-compatible`、模型 `api.id` 均为裸 id，无 `opencode/` 前缀）与 live 目录一致——卡片用的裸 id 由此双重核实。**本机验证**：`~/.local/share/opencode/auth.json` 存在且含 `opencode-go: {type:"api", key}`（用户 opencode Go 订阅 key，值全程不透出）——复用路径 (b) 成立。
 - **OpenRouter 模型目录**（§3.4 模式参考）—— https://openrouter.ai/models
 - **Cursor 模型页**（§3.4 模式参考）—— https://cursor.com/docs/models
 
 ### 12.1 核实说明（本规格的落地依据）
 
 - 代码阅读：`console/static/app.js`（4648 行，2026-08-15 状态——向导已重构为 `wizardStep1/2/3Html` + `showDreamSetup` 于行 695，⑧ 编辑器 `llmEditFormHtml` 于行 3114；§2.3/§14 的行号以本次阅读为准）、`config.py` `DEFAULT_LLM_ROUTES`、`llm/admin.py` + `admin_routes.py`（仅显式 payload、探测签名、409 门槛化保存）、`llm/routing.py`（env 解析 + 实例缓存）、`llm/drivers/*`（五个驱动，目录在探测 detail 中）、`configwrite/service.py`（env 名校验）、`onboard/service.py`（LLM 步骤）、`cli.py`（`llm status/set`、`onboard`）。
-- 本次新增阅读（§10.4/§13/§14 依据）：`app.js` 向导与编辑器全部相关函数（`showDreamSetup` 695-727、`wizardOAuthRows` 749-773、`wizardStep1Html` 793-808、`wizardStep2Html` 854-881、`wizardStep3Html` 883-910、`wizardPayload/Test/Save` 912-1011、`llmEditorProviderCard` 2830、`llmEditorOAuthCards` 2844、`llmOauthPasteHtml` 2872、`llmSyncEditorGate` 2951、`llmEditFormHtml` 3114-3159、`testRoute` 3201、`saveRoute` 3283-3359、`wz-*` 事件 3497-3545）、`styles.css` `:root`（4-25）与向导卡样式（441-458）。`oauth-availability` 在 `showDreamSetup` 行 706 被并发预拉——§10.4 的修复点，源码确认。
+- 本次新增阅读（§10.4/§13/§14 依据）：`app.js` 向导与编辑器全部相关函数（`showDreamSetup` 695-727、`wizardOAuthRows` 749-773、`wizardStep1Html` 793-808、`wizardStep2Html` 854-881、`wizardStep3Html` 883-910、`wizardPayload/Test/Save` 912-1011、`llmEditorProviderCard` 2830、`llmEditorOAuthCards` 2844、`llmRolePasteHtml/llmRolePasteDocs/llmBindRolePaste`（Item 1 取代旧 `llmOauthPasteHtml`/`llmCustomPasteHtml`/`llmBindOauthPaste`）、`llmSyncEditorGate` 2951、`llmEditFormHtml` 3114-3159、`testRoute` 3201、`saveRoute` 3283-3359、`wz-*` 事件 3497-3545）、`styles.css` `:root`（4-25）与向导卡样式（441-458）。`oauth-availability` 在 `showDreamSetup` 行 706 被并发预拉——§10.4 的修复点，源码确认。
 - 本机实测：用临时 `MNEMOSEED_HOME` 在备用端口（嵌入式预设，`127.0.0.1:18764`）启动 daemon，走通：owner 设置 → 登录 → `/api/v1/llm/routes`（确认仅显式 payload）→ `/api/v1/llm/oauth-availability`（本机两个登录都已检测到但过期）→ `/api/v1/llm/test` 探测形态（无 key Fireworks 401；离线 Ollama 连接被拒；未知 driver；未探测直接保存 → 409）。在驱动目录里观察到 `stub`，并在线上 payload 中确认默认值不可见。
 - 未核实：当前 model 占位符 `claude-opus-5` / 配置样例 `claude-sonnet-5`（D9），以及 OAuth mode 的 `gpt-5.6-codex` 占位符。Grok 宿主登录的重新登录命令（随已装 CLI 而异）未在官方文档核实——UI 以 "log in to the <provider> CLI first" + 粘贴 token 兜底。console.x.ai 需登录（匿名 403），其 API Keys 页 URL 以官方文档指向为准。
+- Item 2 备注：opencode Zen 的零复制复用（daemon 直接读 `~/.local/share/opencode/auth.json`）需要后端宿主登录提供者（类比 codex/grok 的 OAuthLLM），本轮前端只做「文档化 + 粘贴一次」——该后端接入留给工程师（见 orchestrator leftovers）。
 
 ---
 

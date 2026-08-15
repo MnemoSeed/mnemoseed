@@ -53,14 +53,15 @@ def _providers_block(app_js: str) -> str:
 # ---------------------------------------------------------------- provider pickers
 
 
-def test_wizard_provider_picker_lists_the_five_providers(app_js: str) -> None:
+def test_wizard_provider_picker_lists_the_six_providers(app_js: str) -> None:
     """§11.1: the wizard picker is exactly Fireworks/OpenRouter/Anthropic/
-    Ollama/Other — never stub, never an oauth card."""
+    opencode Zen/Ollama/Other — never stub, never an oauth card."""
     block = _providers_block(app_js)
     for label in (
         "Fireworks (recommended)",
         "OpenRouter",
         "Anthropic (Claude)",
+        "opencode Zen (host's Go subscription)",
         "Ollama on this computer",
         "Another OpenAI-compatible API",
     ):
@@ -75,6 +76,10 @@ def test_provider_catalog_notes_are_verbatim(app_js: str) -> None:
         "Recommended starting point — MnemoSeed's default models run here.",
         "One API key, hundreds of models from many labs.",
         "Requires an Anthropic API key from platform.claude.com.",
+        (
+            "Curated models the opencode team tests and vets, billed through your "
+            "opencode Zen / Go subscription."
+        ),
         "Free and offline. Runs entirely on this machine; lower synthesis quality.",
         "Point at any other endpoint that speaks the OpenAI chat API.",
     ):
@@ -116,17 +121,32 @@ def test_editor_oauth_cards_cover_all_visibility_states(app_js: str) -> None:
         assert string in app_js
 
 
-def test_editor_oauth_paste_a_token_affordance(app_js: str) -> None:
-    """The paste-a-token path under the oauth cards: an openable key paste
-    field bound to the provider, the daemon key endpoint, and the official
-    docs link for the token (verified: developers.openai.com/codex/auth)."""
+def test_editor_role_named_key_paste_affordance(app_js: str) -> None:
+    """The ONE role-named paste module per role editor: the oauth "paste a
+    token instead" and the custom-card paste collapse into this same slot —
+    named by the ROLE plain-name (§4), never by a host provider. The daemon key
+    endpoint is the only transport, and the oauth token docs link rides along
+    inside the same module (verified: developers.openai.com/codex/auth)."""
     for string in (
-        "paste a token instead",
+        "Paste the API key for ${esc(plainName)}",
+        "API key for ${esc(plainName)}",
+        "never shown again (masked tail ****1234 only)",
+        "the careful model",  # role plain-name (§4), the paste target
+        "the quick model",
         'data-act="llm-key-paste"',
         "/api/v1/llm/key",
         "developers.openai.com/codex/auth",
+        "official docs for ${esc(cap(provider))} tokens",
     ):
         assert string in app_js
+
+
+def test_editor_paste_module_hidden_only_for_ollama(app_js: str) -> None:
+    """§11.2: the single paste module is hidden ONLY for ollama (it has no
+    key); every other provider — anthropic, openai_compatible, the custom
+    "other" card, oauth mode — keeps the same role-named module."""
+    assert 'rolePaste.hidden = Boolean(provider && provider.driver === "ollama")' in app_js
+    assert "data-role-paste" in app_js
 
 
 def test_editor_oauth_gate_blocks_expired_route(app_js: str) -> None:
@@ -136,6 +156,79 @@ def test_editor_oauth_gate_blocks_expired_route(app_js: str) -> None:
     assert "llmOauthLive" in app_js
     assert "llmOauthBlockMessage" in app_js
     assert "llmSyncEditorGate" in app_js
+
+
+# ------------------------------------------- paste module provider-agnostic guard (QA mutation gate)
+
+
+def _function_body(source: str, name: str) -> str:
+    """The body of ``function name(args) { ... }`` — balanced-brace extract.
+
+    The guarded paste functions contain no stray braces inside template
+    literals, so a plain depth counter is exact for them."""
+    m = re.search(rf"\bfunction {name}\s*\([^)]*\)\s*\{{", source)
+    assert m is not None, f"function {name} missing in app.js"
+    start, depth = m.end(), 1
+    i = start
+    while i < len(source) and depth:
+        ch = source[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"unbalanced braces in function {name}"
+    return source[start : i - 1]
+
+
+def test_paste_module_is_provider_agnostic(app_js: str) -> None:
+    """QA: picking the Anthropic provider card must render the shared
+    ROLE-named paste module (llmRolePasteHtml) — the module is addressed by
+    the role plain-name only and carries no provider-specific label. A
+    mutation that names a provider (e.g. a Codex or Claude label) inside the
+    module's copy fails here."""
+    body = _function_body(app_js, "llmRolePasteHtml")
+    assert "data-role-paste" in body
+    # the module is addressed by the role plain-name map (§4), never a provider
+    assert "LLM_ROLE_PLAIN_NAMES[role]" in body
+    for label in (
+        "codex",
+        "grok",
+        "claude",
+        "anthropic",
+        "fireworks",
+        "openrouter",
+        "ollama",
+    ):
+        assert label not in body.lower(), (
+            f"provider-specific label {label!r} leaked into the role-named paste module"
+        )
+
+
+def test_anthropic_paste_docs_link_to_claude_platform(app_js: str) -> None:
+    """QA: with the Anthropic provider card active (a non-host-login card),
+    the paste module's visible docs link resolves to the Claude platform —
+    llmRolePasteDocs renders the picked card's keyUrl and the anthropic card
+    pins platform.claude.com, never an OpenAI Codex page."""
+    docs = _function_body(app_js, "llmRolePasteDocs")
+    assert "provider.keyUrl" in docs  # non-oauth path renders the card's key page
+    block = _providers_block(app_js)
+    anthropic = re.search(r'\{\s*id: "anthropic",(.*?)\n\s*\},', block, re.DOTALL)
+    assert anthropic is not None, "anthropic card definition missing"
+    assert 'keyUrl: "https://platform.claude.com/settings/keys"' in anthropic.group(1)
+    assert "platform.claude.com" in app_js
+
+
+def test_no_codex_api_in_non_host_login_paste_path(app_js: str) -> None:
+    """QA: the code path that renders paste for a non-host-login provider (the
+    Anthropic card) never surfaces a "Codex API" string — Codex is a
+    host-login (oauth) concern and stays out of the bring-your-own-key paste
+    copy. Scoped to llmRolePasteHtml (the shared module) plus the non-oauth
+    fallthrough of llmRolePasteDocs."""
+    paste_path = _function_body(app_js, "llmRolePasteHtml")
+    docs = _function_body(app_js, "llmRolePasteDocs")
+    non_oauth = docs.split("const provider = llmProviderById(activeId);", 1)[1]
+    assert re.search(r"codex\s*api", paste_path + non_oauth, re.IGNORECASE) is None
 
 
 # ------------------------------------------------- ⑧ custom-provider flow (JH dogfood regression)
@@ -189,12 +282,12 @@ def test_other_card_keyenv_empty_step_keeps_key_field_for_openai_compatible(app_
 
 
 def test_custom_provider_editor_has_role_bound_key_paste(app_js: str) -> None:
-    """JH: the custom card must offer its own role-bound key paste — llmKeyPaste
-    posts {role, key} (never a hardcoded host provider) and pins the
-    ``secrets:mnemoseed/dream/<role>`` reference into the key field so the
+    """JH: the custom card's key paste is the shared role-named module —
+    llmKeyPaste posts {role, key} (never a hardcoded host provider) and pins
+    the ``secrets:mnemoseed/dream/<role>`` reference into the key field so the
     probe authenticates with the stored key."""
     for string in (
-        "paste an API key instead",
+        "Paste the API key for ${esc(plainName)}",
         'data-act="llm-key-paste"',
         "JSON.stringify({ role, key: token })",
         "`secrets:mnemoseed/dream/${role}`",
@@ -219,6 +312,24 @@ def test_custom_provider_paste_wires_the_secrets_ref_into_the_key_field(app_js: 
     clearing it back to nothing."""
     assert "envField.value" in app_js
     assert "`secrets:mnemoseed/dream/${role}`" in app_js
+
+
+def test_key_paste_reports_only_the_masked_tail(app_js: str) -> None:
+    """§5/§11.2: the stored-key chip shows only the masked tail (****1234) from
+    the key endpoint's masked_tail — the value itself never echoes back."""
+    assert "key stored — ****" in app_js
+    assert "body.masked_tail" in app_js
+    assert "never shown again — only this masked tail. Deletable any time." in app_js
+
+
+def test_key_paste_delete_clears_the_stored_key(app_js: str) -> None:
+    """The delete counterpart (DELETE /api/v1/llm/key {role}) exists in the
+    editor, clears the pinned reference back to the env-var chain, and reports
+    the fallback."""
+    assert 'data-act="llm-key-delete"' in app_js
+    assert "JSON.stringify({ role })" in app_js
+    assert "key deleted — this route falls back to its env-var chain" in app_js
+    assert "llmKeyDelete" in app_js
 
 
 def test_saved_custom_route_reopens_on_the_other_card(app_js: str) -> None:
@@ -267,8 +378,48 @@ def test_provider_scoped_curated_model_ids_are_verified(app_js: str) -> None:
         "llama3.1:8b",
         "qwen3:8b",
         "deepseek-r1:8b",
+        # opencode Zen — live https://opencode.ai/zen/v1/models fetch + the
+        # models.dev OpenCode Zen entry (raw ids, no opencode/ prefix); the
+        # haiku id is the live catalog's claude-haiku-4-5 — the old dotted
+        # spelling claude-haiku-4.5 is dead and must never pin
+        "kimi-k3",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "gpt-5.4-mini",
+        "gpt-5.5",
     ):
         assert string in block
+    # the dead dotted spelling must not resurface anywhere in the catalog
+    assert "claude-haiku-4.5" not in block
+
+
+def test_opencode_zen_card_facts_are_verified(app_js: str) -> None:
+    """Item 2: the opencode Zen card carries the verified endpoint + auth shape
+    (OpenAI-compatible /zen/v1 chat completions, Bearer key from opencode.ai/
+    auth), the opencode-go reuse path is documented, and it is absent from the
+    ollama/no-key exception only (driver = openai_compatible)."""
+    block = _providers_block(app_js)
+    assert 'id: "opencode"' in block
+    assert 'driver: "openai_compatible"' in block
+    assert 'baseUrl: "https://opencode.ai/zen/v1"' in block
+    assert 'keyEnv: "OPENCODE_ZEN_API_KEY"' in block
+    assert 'keyUrl: "https://opencode.ai/auth"' in block
+    assert "~/.local/share/opencode/auth.json" in block
+    assert "opencode-go entry" in block
+    # the opencode/ prefix is opencode's config-only convention — the card's
+    # model ids are the raw ids the /zen/v1 endpoint accepts
+    assert "opencode/kimi-k3" not in block
+    assert "opencode/gpt-5.5" not in block
+
+
+def test_opencode_zen_defaults_map_both_roles(app_js: str) -> None:
+    """Item 2: the opencode card re-seeds the strong id for deep_reflection and
+    the fast/cheap id for short_increment."""
+    block = _providers_block(app_js)
+    assert 'deep_reflection: "kimi-k3"' in block
+    assert 'short_increment: "deepseek-v4-flash"' in block
 
 
 def test_load_model_list_control_present(app_js: str) -> None:

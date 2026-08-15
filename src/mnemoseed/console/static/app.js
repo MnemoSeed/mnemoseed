@@ -466,12 +466,13 @@ async function setupLoginAndDreamModels(credentials) {
 }
 
 // ---------------------------------------------------------------- models & routing (models-routing-ux.md §11)
-// The five provider cards shared by the first-run wizard and the ⑧ editor.
+// The six provider cards shared by the first-run wizard and the ⑧ editor.
 // Curated model ids were verified before shipping (D9): Fireworks from the
 // live catalog, OpenRouter from the keyless openrouter.ai/api/v1/models fetch,
-// Anthropic from the official models overview, Ollama from the library tags —
-// never publish an unverified id. Key values never appear on this page: only
-// env-var NAMES.
+// Anthropic from the official models overview, Ollama from the library tags,
+// opencode Zen from the live https://opencode.ai/zen/v1/models fetch + the
+// models.dev OpenCode Zen entry — never publish an unverified id. Key values
+// never appear on this page: only env-var NAMES.
 const LLM_PROVIDERS = [
   {
     id: "fireworks",
@@ -524,6 +525,42 @@ const LLM_PROVIDERS = [
     },
   },
   {
+    id: "opencode",
+    label: "opencode Zen (host's Go subscription)",
+    driver: "openai_compatible",
+    baseUrl: "https://opencode.ai/zen/v1",
+    keyEnv: "OPENCODE_ZEN_API_KEY",
+    keyUrl: "https://opencode.ai/auth",
+    note: "Curated models the opencode team tests and vets, billed through your opencode Zen / Go subscription.",
+    // Model ids are the raw ids the /zen/v1 endpoint accepts (no opencode
+    // prefix — that prefix is opencode's own config convention only); verified
+    // against the live /zen/v1/models fetch and the models.dev OpenCode Zen
+    // entry. Curated to a current, non-deprecated, role-suitable subset.
+    models: [
+      "kimi-k3",
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
+      "claude-sonnet-5",
+      "claude-haiku-4-5",
+      "gpt-5.4-mini",
+      "gpt-5.5",
+      "glm-5.2",
+      "grok-4.6",
+      "minimax-m3",
+      "gemini-3.5-flash-lite",
+      "qwen3.6-plus",
+    ],
+    defaults: {
+      deep_reflection: "kimi-k3",
+      short_increment: "deepseek-v4-flash",
+    },
+    // Reuse path (b): if the user already signed into opencode, the Zen API
+    // key is stored on this machine by the opencode CLI under this path (the
+    // ``opencode-go`` entry). Documented, never read by the console.
+    keyNote:
+      "If you've already signed in to opencode, your Zen key is on this machine at ~/.local/share/opencode/auth.json (the opencode-go entry) — paste it below once and MnemoSeed keeps its own local copy.",
+  },
+  {
     id: "ollama",
     label: "Ollama on this computer",
     driver: "ollama",
@@ -558,6 +595,13 @@ const LLM_ROLE_SUBTITLES = {
     "The careful model. Reads your recent sessions and writes the distilled facts into long-term memory. Use the strongest model you can afford here.",
   short_increment:
     "The quick model. Handles the frequent small consolidation passes. Use a fast, low-cost model.",
+};
+
+// Role plain-names (§4): the human-friendly way each role is addressed in the
+// editor's paste module, so a pasted key can never be aimed at the wrong role.
+const LLM_ROLE_PLAIN_NAMES = {
+  deep_reflection: "the careful model",
+  short_increment: "the quick model",
 };
 
 function llmProviderById(id) {
@@ -811,7 +855,8 @@ function wizardKeyHint(provider) {
   if (provider.id === "other") {
     return `Point at any OpenAI-compatible endpoint. Your memories leave this machine to the provider's servers. Set the key env var — on macOS/Linux: export ${LLM_ROLE_KEY_ENV.deep_reflection}=…; on Windows: setx ${LLM_ROLE_KEY_ENV.deep_reflection} ….`;
   }
-  return `Create the key at ${provider.keyUrl}, then set ${provider.keyEnv} — on macOS/Linux: export ${provider.keyEnv}=…; on Windows: setx ${provider.keyEnv} …. Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.`;
+  const keyNote = provider.keyNote ? ` ${provider.keyNote}` : "";
+  return `Create the key at ${provider.keyUrl}, then set ${provider.keyEnv} — on macOS/Linux: export ${provider.keyEnv}=…; on Windows: setx ${provider.keyEnv} …. Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.${keyNote}`;
 }
 
 function wizardKeyField(provider, wizard) {
@@ -2864,76 +2909,56 @@ function llmEditorOAuthCards(oauth, activeId) {
     .join("");
 }
 
-// The dual path under the oauth cards: "paste a token instead" opens a key
-// paste field bound to the host login currently picked in the form and calls
-// the daemon's key endpoint (POST /api/v1/llm/key); the official docs link for
-// the token rides along. Rendered whenever any host login is known to the
-// daemon.
-function llmOauthPasteHtml(oauth, activeId) {
-  const providers = (oauth && oauth.providers) || [];
-  if (!providers.length) return "";
-  const picked = String(activeId).startsWith("oauth:")
-    ? String(activeId).replace(/^oauth:/, "")
-    : providers[0].provider;
-  const entry = providers.find((candidate) => candidate.provider === picked) || providers[0];
-  const providerName = cap(entry.provider);
-  const docs = LLM_OAUTH_TOKEN_DOCS[entry.provider];
-  const docsLink = docs
-    ? `<a href="${esc(docs)}" target="_blank" rel="noopener noreferrer">official docs for ${esc(providerName)} tokens</a>`
-    : "";
-  return `<details class="key-teaching" data-oauth-paste data-provider="${esc(entry.provider)}">
-    <summary>paste a token instead</summary>
+// The ONE role-named key paste module, rendered for every role editor (the
+// oauth "paste a token instead" path collapses into this same slot). Named by
+// the ROLE's plain-name (§4) so a paste can never be aimed at the wrong role:
+//   "API key for the careful model" / "API key for the quick model".
+// The key goes straight to the daemon (POST /api/v1/llm/key {role, key}),
+// which pins the secrets: reference — pasted once, stored locally, never shown
+// again, only the masked tail (****1234) displayed. The module is hidden ONLY
+// for ollama (it has no key). When an oauth host-login card is picked, the
+// docs link switches to that provider's official token docs.
+function llmRolePasteHtml(role) {
+  const plainName = LLM_ROLE_PLAIN_NAMES[role] || role;
+  return `<details class="key-teaching" data-role-paste>
+    <summary>Paste the API key for ${esc(plainName)} — once, stored locally, never shown again (masked tail ****1234 only).</summary>
     <div class="field">
-      <label for="llm-oauth-token">API token for ${esc(providerName)}</label>
-      <input type="password" id="llm-oauth-token" name="oauth_token" placeholder="paste the ${esc(providerName)} API token" autocomplete="off" />
+      <label for="llm-paste-key-${esc(role)}">API key for ${esc(plainName)}</label>
+      <input type="password" id="llm-paste-key-${esc(role)}" name="paste_key" placeholder="paste the API key for ${esc(plainName)}" autocomplete="off" />
     </div>
-    <p class="toolbar-note">The token goes straight to the daemon — never into browser storage. ${docsLink}</p>
-    <div class="toolbar">
-      <button class="btn" type="button" data-act="llm-key-paste" data-provider="${esc(entry.provider)}">store token</button>
-    </div>
-    <output class="feedback" data-key-paste-feedback></output>
-  </details>`;
-}
-
-// The custom "Another OpenAI-compatible API" card's role-bound key paste: the
-// key goes straight to the daemon (POST /api/v1/llm/key {role, key}), which
-// pins the secrets: reference; the editor then carries that reference in the
-// key field so the probe authenticates with the stored key (JH dogfood
-// regression).
-function llmCustomPasteHtml(role) {
-  return `<details class="key-teaching" data-custom-paste hidden>
-    <summary>paste an API key instead</summary>
-    <div class="field">
-      <label for="llm-paste-key-${esc(role)}">API key for ${esc(role)}</label>
-      <input type="password" id="llm-paste-key-${esc(role)}" name="paste_key" placeholder="paste the API key for this endpoint" autocomplete="off" />
-    </div>
-    <p class="toolbar-note">The key goes straight to the daemon — never into browser storage. Storing it pins the secrets: reference and the next probe uses it.</p>
+    <p class="toolbar-note" data-role-paste-note>The key goes straight to the daemon — never into browser storage. Storing it pins the secrets: reference so the next probe and save authenticate with the stored key. <span data-paste-docs></span></p>
     <div class="toolbar">
       <button class="btn" type="button" data-act="llm-key-paste">store key</button>
+      <button class="btn" type="button" data-act="llm-key-delete" hidden>delete stored key</button>
     </div>
     <output class="feedback" data-key-paste-feedback></output>
   </details>`;
 }
 
-// Keep the paste field bound to the host login currently picked in the form
-// (or the first known host login when no oauth card is selected).
-function llmBindOauthPaste(form, activeId) {
+// The provider context line inside the role paste module: for a host-login
+// card the host-login provider's official token docs ride along; for every
+// other provider the provider's key page does.
+function llmRolePasteDocs(activeId) {
+  if (String(activeId).startsWith("oauth:")) {
+    const provider = String(activeId).replace(/^oauth:/, "");
+    const docs = LLM_OAUTH_TOKEN_DOCS[provider];
+    return docs
+      ? `Paste the ${esc(cap(provider))} token instead of the CLI login — <a href="${esc(docs)}" target="_blank" rel="noopener noreferrer">official docs for ${esc(cap(provider))} tokens</a>`
+      : `Paste the ${esc(cap(provider))} token instead of the CLI login.`;
+  }
+  const provider = llmProviderById(activeId);
+  if (!provider || !provider.keyUrl) return "";
+  return `Create the key at <a href="${esc(provider.keyUrl)}" target="_blank" rel="noopener noreferrer">${esc(provider.label.replace(" (recommended)", ""))}</a>, then paste it here once.`;
+}
+
+// Keep the role paste module's provider context in lockstep with the picked
+// card (oauth card -> oauth token docs; otherwise the provider's key page).
+function llmBindRolePaste(form, activeId) {
   if (!form) return;
-  const paste = form.querySelector("[data-oauth-paste]");
+  const paste = form.querySelector("[data-role-paste]");
   if (!paste) return;
-  const providers = (state.llm.oauth && state.llm.oauth.providers) || [];
-  if (!providers.length) return;
-  const picked = String(activeId).startsWith("oauth:")
-    ? String(activeId).replace(/^oauth:/, "")
-    : providers[0].provider;
-  const entry = providers.find((candidate) => candidate.provider === picked) || providers[0];
-  paste.dataset.provider = entry.provider;
-  const label = paste.querySelector("label[for='llm-oauth-token']");
-  if (label) label.textContent = `API token for ${cap(entry.provider)}`;
-  const input = paste.querySelector("#llm-oauth-token");
-  if (input) input.placeholder = `paste the ${cap(entry.provider)} API token`;
-  const button = paste.querySelector('[data-act="llm-key-paste"]');
-  if (button) button.dataset.provider = entry.provider;
+  const docs = paste.querySelector("[data-paste-docs]");
+  if (docs) docs.innerHTML = llmRolePasteDocs(activeId);
 }
 
 // Live role-card model tile: reflects the editor's current model while the
@@ -2969,13 +2994,9 @@ function llmSyncEditorGate(form, activeId) {
 }
 
 async function llmKeyPaste(form, provider) {
-  // The active paste block is whichever the picked provider card exposes: the
-  // host-login token block (oauth cards) or the role-bound key block (the
-  // custom "other" card). Only the visible block's input/feedback are touched.
-  const block =
-    form.querySelector("[data-oauth-paste]:not([hidden])") ||
-    form.querySelector("[data-custom-paste]:not([hidden])") ||
-    form;
+  // The active paste block is the single role-named module; only its
+  // input/feedback are touched.
+  const block = form.querySelector("[data-role-paste]") || form;
   const output = block.querySelector("[data-key-paste-feedback]");
   const input = block.querySelector('input[type="password"]');
   const token = input ? String(input.value || "").trim() : "";
@@ -2990,27 +3011,63 @@ async function llmKeyPaste(form, provider) {
   }
   if (output) output.innerHTML = '<span class="dim">storing key…</span>';
   try {
-    await api("/api/v1/llm/key", {
+    const body = await api("/api/v1/llm/key", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role, key: token }),
     });
     if (input) input.value = "";
-    if (block.hasAttribute("data-custom-paste")) {
-      // Pin the written reference into the key field so the probe and the save
-      // authenticate with the stored key instead of clearing it back to empty.
-      const envField = form.elements.api_key_env;
-      if (envField) envField.value = `secrets:mnemoseed/dream/${role}`;
-    }
-    if (output) output.innerHTML = '<span class="badge badge-ok">key stored</span>';
-  } catch (error) {
-    const cmd = provider ? LLM_OAUTH_LOGIN_CMD[provider] || `${provider} login` : "";
+    // Pin the written reference into the key field so the probe and the save
+    // authenticate with the stored key instead of clearing it back to empty.
+    const envField = form.elements.api_key_env;
+    if (envField) envField.value = `secrets:mnemoseed/dream/${role}`;
+    const tail = body && body.masked_tail ? String(body.masked_tail) : "";
     if (output) {
-      output.innerHTML =
-        provider && /HTTP (404|405|501|502)/.test(error.message)
-          ? errorInline(`key paste is not available on this daemon yet — run ${cmd} instead`)
-          : errorInline(`store failed: ${error.message}`);
+      output.innerHTML = `<span class="badge badge-ok">key stored — ****${esc(tail)}</span> <span class="dim">never shown again — only this masked tail. Deletable any time.</span>`;
     }
+    const delBtn = block.querySelector('[data-act="llm-key-delete"]');
+    if (delBtn) delBtn.hidden = false;
+  } catch (error) {
+    if (output) {
+      output.innerHTML = errorInline(`store failed: ${error.message}`);
+    }
+  }
+}
+
+// The delete counterpart (DELETE /api/v1/llm/key {role}): removes the stored
+// key + clears the pinned reference; the role falls back to its env chain.
+async function llmKeyDelete(form) {
+  const block = form.querySelector("[data-role-paste]") || form;
+  const output = block.querySelector("[data-key-paste-feedback]");
+  const role = form.dataset.role || "";
+  if (!role) {
+    if (output) output.innerHTML = errorInline("no role bound to this editor");
+    return;
+  }
+  if (output) output.innerHTML = '<span class="dim">deleting stored key…</span>';
+  try {
+    await api("/api/v1/llm/key", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role }),
+    });
+    // Clear the pinned reference back to the role's env-var chain default so a
+    // save after a delete authenticates against env vars again.
+    const envField = form.elements.api_key_env;
+    if (envField) {
+      const radio = form.querySelector('input[name="llm-provider"]:checked');
+      const activeId = radio ? radio.value : "";
+      const provider = String(activeId).startsWith("oauth:")
+        ? null
+        : llmProviderById(activeId);
+      envField.value =
+        provider && provider.keyEnv ? provider.keyEnv : LLM_ROLE_KEY_ENV[role] || "";
+    }
+    if (output) output.innerHTML = '<span class="badge badge-ok">key deleted — this route falls back to its env-var chain</span>';
+    const delBtn = block.querySelector('[data-act="llm-key-delete"]');
+    if (delBtn) delBtn.hidden = true;
+  } catch (error) {
+    if (output) output.innerHTML = errorInline(`delete failed: ${error.message}`);
   }
 }
 
@@ -3071,14 +3128,11 @@ function llmApplyEditorProvider(form, activeId, morphValues) {
       }
     }
   }
-  // JH: while the custom "other" card is picked, the ONLY paste surface is its
-  // role-bound key block; the host-login token paste stays scoped to the oauth
-  // cards (and vice versa — never both at once).
-  const isOther = Boolean(provider && provider.id === "other");
-  const oauthPaste = form.querySelector("[data-oauth-paste]");
-  if (oauthPaste) oauthPaste.hidden = isOther;
-  const customPaste = form.querySelector("[data-custom-paste]");
-  if (customPaste) customPaste.hidden = !isOther;
+  // The ONE role-named paste module serves every provider (including the oauth
+  // host-login "paste a token instead" path); it is hidden ONLY for ollama,
+  // which has no key. Never a per-provider paste surface.
+  const rolePaste = form.querySelector("[data-role-paste]");
+  if (rolePaste) rolePaste.hidden = Boolean(provider && provider.driver === "ollama");
   const endpointField = form.querySelector("[data-endpoint-field]");
   const urlInput = form.elements.base_url;
   if (endpointField) endpointField.hidden = isOAuth;
@@ -3105,9 +3159,11 @@ function llmKeyTeachingHtml(provider, role) {
   const keyEnv = provider.keyEnv || LLM_ROLE_KEY_ENV[role] || "";
   if (!keyEnv) return "";
   const where = provider.keyUrl ? `Create the key at ${provider.keyUrl}, then ` : "";
+  const keyNote = provider.keyNote ? `<p class="toolbar-note">${esc(provider.keyNote)}</p>` : "";
   return `<details class="key-teaching" data-key-teaching>
     <summary>Your key lives in an environment variable. MnemoSeed reads it from there — you never paste the key here and it is never stored.</summary>
     <p class="toolbar-note">${esc(where)}set ${esc(keyEnv)} — on macOS/Linux: export ${esc(keyEnv)}=…; on Windows: setx ${esc(keyEnv)} …. Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.</p>
+    ${keyNote}
   </details>`;
 }
 
@@ -3131,8 +3187,7 @@ function llmEditFormHtml(role, drivers) {
     <input type="hidden" name="driver" value="${isOAuth ? "" : esc(role.driver)}" />
     <h4>Which provider?</h4>
     <div class="filter-grid">${cards}</div>
-    ${llmOauthPasteHtml(state.llm.oauth, activeId)}
-    ${llmCustomPasteHtml(role.role)}
+    ${llmRolePasteHtml(role.role)}
     <div class="filter-grid">
       <div class="field"><label for="llm-model-${esc(role.role)}">model</label>
         <input type="text" id="llm-model-${esc(role.role)}" name="model" list="llm-models-${esc(role.role)}" value="${esc(modelValue)}" placeholder="type or pick a model" required autocomplete="off" />
@@ -3173,7 +3228,7 @@ function renderLLM() {
     if (form) {
       const activeId = llmActiveProviderId(state.llm.editingRole);
       llmApplyEditorProvider(form, activeId, false);
-      llmBindOauthPaste(form, activeId);
+      llmBindRolePaste(form, activeId);
       llmSyncEditorGate(form, activeId);
     }
   }
@@ -3494,6 +3549,11 @@ function handleClick(event) {
       if (editForm) llmKeyPaste(editForm, el.dataset.provider);
       break;
     }
+    case "llm-key-delete": {
+      const delForm = el.closest("form");
+      if (delForm) llmKeyDelete(delForm);
+      break;
+    }
     case "wz-next": {
       const wizard = state.llm.wizard;
       if (!wizard || !wizard.providerId) break;
@@ -3647,7 +3707,7 @@ function handleChange(event) {
       }
       updateModelTile(role);
     }
-    llmBindOauthPaste(form, target.value);
+    llmBindRolePaste(form, target.value);
     llmSyncEditorGate(form, target.value);
     return;
   }
