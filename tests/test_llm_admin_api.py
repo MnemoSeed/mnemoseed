@@ -502,6 +502,67 @@ def test_llm_test_unknown_driver_is_health_failure_not_422(tmp_path, monkeypatch
         assert "no_such_driver" in str(response.json()["detail"])
 
 
+class _AuthStubHandler(BaseHTTPRequestHandler):
+    """/models answers 200 only when the Bearer key matches the QA key."""
+
+    _KEY = "sk-stub-key-9012"
+
+    def do_GET(self) -> None:
+        if self.path == "/models":
+            if self.headers.get("Authorization") == f"Bearer {self._KEY}":
+                body = b'{"data": [{"id": "stub-model"}]}'
+                self.send_response(200)
+            else:
+                body = b'{"error": "unauthorized"}'
+                self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args) -> None:  # noqa: A002 - BaseHTTPRequestHandler signature
+        del format, args
+
+
+@pytest.fixture
+def stub_server_auth() -> str:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AuthStubHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield url
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_llm_test_omitted_key_source_uses_the_default_env_chain(
+    tmp_path, monkeypatch, stub_server_auth
+) -> None:
+    """POST /llm/test without api_key_env resolves the role's EFFECTIVE key
+    source (the loader-default env chain) instead of probing with no auth."""
+    monkeypatch.setenv("FIREWORKS_API_KEY", _AuthStubHandler._KEY)
+    with _client(tmp_path, monkeypatch) as client:
+        response = client.post(
+            "/api/v1/llm/test",
+            json={
+                "role": "deep_reflection",
+                "driver": "openai_compatible",
+                "model": "stub-model",
+                "base_url": stub_server_auth,
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["detail"]["models"] == ["stub-model"]
+
+
 # ---------------------------------------------------------------- credential hygiene
 
 

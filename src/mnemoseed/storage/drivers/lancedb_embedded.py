@@ -443,7 +443,9 @@ class LanceDbEmbeddedStore:
                 "total": float(chunk.score),
             },
             "decay_weight": float(chunk.decay_weight),
-            "last_reinforced": float(chunk.ingested_at),
+            "last_reinforced": float(
+                chunk.last_reinforced if chunk.last_reinforced is not None else chunk.ingested_at
+            ),
             "consolidated": bool(chunk.consolidated),
             "ingested_at": float(chunk.ingested_at),
             "peripheral_gaps": bool(emotion.peripheral_gaps) if emotion else False,
@@ -493,6 +495,7 @@ class LanceDbEmbeddedStore:
                 ],
             ),
             decay_weight=float(row["decay_weight"]),
+            last_reinforced=float(row["last_reinforced"]) if row.get("last_reinforced") is not None else None,
             score=float(score_row.get("total", 0.0)),
             consolidated=bool(row["consolidated"]),
             ingested_at=float(row["ingested_at"]),

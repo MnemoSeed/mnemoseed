@@ -35,7 +35,6 @@ _LLM_PROVIDERS: dict[str, dict[str, str]] = {
         "base_url": "https://api.fireworks.ai/inference/v1",
         "key_env": "FIREWORKS_API_KEY",
         "key_url": "https://app.fireworks.ai/settings/users/api-keys",
-        "key_prompt": "api key env var [FIREWORKS_API_KEY]:",
         "model_prompt": "model [accounts/fireworks/models/kimi-k3]:",
     },
     "2": {
@@ -45,7 +44,6 @@ _LLM_PROVIDERS: dict[str, dict[str, str]] = {
         "base_url": "https://openrouter.ai/api/v1",
         "key_env": "OPENROUTER_API_KEY",
         "key_url": "https://openrouter.ai/settings/keys",
-        "key_prompt": "api key env var [OPENROUTER_API_KEY]:",
         "model_prompt": "model:",
     },
     "3": {
@@ -55,7 +53,6 @@ _LLM_PROVIDERS: dict[str, dict[str, str]] = {
         "base_url": "https://api.anthropic.com",
         "key_env": "ANTHROPIC_API_KEY",
         "key_url": "https://platform.claude.com/settings/keys",
-        "key_prompt": "api key env var [ANTHROPIC_API_KEY]:",
         "model_prompt": "model:",
     },
     "4": {
@@ -65,7 +62,6 @@ _LLM_PROVIDERS: dict[str, dict[str, str]] = {
         "base_url": "http://localhost:11434",
         "key_env": "",
         "key_url": "",
-        "key_prompt": "",
         "model_prompt": "model [llama3.1:8b]:",
     },
     "5": {
@@ -75,7 +71,6 @@ _LLM_PROVIDERS: dict[str, dict[str, str]] = {
         "base_url": "",
         "key_env": "MNEMOSEED_DEEP_REFLECTION_API_KEY",
         "key_url": "",
-        "key_prompt": "api key env var [MNEMOSEED_DEEP_REFLECTION_API_KEY]:",
         "model_prompt": "model:",
     },
 }

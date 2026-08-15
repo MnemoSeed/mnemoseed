@@ -41,7 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from mnemoseed.config import CONFIG_PATH, LLM_ROLES, Config, DreamConfig, RoleLLMConfig
+from mnemoseed.config import CONFIG_PATH, LLM_ROLES, Config, DecayConfig, DreamConfig, RoleLLMConfig
+from mnemoseed.decay.model import LAMBDA_TARGETS
 from mnemoseed.secrets.refs import SECRETS_REF_RE, is_secrets_ref
 from mnemoseed.storage.ports import AuditEntry, ConfigEntry
 
@@ -107,6 +108,31 @@ def _validate_positive_float(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ValueError("must be a positive number")
     return float(value)
+
+
+def _validate_non_negative_float(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError("must be a non-negative number")
+    return float(value)
+
+
+def _validate_lambda_map(value: Any) -> dict[str, float]:
+    """The writable λ map (decay.lambda_per_type): an object whose keys are
+    frozen node types (or ``"chunk"``) and whose values are positive numbers.
+
+    Replace semantics: the incoming map IS the map; omitted types resolve to
+    their design default at sweep time (decay.model.lambda_for).
+    """
+    if not isinstance(value, dict):
+        raise ValueError("must be an object mapping node type to a positive number")
+    normalized: dict[str, float] = {}
+    for key, rate in value.items():
+        if not isinstance(key, str) or key not in LAMBDA_TARGETS:
+            raise ValueError(f"unknown memory type {key!r}")
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate <= 0:
+            raise ValueError(f"the rate for {key!r} must be a positive number")
+        normalized[key] = float(rate)
+    return normalized
 
 
 def _validate_optional_positive_int(value: Any) -> int | None:
@@ -176,6 +202,48 @@ def _dream_apply(config: Config, field: str, value: Any) -> None:
         raw_dream.pop(field, None)
     else:
         raw_dream[field] = value
+
+
+def _decay_apply(config: Config, field: str, value: Any) -> None:
+    """Replace the frozen DecayConfig and mirror the change into config.raw.
+
+    The decay module holds a live reference to this Config, so the write
+    hot-applies to the NEXT sweep without a restart (F2).
+    """
+    current = config.decay
+    if field == "enabled":
+        config.decay = DecayConfig(
+            enabled=bool(value),
+            sweep_interval_s=current.sweep_interval_s,
+            min_apply_delta=current.min_apply_delta,
+            lambda_per_type=current.lambda_per_type,
+        )
+    elif field == "sweep_interval_s":
+        config.decay = DecayConfig(
+            enabled=current.enabled,
+            sweep_interval_s=float(value),
+            min_apply_delta=current.min_apply_delta,
+            lambda_per_type=current.lambda_per_type,
+        )
+    elif field == "min_apply_delta":
+        config.decay = DecayConfig(
+            enabled=current.enabled,
+            sweep_interval_s=current.sweep_interval_s,
+            min_apply_delta=float(value),
+            lambda_per_type=current.lambda_per_type,
+        )
+    else:  # lambda_per_type (replace semantics, see _validate_lambda_map)
+        config.decay = DecayConfig(
+            enabled=current.enabled,
+            sweep_interval_s=current.sweep_interval_s,
+            min_apply_delta=current.min_apply_delta,
+            lambda_per_type=dict(value),
+        )
+    raw_decay = config.raw.setdefault("decay", {})
+    if value is None:
+        raw_decay.pop(field, None)
+    else:
+        raw_decay[field] = value
 
 
 def _role_apply(config: Config, role: str, field: str, value: Any) -> None:
@@ -256,6 +324,40 @@ CONFIG_KEY_REGISTRY: dict[str, ConfigKey] = {
         apply=lambda config, value: _dream_apply(config, "token_budget_usd", value),
         live_apply=True,
     ),
+    # Decay engine (PRD-04 FR-4.1 / design/01 stage ⑤): the sweep's tunables
+    # are live-applied — a λ edit reaches the NEXT sweep without a restart.
+    "decay.enabled": ConfigKey(
+        key_path="decay.enabled",
+        value_type="boolean",
+        validate=_validate_bool,
+        read=lambda config: config.decay.enabled,
+        apply=lambda config, value: _decay_apply(config, "enabled", value),
+        live_apply=True,
+    ),
+    "decay.sweep_interval_s": ConfigKey(
+        key_path="decay.sweep_interval_s",
+        value_type="positive number",
+        validate=_validate_positive_float,
+        read=lambda config: config.decay.sweep_interval_s,
+        apply=lambda config, value: _decay_apply(config, "sweep_interval_s", value),
+        live_apply=True,
+    ),
+    "decay.min_apply_delta": ConfigKey(
+        key_path="decay.min_apply_delta",
+        value_type="non-negative number",
+        validate=_validate_non_negative_float,
+        read=lambda config: config.decay.min_apply_delta,
+        apply=lambda config, value: _decay_apply(config, "min_apply_delta", value),
+        live_apply=True,
+    ),
+    "decay.lambda_per_type": ConfigKey(
+        key_path="decay.lambda_per_type",
+        value_type="node-type -> positive number map",
+        validate=_validate_lambda_map,
+        read=lambda config: config.decay.lambda_per_type,
+        apply=lambda config, value: _decay_apply(config, "lambda_per_type", value),
+        live_apply=True,
+    ),
 }
 for _role in LLM_ROLES:
     CONFIG_KEY_REGISTRY.update(_role_key_specs(_role))
@@ -328,6 +430,19 @@ def _toml_str(value: Any) -> str:
     return json.dumps(value)
 
 
+def _toml_value(value: Any) -> str:
+    """Encode a config value as a TOML literal.
+
+    Scalars reuse ``_toml_str``; mappings render as inline tables
+    (``{ "KEY" = value }`` — TOML uses ``=``, not JSON's ``:``), which is how
+    dict-valued keys like ``decay.lambda_per_type`` are patched.
+    """
+    if isinstance(value, dict):
+        inner = ", ".join(f"{json.dumps(key)} = {_toml_str(item)}" for key, item in value.items())
+        return "{" + inner + "}"
+    return _toml_str(value)
+
+
 def _inline_comment_index(line: str) -> int:
     """Index of the first ``#`` outside quotes (a trailing comment), else -1."""
     in_quotes = False
@@ -349,7 +464,30 @@ def _rewrite_value_line(line: str, leaf: str, value: Any) -> str:
     indent = line[: len(line) - len(line.lstrip())]
     comment_index = _inline_comment_index(line)
     suffix = line[comment_index:] if comment_index >= 0 else ""
-    return f"{indent}{leaf} = {_toml_str(value)}{suffix}"
+    return f"{indent}{leaf} = {_toml_value(value)}{suffix}"
+
+
+def _drop_nested_table(lines: list[str], table_path: str, leaf: str) -> list[str]:
+    """Remove a ``[<table_path>.<leaf>]`` sub-table block from a table body.
+
+    A dict-valued registry key (``decay.lambda_per_type``) is written as an
+    inline TOML table; a hand-written sub-table spelling of the same key would
+    then double-define it and fail the next load, so the stale block is dropped
+    before the inline line lands.
+    """
+    nested = f"{table_path}.{leaf}"
+    out: list[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if stripped[1:-1].strip() == nested:
+                skipping = True
+                continue
+            skipping = False
+        if not skipping:
+            out.append(line)
+    return out
 
 
 def _patch_toml(path: Path, key_path: str, value: Any) -> None:
@@ -358,10 +496,12 @@ def _patch_toml(path: Path, key_path: str, value: Any) -> None:
     ``value=None`` removes the key's line (a clear); anything else writes
     ``leaf = <literal>`` inside the key's table, rewriting an existing line in
     place (never duplicated) or creating the table after the last existing one.
+    A hand-written ``[<table_path>.<leaf>]`` sub-table spelling of the target
+    key is dropped first, so the inline form never double-defines it.
     """
     table_path, _, leaf = key_path.rpartition(".")
     original = path.read_text(encoding="utf-8") if path.exists() else ""
-    lines = original.split("\n")
+    lines = _drop_nested_table(original.split("\n"), table_path, leaf)
     spans = _table_spans(lines)
 
     if table_path in spans:
@@ -378,13 +518,13 @@ def _patch_toml(path: Path, key_path: str, value: Any) -> None:
                 continue
             new_body.append(line)
         if value is not None and not written:
-            new_body.append(f"{leaf} = {_toml_str(value)}")
+            new_body.append(f"{leaf} = {_toml_value(value)}")
         out = lines[: start + 1] + new_body + lines[end:]
     else:
         if value is None:
             return  # a clear with no table to edit writes nothing
         insert_at = max((finish for _, finish in spans.values()), default=len(lines))
-        block = [f"[{table_path}]", f"{leaf} = {_toml_str(value)}"]
+        block = [f"[{table_path}]", f"{leaf} = {_toml_value(value)}"]
         out = lines[:insert_at] + block + lines[insert_at:]
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,6 +598,12 @@ class ConfigWriteService:
                     "auto_trigger": self._config.dream.auto_trigger,
                     "token_budget_usd": self._config.dream.token_budget_usd,
                     "llm": {role: self._resolved_role(role) for role in LLM_ROLES},
+                },
+                "decay": {
+                    "enabled": self._config.decay.enabled,
+                    "sweep_interval_s": self._config.decay.sweep_interval_s,
+                    "min_apply_delta": self._config.decay.min_apply_delta,
+                    "lambda_per_type": dict(self._config.decay.lambda_per_type),
                 },
             },
             "restart_required": {},

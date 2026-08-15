@@ -1424,8 +1424,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_dream.set_defaults(func=cmd_dream)
     dream_sub = p_dream.add_subparsers(dest="dream_command")
     p_dream_status = dream_sub.add_parser("status", help="read the trigger state / pending queue")
-    p_dream_status.add_argument("--baseurl", default=None, help="daemon base URL (default: config baseurl)")
-    p_dream_status.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    # SUPPRESS default: the subparser shares the parent's namespace, so an
+    # absent --baseurl/--json here must not clobber a value the parent already
+    # parsed (`dream --baseurl X status`).
+    _add_rest_flags(p_dream_status, suppress_default=True)
     p_dream_status.set_defaults(func=cmd_dream)
 
     p_export = sub.add_parser(

@@ -11,6 +11,7 @@ C capability findings, and responds well under the 100ms NFR-8.1 budget.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -34,6 +35,7 @@ from mnemoseed.console import router as console_router
 from mnemoseed.daemon.ingest import router as ingest_router
 from mnemoseed.daemon.memory import MemoryService
 from mnemoseed.daemon.memory import router as memory_router
+from mnemoseed.decay import DecaySweeper
 from mnemoseed.dream import (
     DreamPipeline,
     DreamTrigger,
@@ -58,7 +60,7 @@ from mnemoseed.llm.types import (
 )
 from mnemoseed.schema.stamp import CognitiveTier
 from mnemoseed.schema.turn import Turn
-from mnemoseed.secrets import FileSecretStore
+from mnemoseed.secrets import SecretStore, default_secret_store
 from mnemoseed.storage.factory import Stores, build_stores
 from mnemoseed.storage.ports import CapabilityIssue, GraphStore
 
@@ -219,7 +221,7 @@ class _DreamRelay:
 
 
 def _build_capture(
-    stores: Stores, config: Config, configwrite: ConfigWriteService, secrets: FileSecretStore
+    stores: Stores, config: Config, configwrite: ConfigWriteService, secrets: SecretStore
 ) -> tuple[WritingPipeline, DreamTrigger, DreamPipeline, _DreamRelay, RoleRouter]:
     """Serving capture funnel: strip -> score -> pool -> stamp/write over the
     resolved storage stack. /ingest stays submit-only; the funnel drains on
@@ -336,7 +338,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # home's secrets/ subdirectory. The store lives on the app state so the
     # role router and the LLM admin/key surfaces share one instance.
     secrets_home = config.source.parent if config.source is not None else CONFIG_DIR
-    app.state.secrets = FileSecretStore(secrets_home)
+    app.state.secrets = default_secret_store(secrets_home)
     # ConfigWriteService (PRD-07 FR-7.11 / design/07 section 9): the daemon's
     # single config writer behind every console/CLI settings change. It is
     # created BEFORE the serving funnel because the funnel consumes its F2
@@ -375,6 +377,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.llm_admin = LLMAdminService(
         config, stores.meta, configwrite=app.state.configwrite, secrets=app.state.secrets
     )
+    # Decay sweep (PRD-04 FR-4.1 / FR-4.4): the daemon-owned background loop
+    # over the live config (λ / interval / enabled re-read each tick, so a
+    # configwrite change hot-applies to the next sweep). It runs only when
+    # decay.enabled; the task is cancelled and joined in teardown before the
+    # stores close, and the per-profile resume cursor keeps a crash-safe
+    # catch-up on the next boot.
+    app.state.decay = DecaySweeper(stores, config)
+    # The task exists regardless of the boot-time flag: run_once no-ops while
+    # disabled, so a configwrite enable flips it LIVE on the next tick without
+    # a daemon restart (interval/λ re-read each tick either way).
+    app.state.decay_task = asyncio.create_task(app.state.decay.run_forever())
     app.state.health = HealthSnapshot(
         started_at=time.perf_counter(),
         preset=config.preset,
@@ -390,6 +403,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         for deg in stores.report.missing:
             logger.warning("degraded: %s - %s", deg.feature, deg.behavior)
     yield
+    # Stop the decay sweep before the stores close: the loop owns store handles
+    # on this thread and must be joined first (lifecycle order).
+    decay_task: asyncio.Task[None] | None = app.state.decay_task
+    if decay_task is not None:
+        decay_task.cancel()
+        try:
+            await decay_task
+        except asyncio.CancelledError:
+            pass
     # Close the memory engine before the stores: the retrieval executor's
     # worker threads own sqlite handles and must join first (lifecycle fix).
     app.state.memory.close()

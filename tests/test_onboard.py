@@ -465,3 +465,23 @@ def test_onboard_doctor_failure_prints_fix_and_fails(tmp_path, monkeypatch, caps
     assert code == 1
     assert "unreachable" in captured.out
     assert "mnemoseed up" in captured.out
+
+
+def test_provider_catalog_has_no_dead_key_prompt_field() -> None:
+    """The LLM wizard's provider catalog carries no dead ``key_prompt`` field:
+    the paste-key flow superseded it, so no entry may read it and the catalog
+    shape (driver/provider/name/base_url/key_env/key_url/model_prompt) stays."""
+    from mnemoseed.onboard.service import _LLM_PROVIDERS
+
+    assert _LLM_PROVIDERS
+    for meta in _LLM_PROVIDERS.values():
+        assert "key_prompt" not in meta
+        assert set(meta) == {
+            "driver",
+            "provider",
+            "name",
+            "base_url",
+            "key_env",
+            "key_url",
+            "model_prompt",
+        }

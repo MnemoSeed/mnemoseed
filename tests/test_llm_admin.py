@@ -29,6 +29,7 @@ import pytest
 from mnemoseed.config import DEFAULT_LLM_ROUTES, LLM_ROLES, load_config
 from mnemoseed.llm.admin import LLMAdminError, LLMAdminService
 from mnemoseed.llm.registry import LLM_DRIVERS, register
+from mnemoseed.secrets import FileSecretStore
 
 _TOKEN_CODE = "sk-ultra-secret-codex-value"
 _TOKEN_GROK = "gk-ultra-secret-grok-value"
@@ -417,3 +418,115 @@ def test_test_config_unknown_driver_returns_failed_health(tmp_path) -> None:
 def test_test_config_never_raises_for_unknown_role(tmp_path) -> None:
     report = _service(tmp_path).test_config(role="no_such_role", driver="stub", model="m")
     assert report.ok is False
+
+
+# ---------------------------------------------------------------- probe key-source fallback
+
+
+class _AuthStubHandler(BaseHTTPRequestHandler):
+    """/models answers 200 only when the Bearer key matches the QA key."""
+
+    _KEY = "sk-stub-key-9012"
+
+    def do_GET(self) -> None:
+        if self.path == "/models":
+            if self.headers.get("Authorization") == f"Bearer {self._KEY}":
+                body = b'{"data": [{"id": "stub-model"}]}'
+                self.send_response(200)
+            else:
+                body = b'{"error": "unauthorized"}'
+                self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args) -> None:  # noqa: A002 - BaseHTTPRequestHandler signature
+        del format, args
+
+
+@pytest.fixture
+def stub_server_auth() -> str:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AuthStubHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield url
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_test_config_omitted_key_source_resolves_the_default_env_chain(tmp_path, stub_server_auth) -> None:
+    """A probe whose payload omits api_key_env must resolve the route's
+    EFFECTIVE key source — here the loader-default env chain, the role pins no
+    explicit source — instead of probing with no auth."""
+    service = _service(
+        tmp_path,
+        env=lambda name: _AuthStubHandler._KEY if name == "FIREWORKS_API_KEY" else None,
+    )
+    report = service.test_config(
+        role="deep_reflection",
+        driver="openai_compatible",
+        model="stub-model",
+        base_url=stub_server_auth,
+    )
+    assert report.ok is True
+    assert report.detail["models"] == ["stub-model"]
+
+
+def test_test_config_omitted_key_source_reads_the_secret_store(tmp_path, stub_server_auth) -> None:
+    """A role whose effective key source is a ``secrets:`` reference probes with
+    the stored value when api_key_env is omitted (the reference resolves through
+    the SecretStore port, exactly like a live route resolve)."""
+    store = FileSecretStore(tmp_path / "secrets-home")
+    store.set("mnemoseed/dream/deep_reflection", _AuthStubHandler._KEY)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        'preset = "embedded"\n'
+        "[dream.llm.deep_reflection]\n"
+        'driver = "stub"\n'
+        'model = "stub"\n'
+        'api_key_env = "secrets:mnemoseed/dream/deep_reflection"\n'
+        "[dream.llm.short_increment]\n"
+        'driver = "stub"\n'
+        'model = "stub"\n',
+        encoding="utf-8",
+    )
+    service = LLMAdminService(
+        load_config(config_path),
+        meta=None,
+        clock=lambda: 1_700_000_000.0,
+        secrets=store,
+    )
+    report = service.test_config(
+        role="deep_reflection",
+        driver="openai_compatible",
+        model="stub-model",
+        base_url=stub_server_auth,
+    )
+    assert report.ok is True
+    assert report.detail["models"] == ["stub-model"]
+
+
+def test_test_config_explicit_clear_still_probes_without_auth(tmp_path, stub_server_auth) -> None:
+    """An EXPLICIT api_key_env="" is a clear, not an omit: the probe stays
+    unauthenticated even when the effective source would carry a key."""
+    service = _service(
+        tmp_path,
+        env=lambda name: _AuthStubHandler._KEY if name == "FIREWORKS_API_KEY" else None,
+    )
+    report = service.test_config(
+        role="deep_reflection",
+        driver="openai_compatible",
+        model="stub-model",
+        base_url=stub_server_auth,
+        api_key_env="",
+    )
+    assert report.ok is False
+    assert "401" in str(report.detail)

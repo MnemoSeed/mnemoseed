@@ -52,6 +52,13 @@ _REF_DEEP = "secrets:mnemoseed/dream/deep_reflection"
 
 
 @pytest.fixture(autouse=True)
+def _force_file_secret_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """File-path assertions here require the file backend in head — force it
+    (keychain-capable machines would otherwise chain to the OS keyring)."""
+    monkeypatch.setenv("MNEMOSEED_SECRET_BACKEND", "file")
+
+
+@pytest.fixture(autouse=True)
 def _ensure_real_drivers():
     """test_daemon clears the shared registries; re-register the real drivers."""
     for registry, cls in (

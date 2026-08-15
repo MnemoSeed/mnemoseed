@@ -363,7 +363,6 @@ def test_onboard_llm_step_verbatim_copy(service: str) -> None:
         "4) Ollama on this computer",
         "5) other OpenAI-compatible",
         "provider [1]:",
-        "api key env var [FIREWORKS_API_KEY]:",
         "model [accounts/fireworks/models/kimi-k3]:",
         (
             "Paste your API key now — stored locally under ~/.mnemoseed/secrets, "

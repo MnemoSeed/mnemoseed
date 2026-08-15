@@ -14,7 +14,12 @@ identity gate like the console surface:
 - POST   /api/v1/llm/test               run a proposed route's check() so the
                                         console test buttons probe before writing
                                         anything (FR-6.9); a failed probe is a
-                                        typed result, never a 422.
+                                        typed result, never a 422. An omitted
+                                        api_key_env resolves the route's
+                                        EFFECTIVE key source (secrets: reference
+                                        -> env chain -> model default chain), so
+                                        the probe authenticates like a live
+                                        resolve instead of probing with no auth.
 - POST   /api/v1/llm/key                 {role, key} -> store the key under the
                                         config dir + pin the ``secrets:``
                                         reference (versioned + audited); answers
@@ -88,7 +93,9 @@ class RouteTestRequest(BaseModel):
     """A proposed route to probe -- never written, so the test buttons answer
     before a change is persisted (FR-6.9). Omitted fields are merged against
     the current route server-side, so a partial probe arms the exact signature
-    a partial persist will be checked against."""
+    a partial persist will be checked against. An omitted api_key_env resolves
+    the route's EFFECTIVE key source instead of probing with no auth; an
+    explicit "" clears the key for the probe."""
 
     model_config = {"extra": "forbid"}
 

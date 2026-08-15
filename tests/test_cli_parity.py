@@ -303,6 +303,69 @@ def test_dream_status_gets_trigger_state(tmp_path, monkeypatch, capsys) -> None:
     assert call["params"] == {"profile_id": "default"}
 
 
+def test_dream_baseurl_works_in_both_positions_around_status(tmp_path, monkeypatch, capsys) -> None:
+    """--baseurl parses in BOTH positions around the status subcommand and is
+    never clobbered by the subparser's own default (SUPPRESS pattern). A flag
+    value distinct from the session baseurl proves which one reached the wire."""
+    OTHER_URL = "http://localhost:9191"
+    _env(tmp_path, monkeypatch, session=_session())
+    daemon = FakeDaemon()
+    daemon.on(
+        "GET",
+        f"{OTHER_URL}/api/v1/dream/status?profile_id=default",
+        body={"profile_id": "default", "state": "idle", "pending_manual": 0, "queue_depth": 0},
+    )
+    daemon.install(monkeypatch)
+    code = main(["dream", "status", "--baseurl", OTHER_URL])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "idle" in captured.out
+    assert daemon.calls[0]["url"].startswith(f"{OTHER_URL}/api/v1/dream/status")
+
+    code = main(["dream", "--baseurl", OTHER_URL, "status"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "idle" in captured.out
+    assert daemon.calls[1]["url"].startswith(f"{OTHER_URL}/api/v1/dream/status")
+
+
+def test_dream_once_baseurl_parses_in_both_flag_positions(tmp_path, monkeypatch, capsys) -> None:
+    """--baseurl works in both flag orders for `dream --once` (no subcommand)."""
+    OTHER_URL = "http://localhost:9191"
+    _env(tmp_path, monkeypatch, session=_session())
+    daemon = FakeDaemon()
+    daemon.on("POST", f"{OTHER_URL}/api/v1/dream/once", body={"launched": True, "state": "dreaming"})
+    daemon.install(monkeypatch)
+    code = main(["dream", "--once", "--baseurl", OTHER_URL])
+    assert code == 0
+    assert daemon.calls[0]["url"].startswith(f"{OTHER_URL}/api/v1/dream/once")
+    code = main(["dream", "--baseurl", OTHER_URL, "--once"])
+    assert code == 0
+    assert daemon.calls[1]["url"].startswith(f"{OTHER_URL}/api/v1/dream/once")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["recall", "--baseurl", "http://x", "hello"],
+        ["remember", "--baseurl", "http://x", "fact"],
+        ["forget", "--baseurl", "http://x", "node1"],
+        ["pin", "--baseurl", "http://x", "node1"],
+        ["weight", "--baseurl", "http://x", "node1", "0.5"],
+        ["audit", "--baseurl", "http://x"],
+        ["export", "--baseurl", "http://x"],
+        ["diff", "--baseurl", "http://x", "node1"],
+    ],
+)
+def test_sibling_verbs_accept_baseurl_without_clobber(argv) -> None:
+    """Every rest-facing sibling verb parses --baseurl and keeps the value
+    (none of them nests a second --baseurl-bearing subparser)."""
+    from mnemoseed.cli import build_parser
+
+    namespace = build_parser().parse_args(argv)
+    assert namespace.baseurl == "http://x"
+
+
 def test_export_posts_memory_export_and_prints_summary(tmp_path, monkeypatch, capsys) -> None:
     _env(tmp_path, monkeypatch, session=_session())
     daemon = FakeDaemon()

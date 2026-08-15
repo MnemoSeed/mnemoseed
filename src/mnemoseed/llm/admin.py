@@ -376,9 +376,12 @@ class LLMAdminService:
 
         Omitted fields are merged server-side against the current route (the
         same merge ``set_role`` persists), so a partial probe arms exactly the
-        signature a partial set will be checked against. Never raises (returns
-        a failed HealthReport instead) so the console test buttons always
-        render a typed inline result.
+        signature a partial set will be checked against. An omitted
+        ``api_key_env`` resolves the route's EFFECTIVE key source (secrets
+        reference, env chain, or the loader-default chain) so the probe never
+        authenticates worse than a live resolve. Never raises (returns a
+        failed HealthReport instead) so the console test buttons always render
+        a typed inline result.
         """
         if role == LEGACY_LOCAL_TRACK_ROLE:
             return HealthReport(ok=False, detail={"error": LOCAL_TRACK_DEPRECATION})
@@ -406,10 +409,18 @@ class LLMAdminService:
                 params[name] = value
         # A proposed KEY is referenced by env-var NAME or a secrets:
         # reference; resolve it exactly like the role router does (never a
-        # value over the wire).
+        # value over the wire). When the probe payload OMITS api_key_env (and
+        # the explicit table pins nothing either), fall back to the role's
+        # EFFECTIVE key source — a secrets: reference, an env chain, or the
+        # loader-default env chain — so a partial probe authenticates exactly
+        # like a live resolve instead of probing with no auth. An explicit ""
+        # is a clear, not an omit: the probe stays unauthenticated.
+        key_source: Any = table.get("api_key_env")
+        if not key_source and api_key_env is None:
+            key_source = self._config.llm[role].params.get("api_key_env")
         api_key = ""
-        if table.get("api_key_env"):
-            key_source = str(table["api_key_env"])
+        if key_source:
+            key_source = str(key_source)
             if is_secrets_ref(key_source):
                 secret_key = secret_name_from_ref(key_source)
                 if secret_key and self._secrets is not None:

@@ -82,6 +82,10 @@ class ChunkStamp(BaseModel):
     cues: Cues = Field(default_factory=Cues)
     provenance: Provenance
     decay_weight: float = Field(default=1.0, ge=0.0, le=1.0)
+    last_reinforced: float | None = Field(
+        default=None,
+        description="most recent reinforcement epoch; None falls back to ingested_at",
+    )
     score: float = 0.0  # capture-time salience score
     consolidated: bool = False  # pinned after dream-engine write-back
     ingested_at: float = Field(default_factory=time.time)
