@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from mnemoseed.decay.model import (
+    CONSOLIDATED_LAMBDA_MULTIPLIER,
     DEFAULT_LAMBDA_PER_TYPE,
     LAMBDA_TARGETS,
     decay_weight,
@@ -115,3 +116,21 @@ def test_lambda_for_resolves_override_then_default_fallback() -> None:
     assert lambda_for("chunk", {}) == pytest.approx(0.03)
     assert lambda_for("USER", {"chunk": 0.5}) == pytest.approx(0.01)
     assert lambda_for("ANIMA", {}) == pytest.approx(0.005)
+
+
+def test_lambda_for_consolidated_chunk_multiplies_by_three() -> None:
+    """design/03 §4: a consolidated chunk (post-dream merge marker) decays at
+    3x its type rate — the gist lives in the graph, the evidence scene fades
+    fast. The multiplier applies on top of the resolved base λ."""
+    assert CONSOLIDATED_LAMBDA_MULTIPLIER == pytest.approx(3.0)
+    assert lambda_for("chunk", {}, consolidated=True) == pytest.approx(0.03 * 3.0)
+    assert lambda_for("chunk", {"chunk": 0.05}, consolidated=True) == pytest.approx(0.05 * 3.0)
+
+
+def test_lambda_for_consolidated_scales_any_resolved_rate() -> None:
+    """The consolidated marker scales whatever base rate resolved (default or
+    override); the sweep only ever passes it for the ``chunk`` pseudo-type
+    (design/03 §4), but the rule itself is type-agnostic."""
+    assert lambda_for("chunk", {}, consolidated=False) == pytest.approx(0.03)
+    assert lambda_for("PREFERENCE", {}, consolidated=True) == pytest.approx(0.005 * 3.0)
+    assert lambda_for("EPISODE", {"EPISODE": 0.02}, consolidated=True) == pytest.approx(0.06)

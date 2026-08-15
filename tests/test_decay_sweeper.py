@@ -122,6 +122,7 @@ def _chunk(
     last_reinforced: float | None = None,
     confidence: float = 1.0,
     decay_weight: float = 1.0,
+    consolidated: bool = False,
 ) -> ChunkStamp:
     return ChunkStamp(
         chunk_id=chunk_id,
@@ -134,6 +135,7 @@ def _chunk(
         decay_weight=decay_weight,
         ingested_at=ingested_at,
         last_reinforced=last_reinforced,
+        consolidated=consolidated,
     )
 
 
@@ -209,6 +211,30 @@ def test_sweep_uses_last_reinforced_baseline_over_ingested_at(
     sweeper.run_once()
     expected = math.exp(-0.03 * 30.0)
     assert stores.vector.get_chunk("r").decay_weight == pytest.approx(expected, abs=1e-6)
+
+
+def test_sweep_consolidated_chunks_decay_three_times_faster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """design/03 §4: a consolidated chunk (post-dream merge marker) decays at
+    3x the chunk λ — the evidence scene's value diminishes once the gist is in
+    the graph; an unconsolidated sibling follows the base chunk rate."""
+    config, stores = _stack(tmp_path, monkeypatch)
+    _seed_profile(stores)
+    now = 1_800_000_000.0
+    clock = [now]
+    sweeper = DecaySweeper(stores, config, clock=lambda: clock[0])
+    _seed_chunk(stores, _chunk("plain", ingested_at=now - 60 * _DAY))
+    _seed_chunk(stores, _chunk("merged", ingested_at=now - 60 * _DAY, consolidated=True))
+
+    stats = sweeper.run_once()
+
+    assert stores.vector.get_chunk("plain").decay_weight == pytest.approx(math.exp(-0.03 * 60.0), abs=1e-6)
+    assert stores.vector.get_chunk("merged").decay_weight == pytest.approx(
+        math.exp(-0.03 * 3.0 * 60.0), abs=1e-6
+    )
+    assert stats[0].chunks_scanned == 2
+    assert stats[0].chunks_updated == 2
 
 
 def test_sweep_never_decays_pinned_nodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

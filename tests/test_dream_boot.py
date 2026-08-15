@@ -210,9 +210,10 @@ def test_boot_crash_after_snapshot_reflects_merges_purges_and_preserves_overflow
         assert _BootCountingStub.count == 1
         assert trigger.status(_PROFILE).state is DreamState.IDLE
         assert trigger.status(_PROFILE).current_range is None
-        # the covered scope was purged; the overflow chunk survived
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None
+        # the covered scope was marked consolidated; the overflow chunk survived
+        assert client.app.state.stores.vector.get_chunk("seed-1").consolidated is True
         assert client.app.state.stores.vector.get_chunk("seed-2") is not None
+        assert client.app.state.stores.vector.get_chunk("seed-2").consolidated is False
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
 
     rows = _graph_rows(tmp_path / "cortex.db")
@@ -268,7 +269,7 @@ def test_boot_crash_after_reflect_resumes_at_merge_never_reruns_reflect(
         trigger = client.app.state.dream
         assert _BootCountingStub.count == 0  # reflect NEVER re-ran across the restart
         assert trigger.status(_PROFILE).state is DreamState.IDLE
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None  # purged exactly once
+        assert client.app.state.stores.vector.get_chunk("seed-1").consolidated is True  # marked once
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
 
     rows = _graph_rows(tmp_path / "cortex.db")
@@ -336,7 +337,9 @@ def test_boot_crash_between_merge_commit_and_journal_termination_reinforces_once
         trigger = client.app.state.dream
         assert _BootCountingStub.count == 0  # merge-boundary, reflect not re-run
         assert trigger.status(_PROFILE).state is DreamState.IDLE
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None  # safe-clear fired once
+        assert (
+            client.app.state.stores.vector.get_chunk("seed-1").consolidated is True
+        )  # safe-clear fired once
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
 
     rows = _graph_rows(tmp_path / "cortex.db")

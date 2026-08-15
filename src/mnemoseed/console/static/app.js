@@ -1091,6 +1091,7 @@ function parseRoute() {
     return { name: "detail", type: bits[1] || null, id: decodeURIComponent(bits[2] || "") };
   }
   if (hash.startsWith("/browse")) return { name: "browse" };
+  if (hash.startsWith("/graph")) return { name: "graph" };
   if (hash.startsWith("/review")) return { name: "review" };
   if (hash.startsWith("/conflicts")) return { name: "conflicts" };
   if (hash.startsWith("/profiles")) return { name: "profiles" };
@@ -1132,6 +1133,7 @@ function render() {
     return;
   }
   const route = parseRoute();
+  if (route.name !== "graph") disposeGraphView();
   updateNav(route.name === "detail" ? "browse" : route.name);
   document.title = route.name === "detail" ? "MnemoSeed console — detail" : "MnemoSeed console";
   clearAutoRefresh();
@@ -1143,6 +1145,9 @@ function render() {
   } else if (route.name === "browse") {
     renderBrowseShell();
     loadBrowse();
+  } else if (route.name === "graph") {
+    view.innerHTML = '<p class="loading">Loading graph…</p>';
+    loadGraph();
   } else if (route.name === "review") {
     view.innerHTML = '<p class="loading">Loading dream review…</p>';
     loadReview();
@@ -3633,6 +3638,913 @@ function handleSubmit(event) {
   } else if (form.dataset && form.dataset.authForm === "login") {
     event.preventDefault();
     submitLogin(form);
+  }
+}
+
+// ---------------------------------------------------------------- graph view (④ FR-7.8)
+// Hand-rolled three.js instanced layer (design/07 §4, approved 2026-08-12):
+// one THREE.Points custom-shader draw for nodes, one InstancedMesh of quads
+// for edges, canvas-sprite labels for the top-60 centrality nodes, Raycaster
+// picking, precomputed clustered layout — no runtime force simulation. The
+// three.js build is VENDORED under /console/vendor (never a CDN). Node
+// opacity = decay_weight, color = type, size = centrality, edge thickness =
+// weight; filters profile/type/time/Tier; click → Memory Detail.
+const GRAPH_TYPE_RGB = {
+  PREFERENCE: [0x34, 0xd3, 0x99],
+  HABIT: [0x2d, 0xd4, 0xbf],
+  EPISODE: [0x60, 0xa5, 0xfa],
+  SKILL_SEQUENCE: [0xfb, 0x92, 0x3c],
+  DECISION: [0xa7, 0x8b, 0xfa],
+  INTENTION: [0xf8, 0x71, 0x71],
+  CONSTRAINT: [0xf4, 0xbf, 0x4f],
+  ANIMA: [0xf0, 0x62, 0x92],
+  USER: [0x8b, 0xd3, 0xc7],
+  PROJECT: [0x5a, 0xc8, 0xfa],
+  TOOL: [0xc0, 0x9c, 0x8c],
+};
+
+const GRAPH_STATE = {
+  data: null, // { nodes, edges, byId, centrality, positions }
+  handle: null, // buildGraphScene handle (scene, renderer, cleanup, ...)
+  typeCounts: new Map(),
+  typeFilter: "",
+  tierFilter: "",
+  timeFilter: "all",
+  kinds: new Set(["relation", "cooccurrence"]),
+  degraded: false,
+  notice: null,
+  three: null,
+  scene: null,
+  camera: null,
+  renderer: null,
+  points: null,
+  edgeMesh: null,
+  labels: null,
+  controls: null,
+  cleanup: null,
+};
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function sleepGraph(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function graphCentrality(nodes, edges) {
+  // Degree centrality, normalized to [0,1] (appendix B.2: no standalone
+  // centrality query in M0 — the console derives it from the edge set).
+  const counts = new Map();
+  for (const n of nodes) counts.set(n.node_id, 0);
+  for (const e of edges) {
+    counts.set(e.src, (counts.get(e.src) || 0) + 1);
+    counts.set(e.dst, (counts.get(e.dst) || 0) + 1);
+  }
+  let max = 1;
+  for (const value of counts.values()) if (value > max) max = value;
+  const centrality = new Map();
+  for (const [id, value] of counts) centrality.set(id, value / max);
+  return centrality;
+}
+
+function graphLayout(nodes, centrality) {
+  // Precomputed clustered layout: communities are (node type, tier) groups,
+  // group centers sit on a golden-spiral sphere, members jitter around their
+  // center with a seeded PRNG (deterministic for the same data). Cheap: one
+  // O(n) pass, no force simulation at runtime.
+  const groups = new Map();
+  for (const n of nodes) {
+    const key = `${n.node_type}|${n.cognitive_tier}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(n);
+  }
+  const groupList = [...groups.values()];
+  const groupCount = groupList.length;
+  const WORLD_RADIUS = 260;
+  const GROUP_RADIUS = 72;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const centers = [];
+  for (let i = 0; i < groupCount; i++) {
+    const y = 1 - (i / Math.max(1, groupCount - 1)) * 2;
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = golden * i;
+    centers.push({
+      x: WORLD_RADIUS * r * Math.cos(theta),
+      y: WORLD_RADIUS * y,
+      z: WORLD_RADIUS * r * Math.sin(theta),
+    });
+  }
+  const rng = mulberry32(42);
+  const positions = new Map();
+  groupList.forEach((members, groupIndex) => {
+    const c = centers[groupIndex];
+    for (const n of members) {
+      const hubPull = (centrality.get(n.node_id) || 0) > 0.5 ? 0.45 : 1;
+      const ring = Math.sqrt(rng()) * GROUP_RADIUS * 0.9 * hubPull;
+      const angle = rng() * Math.PI * 2;
+      const jitter = (rng() * 2 - 1) * 10;
+      positions.set(n.node_id, {
+        x: c.x + Math.cos(angle) * ring + jitter,
+        y: c.y + (rng() * 2 - 1) * GROUP_RADIUS * 0.4 * hubPull,
+        z: c.z + Math.sin(angle) * ring + jitter,
+      });
+    }
+  });
+  return positions;
+}
+
+function graphLabel(node) {
+  return `${node.statement}${node.conflict_flag ? " ⚠" : ""}`;
+}
+
+async function loadGraph() {
+  const profileId = await ensureProfile();
+  const view = document.getElementById("view");
+  if (!profileId) {
+    view.innerHTML = errorPanel("No profile selected — pick one in the header.");
+    return;
+  }
+  const params = new URLSearchParams(location.search);
+  if (params.has("perf")) {
+    view.innerHTML = '<p class="loading">Running graph perf bench…</p>';
+    runGraphPerf(view);
+    return;
+  }
+  try {
+    const nodes = [];
+    const edges = [];
+    const base = `/api/v1/graph/subgraph?profile_id=${encodeURIComponent(profileId)}&limit=2000`;
+    const first = await api(base);
+    nodes.push(...first.nodes);
+    edges.push(...first.edges);
+    GRAPH_STATE.degraded = Boolean(first.degraded);
+    GRAPH_STATE.notice = first.notice || null;
+    let offset = first.paging.limit;
+    while (offset < first.paging.total) {
+      const page = await api(`${base}&offset=${offset}`);
+      edges.push(...page.edges);
+      if (page.edges.length === 0) break;
+      offset += page.paging.limit;
+    }
+    renderGraph(view, { nodes, edges });
+  } catch (error) {
+    view.innerHTML = errorPanel(`Graph unavailable: ${error.message}`);
+  }
+}
+
+function graphShellHtml(meta) {
+  const typeOptions = ["", ...meta.types].map(
+    (t) => `<option value="${esc(t)}" ${t === GRAPH_STATE.typeFilter ? "selected" : ""}>${t ? esc(t) : "all types"}</option>`
+  ).join("");
+  const tierOptions = ["", "1", "2", "3"].map(
+    (t) => `<option value="${t}" ${t === GRAPH_STATE.tierFilter ? "selected" : ""}>${t ? `Tier ${t}` : "all tiers"}</option>`
+  ).join("");
+  const kinds = ["relation", "cooccurrence"].map(
+    (k) =>
+      `<label class="check-row"><input type="checkbox" data-graph-filter="kind" value="${k}" ${GRAPH_STATE.kinds.has(k) ? "checked" : ""} /> ${k}</label>`
+  ).join("");
+  return `<section class="graph-shell">
+    <div class="graph-toolbar">
+      <span class="graph-title">memory graph</span>
+      <span class="graph-count">${fmtNum(meta.nodes)} nodes · ${fmtNum(meta.edges)} edges</span>
+      <button class="btn" type="button" data-act="graph-refresh">Refresh</button>
+      <button class="btn" type="button" data-act="graph-fit">Fit view</button>
+    </div>
+    <div class="graph-filters">
+      <label class="graph-filter-label">type
+        <select data-graph-filter="type">${typeOptions}</select>
+      </label>
+      <label class="graph-filter-label">tier
+        <select data-graph-filter="tier">${tierOptions}</select>
+      </label>
+      <label class="graph-filter-label">time
+        <select data-graph-filter="time">
+          <option value="all" ${GRAPH_STATE.timeFilter === "all" ? "selected" : ""}>all time</option>
+          <option value="30" ${GRAPH_STATE.timeFilter === "30" ? "selected" : ""}>last 30 days</option>
+          <option value="90" ${GRAPH_STATE.timeFilter === "90" ? "selected" : ""}>last 90 days</option>
+          <option value="365" ${GRAPH_STATE.timeFilter === "365" ? "selected" : ""}>last year</option>
+          <option value="old" ${GRAPH_STATE.timeFilter === "old" ? "selected" : ""}>older than a year</option>
+        </select>
+      </label>
+      <span class="graph-filter-label">edges ${kinds}</span>
+    </div>
+    <div class="graph-notice" id="graph-notice" hidden></div>
+    <div class="graph-layout">
+      <div id="graph-stage" class="graph-stage"></div>
+      <aside class="graph-detail" id="graph-detail" hidden></aside>
+    </div>
+    <div class="graph-legend" id="graph-legend"></div>
+  </section>`;
+}
+
+function graphPerfShellHtml() {
+  return `<section class="graph-shell">
+    <div class="graph-perf-hud" id="graph-perf-hud">warming up…</div>
+    <div id="graph-stage" class="graph-stage"></div>
+  </section>`;
+}
+
+function graphMeta(data) {
+  const types = new Set();
+  const typeCounts = new Map();
+  for (const n of data.nodes) {
+    types.add(n.node_type);
+    typeCounts.set(n.node_type, (typeCounts.get(n.node_type) || 0) + 1);
+  }
+  return {
+    nodes: data.nodes.length,
+    edges: data.edges.length,
+    types: [...types].sort(),
+    typeCounts,
+  };
+}
+
+async function renderGraph(view, data) {
+  const THREE = await import("/console/vendor/three.module.js");
+  GRAPH_STATE.three = THREE;
+  if (!data.nodes.length) {
+    view.innerHTML =
+      '<p class="loading">No long-term memories yet — captured sessions consolidate into graph nodes after a dream run.</p>';
+    return;
+  }
+  const meta = graphMeta(data);
+  GRAPH_STATE.typeCounts = meta.typeCounts;
+  const centrality = graphCentrality(data.nodes, data.edges);
+  GRAPH_STATE.data = {
+    nodes: data.nodes,
+    edges: data.edges,
+    byId: new Map(data.nodes.map((n) => [n.node_id, n])),
+    centrality,
+    positions: graphLayout(data.nodes, centrality),
+  };
+  view.innerHTML = graphShellHtml(meta);
+  const notice = view.querySelector("#graph-notice");
+  if (GRAPH_STATE.degraded && notice) {
+    notice.textContent = GRAPH_STATE.notice || "graph.edge_list unavailable — degraded to per-node traversal.";
+    notice.hidden = false;
+  }
+  wireGraphFilters(view);
+  renderGraphLegend(view);
+  const handle = buildGraphScene(view, GRAPH_STATE.data, THREE);
+  if (handle) {
+    GRAPH_STATE.handle = handle;
+    GRAPH_STATE.points = handle.points;
+    GRAPH_STATE.edgeMesh = handle.edgeMesh;
+    GRAPH_STATE.labels = handle.labels;
+    GRAPH_STATE.renderer = handle.renderer;
+    GRAPH_STATE.scene = handle.scene;
+    GRAPH_STATE.camera = handle.camera;
+    GRAPH_STATE.controls = handle.controls;
+    handle.fit();
+    GRAPH_STATE.cleanup = handle.cleanup;
+    const refresh = () => loadGraph();
+    view.querySelector('[data-act="graph-refresh"]').addEventListener("click", refresh);
+    view.querySelector('[data-act="graph-fit"]').addEventListener("click", () => handle.fit());
+  }
+}
+
+function renderGraphLegend(view) {
+  const legend = view.querySelector("#graph-legend");
+  if (!legend) return;
+  legend.innerHTML = [...GRAPH_STATE.typeCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, count]) => {
+      const rgb = GRAPH_TYPE_RGB[type] || [0x88, 0x88, 0x88];
+      const hex = `#${rgb.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+      return `<span class="legend-chip"><span class="legend-dot" style="background:${hex}"></span>${esc(type)} (${fmtNum(count)})</span>`;
+    })
+    .join("");
+}
+
+function wireGraphFilters(view) {
+  const filters = view.querySelector(".graph-filters");
+  if (!filters) return;
+  filters.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target || !target.hasAttribute("data-graph-filter")) return;
+    const kind = target.getAttribute("data-graph-filter");
+    if (kind === "type") GRAPH_STATE.typeFilter = target.value;
+    else if (kind === "tier") GRAPH_STATE.tierFilter = target.value;
+    else if (kind === "time") GRAPH_STATE.timeFilter = target.value;
+    else if (kind === "kind") {
+      if (target.checked) GRAPH_STATE.kinds.add(target.value);
+      else GRAPH_STATE.kinds.delete(target.value);
+    }
+    applyGraphFilters();
+  });
+}
+
+function graphNodeVisible(node) {
+  if (GRAPH_STATE.typeFilter && node.node_type !== GRAPH_STATE.typeFilter) return false;
+  if (GRAPH_STATE.tierFilter && String(node.cognitive_tier) !== GRAPH_STATE.tierFilter) return false;
+  const ageDays = (Date.now() / 1000 - node.created_at) / 86400;
+  if (GRAPH_STATE.timeFilter === "30" && ageDays > 30) return false;
+  if (GRAPH_STATE.timeFilter === "90" && ageDays > 90) return false;
+  if (GRAPH_STATE.timeFilter === "365" && ageDays > 365) return false;
+  if (GRAPH_STATE.timeFilter === "old" && ageDays <= 365) return false;
+  return true;
+}
+
+function applyGraphFilters() {
+  const handle = GRAPH_STATE;
+  if (!handle.data || !handle.points || !handle.edgeMesh) return;
+  const THREE = handle.three;
+  const data = handle.data;
+  const hidden = new Set();
+  const visibleAttr = handle.points.geometry.attributes.aVisible;
+  data.nodes.forEach((n, i) => {
+    const ok = graphNodeVisible(n);
+    visibleAttr.array[i] = ok ? 1 : 0;
+    if (!ok) hidden.add(n.node_id);
+  });
+  visibleAttr.needsUpdate = true;
+  const scale = new THREE.Vector3();
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const matrix = new THREE.Matrix4();
+  data.edges.forEach((e, i) => {
+    const showKind = GRAPH_STATE.kinds.has(e.kind);
+    const showEndpoints = !hidden.has(e.src) && !hidden.has(e.dst);
+    handle.edgeMesh.getMatrixAt(i, matrix);
+    matrix.decompose(position, quaternion, scale);
+    scale.x = showKind && showEndpoints ? 1 : 0;
+    matrix.compose(position, quaternion, scale);
+    handle.edgeMesh.setMatrixAt(i, matrix);
+  });
+  handle.edgeMesh.instanceMatrix.needsUpdate = true;
+  for (const [id, sprite] of handle.labels) sprite.visible = !hidden.has(id);
+}
+
+function buildGraphScene(view, data, THREE, opts) {
+  opts = opts || {};
+  const stage = view.querySelector("#graph-stage");
+  if (!stage) return null;
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  } catch (_err) {
+    stage.innerHTML = errorPanel("WebGL is unavailable in this browser — the graph view needs WebGL2.");
+    return null;
+  }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(stage.clientWidth || 900, stage.clientHeight || 560);
+  stage.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0e14);
+  const camera = new THREE.PerspectiveCamera(50, stage.clientWidth / (stage.clientHeight || 560), 1, 50000);
+  camera.position.set(0, 0, 1400);
+
+  const { nodes, edges, byId, centrality, positions } = data;
+  const N = nodes.length;
+  const L = edges.length;
+
+  // --- node points: one draw call, custom shader (screen-space point size) ---
+  const positionsArr = new Float32Array(N * 3);
+  const colors = new Float32Array(N * 3);
+  const sizes = new Float32Array(N);
+  const baseSizes = new Float32Array(N);
+  const opacities = new Float32Array(N);
+  const visibles = new Float32Array(N);
+
+  nodes.forEach((n, i) => {
+    const p = positions.get(n.node_id) || { x: 0, y: 0, z: 0 };
+    positionsArr[i * 3] = p.x;
+    positionsArr[i * 3 + 1] = p.y;
+    positionsArr[i * 3 + 2] = p.z;
+    const rgb = GRAPH_TYPE_RGB[n.node_type] || [0x88, 0x88, 0x88];
+    colors[i * 3] = rgb[0] / 255;
+    colors[i * 3 + 1] = rgb[1] / 255;
+    colors[i * 3 + 2] = rgb[2] / 255;
+    baseSizes[i] = 5 + (centrality.get(n.node_id) || 0) * 24;
+    sizes[i] = baseSizes[i];
+    opacities[i] = n.never_decay ? 1 : Math.max(0.05, n.decay_weight);
+    visibles[i] = 1;
+  });
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positionsArr, 3));
+  geo.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute("aOpacity", new THREE.BufferAttribute(opacities, 1));
+  geo.setAttribute("aVisible", new THREE.BufferAttribute(visibles, 1));
+  geo.computeBoundingSphere();
+
+  const ptScale = (stage.clientHeight || 560) / (2 * Math.tan(THREE.MathUtils.degToRad(25)));
+  const pointMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    vertexShader: `
+      attribute float aSize;
+      attribute vec3 aColor;
+      attribute float aOpacity;
+      attribute float aVisible;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = aSize * (${ptScale.toFixed(1)} / -mv.z);
+        gl_Position = projectionMatrix * mv;
+        vColor = aColor;
+        vAlpha = aOpacity * aVisible;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float a = smoothstep(0.5, 0.40, d) * vAlpha;
+        if (a < 0.02) discard;
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
+  });
+  const points = new THREE.Points(geo, pointMat);
+  points.frustumCulled = false;
+
+  // --- edge quads: one InstancedMesh draw, thickness = weight ---
+  const edgeGeo = new THREE.BufferGeometry();
+  edgeGeo.setAttribute(
+    "position",
+    new THREE.BufferAttribute(new Float32Array([-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0]), 3)
+  );
+  const edgeMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.5, depthWrite: false });
+  const edgeMesh = new THREE.InstancedMesh(edgeGeo, edgeMat, Math.max(L, 1));
+  edgeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  const UNIT_X = new THREE.Vector3(1, 0, 0);
+  const _a = new THREE.Vector3();
+  const _b = new THREE.Vector3();
+  const _dir = new THREE.Vector3();
+  const _mid = new THREE.Vector3();
+  const _quat = new THREE.Quaternion();
+  const _scale = new THREE.Vector3();
+  const _m = new THREE.Matrix4();
+  const _col = new THREE.Color();
+
+  function edgeMatrixAt(i, edge) {
+    const na = byId.get(edge.src);
+    const nb = byId.get(edge.dst);
+    if (!na || !nb) {
+      _m.makeScale(0, 1, 1);
+      edgeMesh.setMatrixAt(i, _m);
+      return;
+    }
+    const pa = positions.get(edge.src) || { x: 0, y: 0, z: 0 };
+    const pb = positions.get(edge.dst) || { x: 0, y: 0, z: 0 };
+    _a.set(pa.x, pa.y, pa.z);
+    _b.set(pb.x, pb.y, pb.z);
+    _dir.subVectors(_b, _a);
+    const len = _dir.length();
+    _dir.normalize();
+    _mid.addVectors(_a, _b).multiplyScalar(0.5);
+    _quat.setFromUnitVectors(UNIT_X, _dir);
+    _scale.set(len, 0.3 + edge.weight, 1);
+    _m.compose(_mid, _quat, _scale);
+    edgeMesh.setMatrixAt(i, _m);
+  }
+
+  edges.forEach((edge, i) => {
+    edgeMatrixAt(i, edge);
+    _col.setRGB(0.42 + edge.weight * 0.35, 0.5 + edge.weight * 0.3, 0.62 + edge.weight * 0.25);
+    edgeMesh.setColorAt(i, _col);
+  });
+  edgeMesh.instanceMatrix.needsUpdate = true;
+  if (edgeMesh.instanceColor) edgeMesh.instanceColor.needsUpdate = true;
+
+  // --- labels: canvas sprites for the top-60 nodes by centrality ---
+  const TOP_LABELS = 60;
+  const labelNodes = [...nodes].sort(
+    (a, b) => (centrality.get(b.node_id) || 0) - (centrality.get(a.node_id) || 0)
+  ).slice(0, TOP_LABELS);
+  const labels = new Map();
+  const labelGroup = new THREE.Group();
+  for (const n of labelNodes) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.font = "bold 30px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(225,235,245,0.95)";
+    ctx.fillText(truncate(graphLabel(n), 24), 128, 32);
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(canvas),
+        transparent: true,
+        depthTest: false,
+        sizeAttenuation: true,
+      })
+    );
+    const p = positions.get(n.node_id) || { x: 0, y: 0, z: 0 };
+    sprite.scale.set(52, 13, 1);
+    sprite.renderOrder = 20;
+    sprite.position.set(p.x, p.y + 10 + (centrality.get(n.node_id) || 0) * 8, p.z);
+    labelGroup.add(sprite);
+    labels.set(n.node_id, sprite);
+  }
+
+  scene.add(edgeMesh);
+  scene.add(points);
+  scene.add(labelGroup);
+  edgeMesh.frustumCulled = false;
+
+  // --- minimal orbit control (rotate by drag, zoom by wheel) ---
+  const controls = new GraphOrbit(camera, renderer.domElement, THREE);
+
+  function fit() {
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    for (const n of nodes) {
+      const p = positions.get(n.node_id) || { x: 0, y: 0, z: 0 };
+      box.expandByPoint(v.set(p.x, p.y, p.z));
+    }
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = box.getBoundingSphere(new THREE.Sphere()).radius || 1;
+    const dist = (radius / Math.tan(THREE.MathUtils.degToRad(25))) * 1.25;
+    camera.position.copy(center).add(new THREE.Vector3(0, 0, dist));
+    camera.lookAt(center);
+    controls.target.copy(center);
+  }
+
+  // --- raycast picking → Memory Detail side panel ---
+  const raycaster = new THREE.Raycaster();
+  raycaster.params.Points.threshold = 14;
+  let hoveredIndex = -1;
+  renderer.domElement.addEventListener("mousemove", (event) => {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const px = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    const py = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(new THREE.Vector2(px, py), camera);
+    const hits = raycaster.intersectObject(points, false);
+    if (hoveredIndex >= 0) sizes[hoveredIndex] = baseSizes[hoveredIndex];
+    hoveredIndex = hits.length ? hits[0].index : -1;
+    if (hoveredIndex >= 0) sizes[hoveredIndex] = baseSizes[hoveredIndex] * 1.7;
+    geo.attributes.aSize.needsUpdate = true;
+    renderer.domElement.style.cursor = hoveredIndex >= 0 ? "pointer" : "grab";
+  });
+  renderer.domElement.addEventListener("click", (event) => {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const px = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    const py = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(new THREE.Vector2(px, py), camera);
+    const hits = raycaster.intersectObject(points, false);
+    if (hits.length) {
+      const node = nodes[hits[0].index];
+      graphOpenDetail(view, node.node_id);
+    }
+  });
+
+  let disposed = false;
+  let rafHandle = 0;
+  function cleanup() {
+    if (disposed) return;
+    disposed = true;
+    cancelAnimationFrame(rafHandle);
+    window.removeEventListener("resize", onResize);
+    geo.dispose();
+    pointMat.dispose();
+    edgeGeo.dispose();
+    edgeMat.dispose();
+    for (const [, sprite] of labels) sprite.material.map.dispose();
+    renderer.dispose();
+    if (stage.contains(renderer.domElement)) stage.removeChild(renderer.domElement);
+  }
+
+  function onResize() {
+    const width = stage.clientWidth || 900;
+    const height = stage.clientHeight || 560;
+    renderer.setSize(width, height);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener("resize", onResize);
+
+  function loop() {
+    if (disposed) return;
+    renderer.render(scene, camera);
+    rafHandle = requestAnimationFrame(loop);
+  }
+
+  fit();
+  renderer.compile(scene, camera);
+  if (opts.autostart !== false) rafHandle = requestAnimationFrame(loop);
+
+  return {
+    fit,
+    cleanup,
+    points,
+    edgeMesh,
+    labels,
+    renderer,
+    scene,
+    camera,
+    controls,
+    three: THREE,
+    data,
+    cancelLoop() {
+      cancelAnimationFrame(rafHandle);
+    },
+  };
+}
+
+function graphOpenDetail(view, nodeId) {
+  const panel = view.querySelector("#graph-detail");
+  if (!panel) return;
+  api(`/api/v1/nodes/${encodeURIComponent(nodeId)}?profile_id=${encodeURIComponent(state.profileId || "")}`)
+    .then((dossier) => {
+      panel.innerHTML = `
+        <h3>memory detail</h3>
+        <p class="graph-detail-statement">${esc(dossier.content.statement || dossier.node_id)}</p>
+        <dl class="kv">
+          ${kvList([
+            ["type", esc(dossier.node_type)],
+            ["decay weight", decayMeter(dossier.weights.decay_weight)],
+            ["confidence", fmtNum(dossier.weights.confidence)],
+            ["tier", String(dossier.metadata ? dossier.metadata.cognitive_tier : "—")],
+            ["hit count", fmtNum(dossier.usage.hit_count)],
+            ["updated", fmtEpoch(dossier.updated_at)],
+          ])}
+        </dl>
+        <a class="btn" href="#/detail/node/${encodeURIComponent(nodeId)}">open full dossier →</a>`;
+      panel.hidden = false;
+    })
+    .catch(() => {
+      panel.innerHTML = `<p class="dim">detail unavailable</p>`;
+      panel.hidden = false;
+    });
+}
+
+// ------------------------------------------------------- graph perf bench mode
+// Reuses the bench architecture (graphview-three, 2026-08-13) at 5k nodes to
+// log fps in a CI-skip-safe form: open the page with ?perf=1, let it run, and
+// read window.__GRAPH_PERF (or the document.title). Not a CI gate — GPU
+// numbers need a real display.
+
+function generatePerfGraph(nodeCount) {
+  const TYPES = ["PREFERENCE", "HABIT", "EPISODE", "SKILL_SEQUENCE", "DECISION", "INTENTION"];
+  const rng = mulberry32(20240814);
+  const rand = (lo, hi) => lo + rng() * (hi - lo);
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  function gauss() {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = rng();
+    while (v === 0) v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+  const PROFILES = 8;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const centers = [];
+  for (let i = 0; i < PROFILES; i++) {
+    const y = 1 - (i / (PROFILES - 1)) * 2;
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = golden * i;
+    centers.push({ x: 260 * r * Math.cos(theta), y: 260 * y, z: 260 * r * Math.sin(theta) });
+  }
+  const now = Date.now() / 1000;
+  const day = 86400;
+  const nodes = [];
+  const perProfile = Math.floor(nodeCount / PROFILES);
+  for (let p = 0; p < PROFILES; p++) {
+    const c = centers[p];
+    const count = p === PROFILES - 1 ? nodeCount - perProfile * (PROFILES - 1) : perProfile;
+    for (let i = 0; i < count; i++) {
+      const type = TYPES[Math.floor(rng() * TYPES.length)];
+      let centrality = Math.pow(rng(), 3) * 0.92 + 0.01;
+      const ageDays = Math.pow(rng(), 1.4) * 365;
+      const created_at = now - ageDays * day;
+      let decay_weight = clamp01(0.88 - (ageDays / 365) * 0.62 + (centrality > 0.7 ? 0.12 : 0) + gauss() * 0.06);
+      decay_weight = clamp01(decay_weight);
+      const tier = centrality > 0.7 ? 1 : centrality > 0.35 ? 2 : 3;
+      nodes.push({
+        node_id: `n${nodes.length}`,
+        node_type: type,
+        statement: `memory ${nodes.length}`,
+        cognitive_tier: tier,
+        decay_weight: +decay_weight.toFixed(3),
+        created_at,
+        profile: `profile-${p}`,
+      });
+    }
+  }
+  const edges = [];
+  const edgeSet = new Set();
+  const byProfile = new Map();
+  for (const n of nodes) {
+    if (!byProfile.has(n.profile)) byProfile.set(n.profile, []);
+    byProfile.get(n.profile).push(n);
+  }
+  const addEdge = (a, b, weight, kind) => {
+    if (a === b) return;
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    if (edgeSet.has(key)) return;
+    edgeSet.add(key);
+    edges.push({
+      edge_id: `e${edges.length}`,
+      src: a,
+      dst: b,
+      weight: +clamp01(weight).toFixed(3),
+      kind,
+      created_at: now - rand(0, 365 * day),
+    });
+  };
+  for (const group of byProfile.values()) {
+    for (const n of group) {
+      const degree = 2 + Math.round((n.centrality || 0.1) * 5);
+      let added = 0;
+      let attempts = 0;
+      while (added < degree && attempts < 40) {
+        attempts++;
+        const cand = group[Math.floor(rng() * group.length)];
+        if (cand.node_id === n.node_id) continue;
+        addEdge(
+          n.node_id,
+          cand.node_id,
+          0.45 + (n.centrality + cand.centrality) * 0.3 + rng() * 0.2,
+          rng() < 0.72 ? "relation" : "cooccurrence"
+        );
+        added++;
+      }
+    }
+  }
+  const hubs = [];
+  for (const group of byProfile.values()) {
+    const sorted = [...group].sort((a, b) => b.centrality - a.centrality);
+    hubs.push(...sorted.slice(0, 8));
+  }
+  for (const h of hubs) {
+    const other = hubs[Math.floor(rng() * hubs.length)];
+    if (other && other.node_id !== h.node_id) {
+      addEdge(h.node_id, other.node_id, rand(0.25, 0.5), rng() < 0.5 ? "relation" : "cooccurrence");
+    }
+  }
+  return { nodes, edges };
+}
+
+function applyGraphDecay(handle) {
+  // The decay showcase: every tick fades node opacity a step and nudges ~5%
+  // of edge weights (the bench S2 pattern) — a single attribute upload + a
+  // handful of matrix writes.
+  const attr = handle.points.geometry.attributes.aOpacity;
+  for (let i = 0; i < attr.array.length; i++) attr.array[i] = Math.max(0.02, attr.array[i] * 0.9975);
+  attr.needsUpdate = true;
+  const rng = mulberry32(11);
+  const THREE = handle.three;
+  const _m = new THREE.Matrix4();
+  const _q = new THREE.Quaternion();
+  const _p = new THREE.Vector3();
+  const _s = new THREE.Vector3();
+  let changed = 0;
+  for (let i = 0; i < handle.data.edges.length; i++) {
+    if (rng() < 0.05) {
+      const edge = handle.data.edges[i];
+      edge.weight = Math.max(0.05, edge.weight * (0.97 + rng() * 0.06));
+      handle.edgeMesh.getMatrixAt(i, _m);
+      _m.decompose(_p, _q, _s);
+      _s.y = 0.3 + edge.weight;
+      _m.compose(_p, _q, _s);
+      handle.edgeMesh.setMatrixAt(i, _m);
+      changed++;
+    }
+  }
+  if (changed) handle.edgeMesh.instanceMatrix.needsUpdate = true;
+  return changed;
+}
+
+async function runGraphPerf(view) {
+  const THREE = await import("/console/vendor/three.module.js");
+  const data = generatePerfGraph(5000);
+  const meta = graphMeta(data);
+  const centrality = graphCentrality(data.nodes, data.edges);
+  const positions = graphLayout(data.nodes, centrality);
+  GRAPH_STATE.data = {
+    nodes: data.nodes,
+    edges: data.edges,
+    byId: new Map(data.nodes.map((n) => [n.node_id, n])),
+    centrality,
+    positions,
+  };
+  GRAPH_STATE.three = THREE;
+  view.innerHTML = graphPerfShellHtml();
+  const hud = view.querySelector("#graph-perf-hud");
+  const handle = buildGraphScene(view, GRAPH_STATE.data, THREE, { autostart: false });
+  if (!handle) return;
+  await sleepGraph(1200); // shader/state warmup
+  const frames = [];
+  let last = 0;
+  const start = performance.now();
+  let count = 0;
+  const DURATION = 20000;
+  const decayTimer = setInterval(() => applyGraphDecay(handle), 250);
+  const tick = (t) => {
+    handle.renderer.render(handle.scene, handle.camera);
+    if (last) frames.push(t - last);
+    last = t;
+    count++;
+    const elapsed = t - start;
+    const avg = count / (elapsed / 1000);
+    if (hud) hud.textContent = `perf — ${avg.toFixed(1)} fps avg (${meta.nodes} nodes / ${meta.edges} edges)`;
+    if (elapsed >= DURATION) {
+      clearInterval(decayTimer);
+      frames.sort((a, b) => a - b);
+      const p95 = frames[Math.max(1, Math.floor(frames.length * 0.95))];
+      const results = {
+        nodes: meta.nodes,
+        edges: meta.edges,
+        durationMs: DURATION,
+        avgFps: +(count / (elapsed / 1000)).toFixed(2),
+        p5Fps: +(1000 / p95).toFixed(2),
+      };
+      window.__GRAPH_PERF = results;
+      document.title = `MnemoSeed perf — avg ${results.avgFps} fps / p5 ${results.p5Fps} fps`;
+      if (hud) hud.textContent = `done — avg ${results.avgFps} fps / p5 ${results.p5Fps} fps (window.__GRAPH_PERF)`;
+      return;
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function disposeGraphView() {
+  if (GRAPH_STATE.cleanup) {
+    GRAPH_STATE.cleanup();
+    GRAPH_STATE.cleanup = null;
+  }
+  GRAPH_STATE.handle = null;
+  GRAPH_STATE.scene = null;
+  GRAPH_STATE.camera = null;
+  GRAPH_STATE.renderer = null;
+  GRAPH_STATE.points = null;
+  GRAPH_STATE.edgeMesh = null;
+  GRAPH_STATE.labels = null;
+  GRAPH_STATE.controls = null;
+  GRAPH_STATE.data = null;
+}
+
+// Minimal orbit camera control (rotate by drag, zoom by wheel) — hand-rolled so
+// the graph view depends on zero framework code beyond the vendored three.js.
+class GraphOrbit {
+  constructor(camera, dom, THREE) {
+    this.camera = camera;
+    this.dom = dom;
+    this.THREE = THREE;
+    this.target = new THREE.Vector3();
+    this._spherical = new THREE.Spherical();
+    this._offset = new THREE.Vector3();
+    let dragging = false;
+    let px = 0;
+    let py = 0;
+    dom.addEventListener("mousedown", (event) => {
+      dragging = true;
+      px = event.clientX;
+      py = event.clientY;
+    });
+    window.addEventListener("mouseup", () => {
+      dragging = false;
+    });
+    dom.addEventListener("mousemove", (event) => {
+      if (!dragging) return;
+      this.rotate(event.clientX - px, event.clientY - py);
+      px = event.clientX;
+      py = event.clientY;
+    });
+    dom.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        this.zoom(event.deltaY > 0 ? 1.12 : 0.9);
+      },
+      { passive: false }
+    );
+  }
+  rotate(dx, dy) {
+    const THREE = this.THREE;
+    const offset = this._offset.copy(this.camera.position).sub(this.target);
+    const spherical = this._spherical.setFromVector3(offset);
+    spherical.theta -= dx * 0.005;
+    spherical.phi -= dy * 0.005;
+    spherical.phi = Math.max(0.05, Math.min(Math.PI - 0.05, spherical.phi));
+    offset.setFromSpherical(spherical);
+    this.camera.position.copy(this.target).add(offset);
+    this.camera.lookAt(this.target);
+  }
+  zoom(factor) {
+    const offset = this._offset.copy(this.camera.position).sub(this.target).multiplyScalar(factor);
+    const length = offset.length();
+    if (length < 5 || length > 50000) return;
+    this.camera.position.copy(this.target).add(offset);
+    this.camera.lookAt(this.target);
   }
 }
 

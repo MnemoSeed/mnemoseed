@@ -4,7 +4,7 @@
 > Milestone: M0 (m0a + m0b of roadmap PRD-00) · Estimate 16 days (revised by v2 blind review)
 > Nature: pure foundation with zero user-visible functionality — but what it freezes (schema, interface contracts) hurts every time it changes later, so this PRD has the strictest review standard of all PRDs.
 > v2 revision: after independent blind-reviewer review (15 findings), added the interface method list (Appendix B), the degradation behavior table (Appendix C), and completed the schema-freeze fields (profile isolation / structured turn boundaries / flag bits / usage counters / sparse-vector representation).
-> v1.1 amendment (2026-08-13): Appendix B.2 adds GraphStore `list_edges(filter, page)` (bulk edge read for the console Graph View), the capability-flag set grows to 12 (FR-8.6) with the new `GRAPH_EDGE_LIST`, and Appendix C gains the corresponding degrade row. This is a numbered amendment, not a rewrite — all previously frozen language stands unchanged.
+> v1.1 amendment (2026-08-13): Appendix B.2 adds GraphStore `list_edges(filter, page)` (bulk edge read for the console Graph View), the capability-flag set grows to 12 (FR-8.6) with the new `GRAPH_EDGE_LIST` member (capability VALUE `graph.edge_list`, following the layer-prefixed value convention of the other flags), and Appendix C gains the corresponding degrade row. This is a numbered amendment, not a rewrite — all previously frozen language stands unchanged.
 > v1.2 amendment (2026-08-14): B.3 adds MetaStore `archive_profile(profile_id)` (soft-archive; `profiles.archived` column, migration v7) backing console Profiles FR-7.3. All previously frozen language stands unchanged.
 
 ## 1. Goals
@@ -39,7 +39,7 @@
 | FR-8.3 | The four embedded drivers: `lancedb_embedded` / `sqlite_graph` (self-built adjacency tables) / `sqlite_meta` / `bge_m3_onnx` (model file downloaded on first run, ~543MiB (int8-quantized ONNX, as measured), with visible progress; plus a `synthetic` test embedder) | P0 |
 | FR-8.4 | Second drivers: `pgvector` / `pg_graph` (pure relational tables, same schema and same queries as sqlite_graph) / `pg_meta`; the Embedder second driver = `openai_compatible` (any compatible endpoint, **dense-only output**, declaring the absence of `embed.sparse_output`) | P0 |
 | FR-8.5 | **Interface contract test suite**: driver-agnostic behavior tests covering every method in Appendix B (with a "method ↔ contract test" mapping table), run once against each of the embedded and pg driver sets; also includes SQLite/PG **migration reconciliation assertions** (same schema_version sequence, same field definitions, byte-for-byte comparison with zero difference on both sides) | P0 |
-| FR-8.6 | capability flags minimal set (12): `vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `GRAPH_EDGE_LIST` / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`. Driver combinations missing a capability: refuse to start or go through **explicit degradation**, with the degradation behavior table governed by Appendix C (code and config docs kept in sync) | P0 |
+| FR-8.6 | capability flags minimal set (12): `vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `graph.edge_list` (member `GRAPH_EDGE_LIST`) / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`. Driver combinations missing a capability: refuse to start or go through **explicit degradation**, with the degradation behavior table governed by Appendix C (code and config docs kept in sync) | P0 |
 | FR-8.7 | **Schema v1 freeze** (list: see Appendix A): all structures land as migration files (one set for SQLite and one for PG, under the same schema_version sequence); `schema_version` table + a purely forward-only `up` migration mechanism; stamp `cues.host` / `cues.task` as well as `profile_id` / `session_id` / `turn_start` / `turn_end` fields are **nullable but never absent** | P0 |
 | FR-8.8 | docker-compose skeleton (docker preset: four services `core + vector(pgvector) + pg + embed`, with ollama as an optional profile), each service with `/healthz`; embedded single-process `mnemoseed up` starts the daemon skeleton with one command (all drivers embedded, no external dependencies, no business logic) | P0 |
 
@@ -119,7 +119,7 @@ Total 15.5d (+0.5d integration buffer ≈ **16d**, so roadmap m0b adjusted to 9d
 - **nodes**: `id PK / type / profile_id / payload JSON / decay_weight / conflict_flag / conflict_group / needs_reconcile / pending_consolidation / peripheral_gaps / valid_from / valid_to / last_reinforced / hit_count / last_hit_at / reinforce_count / provenance JSON / created_at`
   - `conflict_group`: conflicting parties share the same group ID — paired returns (FR-3.6) and the Conflicts inbox locate each other through it; a single bool is not enough;
   - the three flow flags (needs_reconcile / pending_consolidation / peripheral_gaps) are payload fields jointly depended on by PRD-01/02/03 and the console Detail page and must be inside the freeze.
-- **edges**: `id PK / src / dst / rel / weight / provenance JSON` (co-occurrence edge = `rel='cooccur'` + weight counter)
+- **edges**: `id PK / src / dst / rel / weight / provenance JSON` (co-occurrence edge = `rel='co_occurred'` + weight counter; cooccurrence and relation edges share the same table)
 - **node_versions**: append-only version chain (`node_id / version / payload snapshot / changed_at / superseded_by`) — the physical basis for as_of bitemporal queries
 - **Node-type enum (v1 frozen)**: `USER / HABIT / PREFERENCE / ANIMA / INTENTION / CONSTRAINT / EPISODE / SKILL_SEQUENCE / DECISION / PROJECT / TOOL`
 - **Promotion-status field (v5)**: graph nodes gain `promotion_status` (`pending / promoted / quarantined / scrapped`, default promoted for back-compat) — the carrier of the promotion quality gate (design/02 §11); cheap to add now, expensive later. Read-side rerank gains a ζ·confidence term (design/03 §2)
@@ -149,8 +149,8 @@ Total 15.5d (+0.5d integration buffer ≈ **16d**, so roadmap m0b adjusted to 9d
 | search(dense, sparse?, filter, top_k) | hybrid retrieval + metadata filtering (profile_id / decay_weight lower bound / time range) | retrieval |
 | near_duplicate(vector, threshold, profile_id) | near-duplicate detection, supporting the 0.9 / 0.85 twin thresholds; profile_id required (D5 isolation) | capture FR-1.8 Hebbian reinforcement |
 | snapshot_read(filter) | dream read-only snapshot; when snapshot capability is absent, degrades to turn_range logical read | dream engine |
-| mark_consolidated(chunk_ids) | batch-set consolidated | dream clear |
-| purge_range(session_id, turn_start, turn_end) | safe clear scoped to the snapshot range; the two ends do not interfere | dream FR-2.x |
+| mark_consolidated(chunk_ids) | batch-set consolidated; the dream clear marks (never deletes) its consumed chunks, which stay as the evidence scene and decay at λ × 3 (design/03 §4) | dream clear |
+| purge_range(session_id, turn_start, turn_end) | storage-level range clear; the two ends do not interfere | contract / legacy callers (the dream path clears via mark_consolidated) |
 | update_weights(updates[]) | batch-write decay_weight / last_reinforced / reinforce_count | decay and reinforcement bounce-back |
 | update_chunk_state(chunk_ids, hit_increment?, needs_reconcile?) | batch-write usage counters (hit_count / last_hit_at) and needs_reconcile set/clear; when hit_increment>0, also refresh last_hit_at | retrieval-hit counting, capture FR-1.8 suspected-contradiction marking |
 | list_chunks(filter, page) | filtered + paginated listing | console Browser |
@@ -170,12 +170,12 @@ Total 15.5d (+0.5d integration buffer ≈ **16d**, so roadmap m0b adjusted to 9d
 | as_of(timestamp, filter) | point-in-time replay query (bitemporal) | retrieval FR-3.9 |
 | batch_update_weights(updates[]) | batch decay recompute (~100k < 60s, NFR-4.1) | Decay |
 | query_intentions(status, due_before) | due pending INTENTION query | scheduler FR-3.15 |
-| list_edges(filter, page) | **bulk edge listing** (v1.1 amendment, 2026-08-13) backing the console Graph View; filter fields: profile_id / node types / time window / Tier / min edge weight; paginated with a stable order; each item returns edge id, endpoints, kind (`relation` / `cooccurrence`), weight, timestamps | console Graph View |
+| list_edges(filter, page) | **bulk edge listing** (v1.1 amendment, 2026-08-13; shipped canonical form) backing the console Graph View — filter = `EdgeFilter` (profile_id / node_types / tier / created_after / created_before / min_weight): `node_types` and `tier` restrict the edge's endpoints and require **both endpoints to be current-revision nodes** of the matching type / tier, while the time window and `min_weight` apply to the edge row itself; each `EdgeEntry` returns edge_id / src / dst / kind (`relation` / `cooccurrence`) / weight / created_at; paginated with the stable order `created_at DESC, id ASC` | console Graph View |
 | capabilities() | self-reported capability set | startup validation |
 
 Note: graph centrality (the δ term in the rerank formula) is computed client-side by the retrieval side from traverse results; M0 does not introduce a standalone centrality query.
 
-Note (v1.1 amendment, 2026-08-13): `list_edges` is required in **both** `sqlite_graph` and `pg_graph`, each with contract tests (AC-3). The new capability flag `GRAPH_EDGE_LIST` follows the Appendix C degrade semantics: a driver lacking it degrades the console graph to per-node edge fetching via `traverse()` (bulk edge view unavailable) with an explicit startup warning.
+Note (v1.1 amendment, 2026-08-13; shipped): `list_edges` is required in **both** `sqlite_graph` and `pg_graph`, each with contract tests (AC-3), and needs **no migration** — cooccurrence lives in the same `edges` table (`rel = 'co_occurred'`). The new capability flag (member `GRAPH_EDGE_LIST`, VALUE `graph.edge_list`) follows the Appendix C degrade semantics; the startup gate matches capabilities by layer prefix (this one belongs to the `graph` layer), so a graph driver lacking it degrades the console graph to per-node edge fetching via `traverse()` (bulk edge view unavailable) with an explicit startup warning.
 
 ### B.3 MetaStore
 
@@ -215,7 +215,7 @@ Note (v1.1 amendment, 2026-08-13): `list_edges` is required in **both** `sqlite_
 | `vector.hybrid_search` | same as above (dense-only) | degrade + startup warning |
 | `vector.snapshot` | dream snapshot degrades to turn_range logical isolation, isolation-strength downgrade warning | degrade + startup warning |
 | `graph.cooccurrence_edges` | rerank drops the ε co-occurrence term, retrieval-quality warning | degrade + startup warning |
-| `GRAPH_EDGE_LIST` | console Graph View bulk edge list degrades to per-node edge fetching via `traverse()`, console-graph performance warning | degrade + startup warning |
+| `graph.edge_list` (`GRAPH_EDGE_LIST`) | console Graph View bulk edge list degrades to per-node edge fetching via `traverse()`, console-graph performance warning | degrade + startup warning |
 | `meta.concurrent_readers` | console reads serialize, concurrency-performance warning | degrade + startup warning |
 | `embed.batch` | vectorization runs item by item, throughput warning | degrade + startup warning |
 

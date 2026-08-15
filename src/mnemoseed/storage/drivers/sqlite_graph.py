@@ -33,6 +33,9 @@ from mnemoseed.storage.drivers._time import epoch_from_iso, iso8601_utc
 from mnemoseed.storage.ports import (
     Capability,
     DriverInfo,
+    EdgeEntry,
+    EdgeFilter,
+    EdgeKind,
     GraphFlag,
     GraphWeightUpdate,
     IntentionStatus,
@@ -49,6 +52,7 @@ _CAPABILITIES = frozenset(
         Capability.GRAPH_TRAVERSE_2HOP,
         Capability.GRAPH_VERSION_CHAIN,
         Capability.GRAPH_COOCCURRENCE_EDGES,
+        Capability.GRAPH_EDGE_LIST,
     }
 )
 
@@ -352,6 +356,66 @@ class SqliteGraphDriver:
                         iso8601_utc(time.time()),
                     ),
                 )
+
+    def list_edges(self, filter: EdgeFilter, page: Page) -> PageResult[EdgeEntry]:
+        """Bulk edge listing (prd-08 appendix B.2 v1.1): the console Graph View
+        reads one page of the profile's edges with a stable order (created_at
+        desc, edge id asc). BOTH endpoints must be current-revision nodes
+        (valid_to IS NULL) — unconditionally, so an edge touching a tombstoned
+        or superseded node never leaks; ``node_types`` / ``tier`` additionally
+        require both endpoints to match the type / tier. The time window and
+        min_weight apply to the edge row itself. ``kind`` collapses rel to the
+        document vocabulary: ``co_occurred`` is cooccurrence, everything else
+        is relation."""
+        clauses = ["e.profile_id = ?"]
+        params: list[Any] = [filter.profile_id]
+        if filter.min_weight > 0.0:
+            clauses.append("e.weight >= ?")
+            params.append(filter.min_weight)
+        if filter.created_after is not None:
+            clauses.append("e.created_at >= ?")
+            params.append(iso8601_utc(filter.created_after))
+        if filter.created_before is not None:
+            clauses.append("e.created_at <= ?")
+            params.append(iso8601_utc(filter.created_before))
+        src_conds = ["na.node_id = e.src", "na.valid_to IS NULL"]
+        dst_conds = ["nb.node_id = e.dst", "nb.valid_to IS NULL"]
+        if filter.node_types:
+            types = [t.value for t in filter.node_types]
+            placeholders = ", ".join(["?"] * len(types))
+            src_conds.append(f"na.node_type IN ({placeholders})")
+            dst_conds.append(f"nb.node_type IN ({placeholders})")
+            params.extend(types)
+            params.extend(types)
+        if filter.tier is not None:
+            src_conds.append("na.cognitive_tier = ?")
+            dst_conds.append("nb.cognitive_tier = ?")
+            params.append(filter.tier)
+            params.append(filter.tier)
+        clauses.append("EXISTS (SELECT 1 FROM nodes na WHERE " + " AND ".join(src_conds) + ")")
+        clauses.append("EXISTS (SELECT 1 FROM nodes nb WHERE " + " AND ".join(dst_conds) + ")")
+        where = " AND ".join(clauses)
+        total = _count(self._conn, "edges e", where, params)
+        rows = self._conn.execute(
+            f"SELECT e.* FROM edges e WHERE {where} ORDER BY e.created_at DESC, e.id ASC LIMIT ? OFFSET ?",
+            [*params, page.limit, page.offset],
+        ).fetchall()
+        items = [
+            EdgeEntry(
+                edge_id=str(row["id"]),
+                src=str(row["src"]),
+                dst=str(row["dst"]),
+                kind=(
+                    EdgeKind.COOCCURRENCE
+                    if str(row["rel"]) == RelType.CO_OCCURRED.value
+                    else EdgeKind.RELATION
+                ),
+                weight=float(row["weight"]),
+                created_at=epoch_from_iso(str(row["created_at"])),
+            )
+            for row in rows
+        ]
+        return PageResult(items=items, total=total, offset=page.offset, limit=page.limit)
 
     def traverse(self, node_id: str, depth: int = 2, filter: NodeFilter | None = None) -> list[GraphNode]:
         if depth < 0:

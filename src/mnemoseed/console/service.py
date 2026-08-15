@@ -47,9 +47,11 @@ from mnemoseed.storage.factory import Stores
 from mnemoseed.storage.ports import (
     AuditEntry,
     AuditFilter,
+    Capability,
     ChunkFilter,
     DreamRun,
     DreamRunFilter,
+    EdgeFilter,
     GraphFlag,
     GraphWeightUpdate,
     NodeFilter,
@@ -374,6 +376,102 @@ class ConsoleService:
         return True
 
     # ------------------------------------------------------------ memory detail
+
+    def graph_subgraph(
+        self,
+        *,
+        profile_id: str,
+        node_types: tuple[NodeType, ...] = (),
+        time_after: float | None = None,
+        time_before: float | None = None,
+        tier: int | None = None,
+        min_weight: float = 0.0,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> dict[str, Any]:
+        """FR-7.8 Graph View subgraph: the profile's current nodes plus one
+        paginated edge page.
+
+        Edges come from the B.2 v1.1 ``list_edges`` bulk port when the graph
+        driver declares ``GRAPH_EDGE_LIST``; the filter parameters are pushed
+        down to the port (the client re-filters locally on top of the full
+        node set). Without the capability the view degrades per appendix C to
+        a per-node ``traverse()`` adjacency read with an explicit notice —
+        never a faked bulk view. Centrality stays client-side (appendix B.2:
+        no standalone centrality query in M0).
+        """
+        nodes = self._scan_nodes(NodeFilter(profile_id=profile_id))
+        if Capability.GRAPH_EDGE_LIST in self._stores.graph.capabilities():
+            page = self._stores.graph.list_edges(
+                EdgeFilter(
+                    profile_id=profile_id,
+                    node_types=node_types,
+                    created_after=time_after,
+                    created_before=time_before,
+                    tier=tier,
+                    min_weight=min_weight,
+                ),
+                Page(offset=offset, limit=limit),
+            )
+            edges = [self._graph_edge_payload(edge) for edge in page.items]
+            total = page.total
+            degraded = False
+            notice: str | None = None
+        else:
+            edges, total = self._degraded_graph_edges(nodes, profile_id, node_types, tier)
+            degraded = True
+            notice = (
+                "bulk edge view unavailable: this graph driver lacks graph.edge_list. "
+                "Showing adjacency only (per-node traversal) — slower and without edge kinds/weights."
+            )
+        return {
+            "nodes": [self._graph_node_payload(node) for node in nodes],
+            "edges": edges,
+            "paging": {"total": total, "offset": offset, "limit": limit},
+            "degraded": degraded,
+            "notice": notice,
+        }
+
+    def _degraded_graph_edges(
+        self,
+        nodes: list[GraphNode],
+        profile_id: str,
+        node_types: tuple[NodeType, ...],
+        tier: int | None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Appendix C degrade path: per-node ``traverse()`` adjacency, deduped.
+
+        ``traverse`` returns nodes, not edges, so the degraded view honestly
+        reports unweighted adjacency-only edges (kind/weight are unavailable
+        without the bulk port).
+        """
+        edges: list[dict[str, Any]] = []
+        seen: set[tuple[str, ...]] = set()
+        for node in nodes:
+            if node_types and node.node_type not in node_types:
+                continue
+            if tier is not None and int(node.cognitive_tier) != tier:
+                continue
+            for neighbor in self._stores.graph.traverse(
+                node.node_id, depth=1, filter=NodeFilter(profile_id=profile_id)
+            ):
+                if neighbor.node_id == node.node_id:
+                    continue  # traverse includes the start node itself
+                key = tuple(sorted((node.node_id, neighbor.node_id)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append(
+                    {
+                        "edge_id": f"{key[0]}~{key[1]}",
+                        "src": key[0],
+                        "dst": key[1],
+                        "kind": "relation",
+                        "weight": 1.0,
+                        "created_at": node.created_at,
+                    }
+                )
+        return edges, len(edges)
 
     def get_chunk(self, *, profile_id: str, chunk_id: str) -> dict[str, Any]:
         """FR-7.5 chunk dossier: verbatim channel + full provenance history."""
@@ -1256,6 +1354,41 @@ class ConsoleService:
             "hit_count": node.hit_count,
             "version": node.version,
             "updated_at": node.updated_at,
+        }
+
+    @staticmethod
+    def _graph_edge_payload(edge: Any) -> dict[str, Any]:
+        """One Graph View edge: id / endpoints / kind / weight / timestamp."""
+        return {
+            "edge_id": edge.edge_id,
+            "src": edge.src,
+            "dst": edge.dst,
+            "kind": edge.kind.value,
+            "weight": edge.weight,
+            "created_at": edge.created_at,
+        }
+
+    @staticmethod
+    def _graph_node_payload(node: GraphNode) -> dict[str, Any]:
+        """One Graph View node: everything the renderer needs to encode
+        opacity=decay_weight, color=type, size=centrality and the filters."""
+        statement = node.props.get("statement")
+        if not isinstance(statement, str) or not statement:
+            fallback = node.props.get("object")
+            statement = fallback if isinstance(fallback, str) and fallback else node.node_id
+        return {
+            "node_id": node.node_id,
+            "node_type": node.node_type.value,
+            "statement": statement,
+            "entities": list(node.entities),
+            "decay_weight": node.decay_weight,
+            "confidence": node.confidence,
+            "cognitive_tier": int(node.cognitive_tier),
+            "created_at": node.created_at,
+            "updated_at": node.updated_at,
+            "never_decay": node.never_decay,
+            "conflict_flag": node.conflict_flag,
+            "conflict_group": node.conflict_group,
         }
 
     @staticmethod

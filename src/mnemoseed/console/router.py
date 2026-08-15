@@ -141,6 +141,33 @@ def get_node(request: Request, node_id: str, profile_id: str = Query(..., min_le
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/graph/subgraph")
+def graph_subgraph(
+    request: Request,
+    profile_id: str = Query(..., min_length=1),
+    node_type: Annotated[list[NodeType] | None, Query()] = None,
+    time_after: float | None = Query(default=None),
+    time_before: float | None = Query(default=None),
+    tier: int | None = Query(default=None, ge=1, le=3),
+    min_weight: float = Query(default=0.0, ge=0.0, le=1.0),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=2000, ge=1, le=10_000),
+) -> dict[str, Any]:
+    """FR-7.8 Graph View subgraph: current nodes + one paginated edge page
+    (bulk ``list_edges`` when the driver declares GRAPH_EDGE_LIST; otherwise
+    the explicit appendix-C per-node adjacency degrade)."""
+    return _service(request).graph_subgraph(
+        profile_id=profile_id,
+        node_types=tuple(node_type) if node_type else (),
+        time_after=time_after,
+        time_before=time_before,
+        tier=tier,
+        min_weight=min_weight,
+        offset=offset,
+        limit=limit,
+    )
+
+
 # ---------------------------------------------------------------- dream panel
 
 

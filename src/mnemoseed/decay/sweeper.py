@@ -268,12 +268,14 @@ class DecaySweeper:
 
         The baseline is ``last_reinforced`` when the store carries one (the
         event's timestamp wins over the original ingestion time); freshly
-        captured shards fall back to ``ingested_at``.
+        captured shards fall back to ``ingested_at``. A consolidated chunk
+        (post-dream merge marker, design/03 §4) resolves its λ at 3× the chunk
+        rate — the evidence scene fades once the gist is in the graph.
         """
         baseline = chunk.last_reinforced if chunk.last_reinforced is not None else chunk.ingested_at
         if baseline >= cut:
             return None
-        lam = lambda_for("chunk", lam_map)
+        lam = lambda_for("chunk", lam_map, consolidated=chunk.consolidated)
         days = max(0.0, (now - baseline) / SECONDS_PER_DAY)
         candidate = decay_weight(chunk.provenance.confidence, lam, days)
         return min(chunk.decay_weight, candidate)

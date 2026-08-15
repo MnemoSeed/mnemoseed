@@ -456,3 +456,26 @@ tr:last-child td { border-bottom: none; }
 .wizard-share { display: block; margin: 0.8rem 0; }
 .wizard-share input { accent-color: var(--accent); margin-right: 0.4rem; }
 details.key-teaching > summary { cursor: pointer; color: var(--text-dim); }
+
+
+/* ---------------------------------------------------------------- graph view (FR-7.8) */
+
+.graph-shell { display: flex; flex-direction: column; gap: 0.55rem; min-height: 0; }
+.graph-toolbar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.graph-title { font-weight: 600; }
+.graph-count { color: var(--text-faint); font-size: 0.82rem; flex: 1; }
+.graph-filters { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; font-size: 0.85rem; }
+.graph-filter-label { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-dim); }
+.graph-filter-label select { background: var(--bg-inset); border: 1px solid var(--border-soft); color: var(--text); border-radius: 8px; padding: 0.3rem 0.5rem; font-size: 0.82rem; }
+.graph-filters .check-row { display: inline-flex; align-items: center; gap: 0.25rem; color: var(--text-dim); }
+.graph-filters .check-row input { accent-color: var(--accent); }
+.graph-notice { border: 1px solid #a16207; background: rgba(161, 98, 7, 0.12); color: #fbbf24; border-radius: 8px; padding: 0.45rem 0.65rem; font-size: 0.82rem; }
+.graph-layout { display: flex; gap: 0.7rem; min-height: 0; flex: 1; }
+.graph-stage { flex: 1; min-width: 0; height: calc(100vh - 210px); min-height: 420px; border: 1px solid var(--border-soft); border-radius: 10px; background: #0a0e14; overflow: hidden; cursor: grab; }
+.graph-detail { width: 300px; flex: 0 0 300px; background: var(--bg-inset); border: 1px solid var(--border-soft); border-radius: 10px; padding: 0.7rem; overflow-y: auto; max-height: calc(100vh - 210px); }
+.graph-detail h3 { margin-top: 0; font-size: 0.9rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.graph-detail-statement { font-weight: 600; margin: 0.2rem 0 0.5rem; overflow-wrap: anywhere; }
+.graph-legend { display: flex; gap: 0.6rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--text-dim); }
+.legend-chip { display: inline-flex; align-items: center; gap: 0.3rem; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.graph-perf-hud { font-family: monospace; font-size: 0.85rem; color: var(--accent); }

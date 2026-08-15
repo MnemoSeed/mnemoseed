@@ -290,6 +290,38 @@ def test_recall_records_usage_event_on_chunk_hit(tmp_path, monkeypatch) -> None:
         assert raw.get("last_hit_at") is not None
 
 
+def test_recall_reinforces_hit_chunk_fr_4_2(tmp_path, monkeypatch) -> None:
+    """FR-4.2 event side over the wire: a recall hit refreshes last_reinforced
+    and rebounds the decay_weight (bounded at 1.0) through the Reinforcer, while
+    the hit_count still increments (FR-3.7 preserved)."""
+    with _client(tmp_path, monkeypatch) as client:
+        _write_chunk(client, chunk_id="c-rf", text=_CONSTRAINT_TEXT, entities=("Mnx",), decay=0.7)
+
+        _recall(client, _CONSTRAINT_TEXT)
+
+        raw = _raw_chunk(client, "c-rf")
+        assert raw["decay_weight"] == pytest.approx(0.8)
+        assert raw.get("last_reinforced") is not None
+        assert raw["hit_count"] == 1
+
+
+def test_recall_reinforces_hit_graph_node_fr_4_2(tmp_path, monkeypatch) -> None:
+    """FR-4.2 over the graph track: a recalled node gets last_reinforced
+    refreshed and a bounded rebound; below-floor nodes only count the usage."""
+    with _client(tmp_path, monkeypatch) as client:
+        node = _pref("g-rf", "prefers dark mode", entities=("Mnx",))
+        node.decay_weight = 0.7
+        _write_node(client, node)
+
+        _recall(client, "`Mnx` 偏好")
+
+        stored = client.app.state.stores.graph.get_node("g-rf")
+        assert stored is not None
+        assert stored.decay_weight == pytest.approx(0.8)
+        assert stored.last_reinforced is not None
+        assert stored.hit_count == 1
+
+
 def test_recall_as_of_replays_old_version_fact(tmp_path, monkeypatch) -> None:
     """AC-6 / FR-3.9: an as_of in the past returns the fact as it stood then,
     while the current recall returns the present value."""

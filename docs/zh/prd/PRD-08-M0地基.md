@@ -4,7 +4,7 @@
 > 里程碑：M0（路线图 PRD-00 的 m0a + m0b）· 预估 16 天（v2 盲审修订）
 > 性质：纯地基，零用户可见功能——但它冻结的东西（schema、接口契约）之后改一次疼一次，所以本 PRD 的审查标准是全部 PRD 里最严的。
 > v2 修订：经 blind-reviewer 独立审查（15 项发现），增补接口方法清单（附录 B）、降级行为表（附录 C）、schema 冻结字段补全（profile 隔离 / 结构化 turn 边界 / 标记位 / 用量计数 / 稀疏向量表示）。
-> v1.1 修订（2026-08-13）：附录 B.2 新增 GraphStore `list_edges(filter, page)`（console Graph View 的批量边读取），能力旗标集扩至 12 个（FR-8.6）并新增 `GRAPH_EDGE_LIST`，附录 C 增加对应降级行。这是编号修订而非重写——此前冻结的语言全部原样成立。
+> v1.1 修订（2026-08-13）：附录 B.2 新增 GraphStore `list_edges(filter, page)`（console Graph View 的批量边读取），能力旗标集扩至 12 个（FR-8.6）并新增 `GRAPH_EDGE_LIST` 成员（能力**值**为 `graph.edge_list`，与其他旗标"层前缀.能力"的取值约定一致），附录 C 增加对应降级行。这是编号修订而非重写——此前冻结的语言全部原样成立。
 > v1.2 修订（2026-08-14）：附录 B.3 新增 MetaStore `archive_profile(profile_id)`（软归档；`profiles.archived` 列，migration v7），支撑 console Profiles FR-7.3。此前冻结的语言全部原样成立。
 
 ## 1. 目标
@@ -39,7 +39,7 @@
 | FR-8.3 | embedded 驱动四件：`lancedb_embedded` / `sqlite_graph`（自建邻接表）/ `sqlite_meta` / `bge_m3_onnx`（模型文件首次运行下载 ~543MiB（int8 量化 ONNX，实测），进度可见；另有 `synthetic` 测试 embedder） | P0 |
 | FR-8.4 | 第二驱动：`pgvector` / `pg_graph`（纯关系表，与 sqlite_graph 同 schema 同查询）/ `pg_meta`；Embedder 第二驱动 = `openai_compatible`（任意兼容端点，**只出 dense**，声明缺 `embed.sparse_output`） | P0 |
 | FR-8.5 | **接口契约测试套件**：与驱动无关的行为测试，覆盖附录 B 每个方法（附"方法 ↔ 契约测试"映射表），对 embedded 与 pg 两套驱动各跑一遍；另含 SQLite/PG **迁移对账断言**（同一 schema_version 序列、同字段定义，两侧比对零差异） | P0 |
-| FR-8.6 | capability flags 最小集（12 个）：`vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `GRAPH_EDGE_LIST` / `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`。缺能力的驱动组合：启动拒绝或走**明示降级**，降级行为表以附录 C 为准（代码与 config 文档同步） | P0 |
+| FR-8.6 | capability flags 最小集（12 个）：`vector.hybrid_search` / `vector.metadata_filter` / `vector.snapshot` / `graph.traverse_2hop` / `graph.version_chain` / `graph.cooccurrence_edges` / `graph.edge_list`（成员 `GRAPH_EDGE_LIST`）/ `meta.transaction` / `meta.concurrent_readers` / `embed.local_inference` / `embed.batch` / `embed.sparse_output`。缺能力的驱动组合：启动拒绝或走**明示降级**，降级行为表以附录 C 为准（代码与 config 文档同步） | P0 |
 | FR-8.7 | **Schema v1 冻结**（清单见附录 A）：全部结构落地为迁移文件（SQLite 与 PG 各一套，同一 schema_version 序列）；`schema_version` 表 + 纯前向 up 迁移机制；钢印 `cues.host` / `cues.task` 及 `profile_id` / `session_id` / `turn_start` / `turn_end` 字段**可空不可缺席** | P0 |
 | FR-8.8 | docker-compose 骨架（docker preset：`core + vector(pgvector) + pg + embed` 四服务，ollama 可选 profile），每服务 `/healthz`；embedded 单进程 `mnemoseed up` 一条命令起 daemon 骨架（全部驱动内嵌，无外部依赖，无业务逻辑） | P0 |
 
@@ -119,7 +119,7 @@
 - **nodes**：`id PK / type / profile_id / payload JSON / decay_weight / conflict_flag / conflict_group / needs_reconcile / pending_consolidation / peripheral_gaps / valid_from / valid_to / last_reinforced / hit_count / last_hit_at / reinforce_count / provenance JSON / created_at`
   - `conflict_group`：冲突双方共享同一组 ID——成对返回（FR-3.6）与 Conflicts 收件箱靠它定位对方，单 bool 不够；
   - 三个流程旗标（needs_reconcile / pending_consolidation / peripheral_gaps）是 PRD-01/02/03 与 console Detail 页共同依赖的负载字段，必须在冻结内。
-- **edges**：`id PK / src / dst / rel / weight / provenance JSON`（共现边 = `rel='cooccur'` + weight 计数）
+- **edges**：`id PK / src / dst / rel / weight / provenance JSON`（共现边 = `rel='co_occurred'` + weight 计数；共现与关系边同表）
 - **node_versions**：append-only 版本链（`node_id / version / payload 快照 / changed_at / superseded_by`）——as_of 双时态查询的物理基础
 - **节点类型枚举（v1 冻结）**：`USER / HABIT / PREFERENCE / ANIMA / INTENTION / CONSTRAINT / EPISODE / SKILL_SEQUENCE / DECISION / PROJECT / TOOL`
 - **晋升状态字段（v5）**：图谱节点加 `promotion_status`（`pending / promoted / quarantined / scrapped`，默认 promoted 兼容存量）——晋升质量门的载体（design/02 §11），早加比晚加便宜；读取侧重排加 ζ·confidence 项（design/03 §2）
@@ -149,8 +149,8 @@
 | search(dense, sparse?, filter, top_k) | 混合检索 + metadata 过滤（profile_id / decay_weight 下限 / 时间区间） | 检索 |
 | near_duplicate(vector, threshold, profile_id) | 近重复探测，支持 0.9 / 0.85 双阈值；profile_id 必填（D5 隔离） | 捕获 FR-1.8 赫布强化 |
 | snapshot_read(filter) | 梦境只读快照；无 snapshot 能力时退化 turn_range 逻辑读 | 梦境引擎 |
-| mark_consolidated(chunk_ids) | 批量置 consolidated | 梦境清空 |
-| purge_range(session_id, turn_start, turn_end) | 按快照范围安全清空，两端互不干扰 | 梦境 FR-2.x |
+| mark_consolidated(chunk_ids) | 批量置 consolidated；梦境清空以标记（而非删除）其消费的碎片，碎片保留为证据现场并按 λ × 3 衰减（design/03 §4） | 梦境清空 |
+| purge_range(session_id, turn_start, turn_end) | 存储层范围清空；两端互不干扰 | 契约 / 遗留调用方（梦境路径改由 mark_consolidated 清空） |
 | update_weights(updates[]) | 批量写 decay_weight / last_reinforced / reinforce_count | 衰减与强化回弹 |
 | update_chunk_state(chunk_ids, hit_increment?, needs_reconcile?) | 批量写使用计数（hit_count / last_hit_at）与 needs_reconcile 置位/清除；hit_increment>0 时同时刷新 last_hit_at | 检索命中计数、捕获 FR-1.8 疑似矛盾标记 |
 | list_chunks(filter, page) | 过滤 + 分页列表 | console Browser |
@@ -170,12 +170,12 @@
 | as_of(timestamp, filter) | 时间点回放查询（双时态） | 检索 FR-3.9 |
 | batch_update_weights(updates[]) | 批量衰减重算（10 万级 < 60s，NFR-4.1） | Decay |
 | query_intentions(status, due_before) | pending INTENTION 到期查询 | 调度器 FR-3.15 |
-| list_edges(filter, page) | **批量边列举**（v1.1 修订，2026-08-13）支撑 console Graph View；过滤字段：profile_id / 节点类型 / 时间窗 / Tier / 最小边权；分页 + 稳定排序；每项返回边 id、端点、类型（`relation` / `cooccurrence`）、权重、时间戳 | console Graph View |
+| list_edges(filter, page) | **批量边列举**（v1.1 修订，2026-08-13；已交付的规范形态）支撑 console Graph View——过滤 = `EdgeFilter`（profile_id / node_types / tier / created_after / created_before / min_weight）：`node_types` 与 `tier` 限定边的两个端点且要求**两端均为当前版本节点**、类型/Tier 匹配，时间窗与 `min_weight` 作用于边行本身；每条 `EdgeEntry` 返回 edge_id / src / dst / kind（`relation` / `cooccurrence`）/ weight / created_at；分页 + 稳定排序 `created_at DESC, id ASC` | console Graph View |
 | capabilities() | 自报能力集 | 启动校验 |
 
 注：图谱中心性（重排公式 δ 项）由检索侧基于 traverse 结果端侧计算，M0 不引入独立中心性查询。
 
-注（v1.1 修订，2026-08-13）：`list_edges` 在 `sqlite_graph` 与 `pg_graph` **两者都要求实现**，各配契约测试（AC-3）。新能力旗标 `GRAPH_EDGE_LIST` 遵循附录 C 的降级语义：缺该能力的驱动将 console 图谱降级为经 `traverse()` 逐节点取边（批量边视图不可用），并打显式启动警告。
+注（v1.1 修订，2026-08-13；已交付）：`list_edges` 在 `sqlite_graph` 与 `pg_graph` **两者都要求实现**，各配契约测试（AC-3），且**无需迁移**——共现边与关系边同住 `edges` 表（`rel = 'co_occurred'`）。新能力旗标（成员 `GRAPH_EDGE_LIST`，值 `graph.edge_list`）遵循附录 C 的降级语义；启动闸门按层前缀匹配能力（本能力属 `graph` 层），缺该能力的图驱动将 console 图谱降级为经 `traverse()` 逐节点取边（批量边视图不可用），并打显式启动警告。
 
 ### B.3 MetaStore
 
@@ -215,7 +215,7 @@
 | `vector.hybrid_search` | 同上（dense-only） | 降级 + 启动警告 |
 | `vector.snapshot` | 梦境快照退化为 turn_range 逻辑隔离，隔离强度降级警告 | 降级 + 启动警告 |
 | `graph.cooccurrence_edges` | 重排丢 ε 共现项，检索质量警告 | 降级 + 启动警告 |
-| `GRAPH_EDGE_LIST` | console Graph View 批量边列表降级为经 `traverse()` 逐节点取边，console 图谱性能警告 | 降级 + 启动警告 |
+| `graph.edge_list`（`GRAPH_EDGE_LIST`） | console Graph View 批量边列表降级为经 `traverse()` 逐节点取边，console 图谱性能警告 | 降级 + 启动警告 |
 | `meta.concurrent_readers` | console 读取串行化，并发性能警告 | 降级 + 启动警告 |
 | `embed.batch` | 向量化逐条执行，吞吐警告 | 降级 + 启动警告 |
 

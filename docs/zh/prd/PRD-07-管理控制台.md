@@ -25,7 +25,7 @@
 | FR-7.5 | Memory Detail 档案页：verbatim↔三元组对照、provenance 全时间线、版本链 diff、权重全量（decay 曲线投影、S 三分量、confidence、强化次数）、召回命中统计、全部标记位 | P0 |
 | FR-7.6 | Dream 面板：待清算队列、运行历史（turn_range/模型/tokens/成本/分流计数/中断标记）、**提炼质量审查界面**（原始分片↔提炼物逐条对照，接受/拒绝/标幻觉）、dream --once 触发按钮、自动触发器开关（默认关） | P0 |
 | FR-7.7 | Conflicts 收件箱：矛盾双方成对展示 + 四分支处理（强化/共存划界/作废/挂起），处理写回版本链 | P1（M1 末） |
-| FR-7.8 | Graph View：**手写 three.js instanced 图层**——节点一次 `THREE.Points` 自定义 shader 绘制、边一次 `InstancedMesh` 四边形、top-60 中心性节点 canvas-sprite 标签、`Raycaster` 拾取、预计算聚类布局（2026-08-12 拍板；基准证据 [docs/bench/graphview-three-results.md](../../bench/graphview-three-results.md)，可运行工件 `.bench/graphview-three/`（本地、不入库），2026-08-13）；节点透明度 = decay_weight（遗忘可视化）、颜色 = 类型、大小 = 中心性、边粗细 = 权重；过滤 profile/类型/时间/Tier；点击进档案页；最低硬件上 5k 节点保持 ≥30 fps（NFR-7.2 v2） | P0（console-COMPLETE） |
+| FR-7.8 | Graph View：**手写 three.js instanced 图层**——节点一次 `THREE.Points` 自定义 shader 绘制、边一次 `InstancedMesh` 四边形、top-60 中心性节点 canvas-sprite 标签、`Raycaster` 拾取、预计算聚类布局（2026-08-12 拍板；基准证据 [docs/bench/graphview-three-results.md](../../bench/graphview-three-results.md)，可运行工件 `.bench/graphview-three/`（本地、不入库），2026-08-13）；节点透明度 = decay_weight（遗忘可视化）、颜色 = 类型、大小 = 中心性、边粗细 = 权重；过滤 profile/类型/时间/Tier；点击进档案页；最低硬件上 5k 节点保持 ≥30 fps（NFR-7.2 v2）。**已实现（2026-08-15）**：页面 ④ 位于 `/console/#/graph`——按 docs/bench 证据采用 **vendored** three.js instanced 图层（`three.module.js` 置于 `/console/vendor`，永不走 CDN）；批量边来自 `list_edges`，图驱动缺该能力时按附录 C 显示降级提示 | P0（console-COMPLETE） |
 | FR-7.9 | 全部写操作进 Audit Log（actor ∈ console\|cli\|mcp）；Audit Log 页面带过滤分页 | P0（console-COMPLETE） |
 | FR-7.10 | Anima 面板（进阶模块，不在首发）：特质雷达图（轴数随 schema 不锁死六轴；顶点=mean，误差带=width 不确定性可视，允许手动微调）；白话创建（自然语言描述 → 模型量化生成模板）；核心实线 + 染层当前表现虚线叠加；跨 profile 链接/换绑入口 + 换绑触发 re-dye 确认；drift_history 时间轴回放（design/09 §7） | 进阶 / Out |
 | FR-7.11 | 每条 console 写入与设置变更都由 **daemon 独占的 ConfigWriteService**（唯一配置写入者）支撑：registry → 校验 → 外科式 toml 补丁 → 版本化 meta-store 记录（既有 `set_config`/`rollback_config` 端口）→ 带 actor 归属（console\|cli\|mcp）的审计 → live-apply 或 restart-required 标记；config.toml 降级为生成镜像——registry 键以 meta store 为准（升级时 store 为空则一次性审计导入 `config_import`）；文件被手改按 mtime/hash 侦测，DB 胜出：镜像被重写并记 `config_mirror_drift` 告警 + 审计条目（原 `config_rebaseline` 语义作废）；**配置权限系统级**：⑧/⑨ 写操作仅 owner/admin 级（自托管 = owner 账号；商业多用户 license = admin 级、作用于所有用户；SaaS = 云 Admin Plane、作用于所有用户），不是用户个人设置 | P0 |
@@ -71,7 +71,7 @@
 
 ### W3 · Graph View + 演示造数（5d）——PRD-04 落地后
 
-10. GraphStore 端口扩展：`list_edges(filter, page)` + `GRAPH_EDGE_LIST` 能力（per PRD-08 附录 B 修订 v1.1）（1d）
+10. GraphStore 端口扩展：`list_edges(filter, page)` + `GRAPH_EDGE_LIST` 能力（值 `graph.edge_list`；per PRD-08 附录 B 修订 v1.1）（1d）
 11. `console/graph` —— 手写 three.js instanced 图层 Graph View（THREE.Points 节点 / InstancedMesh 边 / canvas-sprite top-60 标签 / 拾取 / 预计算聚类布局）+ 过滤（profile/类型/时间/Tier）+ 点击 → Detail（2d）
 12. 为衰减图谱演示造数（各类型/Tier 间 decay 权重方差，供营销演示）+ 最低硬件 GPU 复测（NFR-7.2 v2），含端口扩展 e2e 暴露的修复（2d）
 
@@ -81,4 +81,4 @@
 
 - PRD-01/02/03/04 全部（console 是它们的观测面）；W1/W2 与 PRD-04 并行，W3 在 PRD-04 落地后
 - PRD-06（login/token 身份模型，admin token 复用；onboard 共享后端服务）
-- PRD-08 附录 B 修订 v1.1（[PRD-08](../prd/PRD-08-M0地基.md) GraphStore `list_edges(filter, page)` + `GRAPH_EDGE_LIST` 能力）——W3 前置
+- PRD-08 附录 B 修订 v1.1（[PRD-08](../prd/PRD-08-M0地基.md) GraphStore `list_edges(filter, page)` + `GRAPH_EDGE_LIST` 能力，值 `graph.edge_list`）——W3 前置

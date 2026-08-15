@@ -27,7 +27,7 @@ Driver families covered by the `stack` fixture:
 | update_weights | `test_contract_vector.py::test_update_weights` |
 | upsert_chunk | `test_contract_vector.py::test_upsert_get_roundtrip` |
 
-## GraphStore (19 methods)
+## GraphStore (20 methods)
 
 | Method | Contract test |
 |---|---|
@@ -42,6 +42,7 @@ Driver families covered by the `stack` fixture:
 | find_same_predicate | `test_contract_graph.py::test_find_same_predicate` |
 | get_node | `test_contract_graph.py::test_upsert_get_roundtrip` |
 | invalidate | `test_contract_graph.py::test_invalidate_closes_current_revision` |
+| list_edges | `test_contract_graph.py::test_list_edges_kinds_filters_and_stable_pagination` |
 | list_nodes | `test_contract_graph.py::test_list_nodes_filter_pagination` |
 | query_intentions | `test_contract_graph.py::test_query_intentions_status_and_due` |
 | set_flags | `test_contract_graph.py::test_set_and_clear_flags` |

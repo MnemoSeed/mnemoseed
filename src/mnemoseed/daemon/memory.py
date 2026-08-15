@@ -6,7 +6,8 @@ Router + service seam over the retrieval engine and the storage ports:
                             envelope cues, top_k / budget / as_of overrides, the
                             honest-empty CoverageReport (FR-3.13), conflict
                             pairing / pending-consolidation / fresh-evidence
-                            markers, and fire-and-forget usage events (FR-3.7).
+                            markers, and fire-and-forget usage events that both
+                            count the hit (FR-3.7) and reinforce it (FR-4.2).
 - POST /memory/remember   - explicit user pin; provenance asserts
                             ``asserted_by="user"`` with source
                             ``EXPLICIT_PIN_SOURCE``; identical re-pins reinforce
@@ -48,6 +49,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from mnemoseed.capture.stamper import ConsistencyVerdict, NearDuplicateChecker, WriteConfig
 from mnemoseed.config import Config
+from mnemoseed.decay import Reinforcer
 from mnemoseed.dream import DreamTrigger, TriggerStatus
 from mnemoseed.identity.actor import resolve_actor
 from mnemoseed.identity.gate import require_identity
@@ -262,6 +264,9 @@ class MemoryService:
         self._cues = CueExtractor()
         self._retriever = HybridRetriever()
         self._assembler = Assembler()
+        # FR-4.2 event side: retrieval usage becomes a reinforcement event
+        # (baseline refresh + bounded rebound), the counterpart of the sweep.
+        self._reinforcer = Reinforcer(stores)
 
     @property
     def retriever(self) -> HybridRetriever:
@@ -324,16 +329,20 @@ class MemoryService:
         return {"memory": self._memory_payload(context)}
 
     def _record_hits(self, context: AssembledContext) -> None:
-        """FR-3.7 usage events: fire-and-forget, never failing or blocking recall.
+        """FR-3.7 usage events + FR-4.2 reinforcement: fire-and-forget, never
+        failing or blocking recall.
 
-        Only chunks that made the context package are counted (a hit means the
-        recalled memory). The raw store write is best-effort by design.
+        Only items that made the context package are counted and reinforced (a
+        hit means the recalled memory). The raw store write is best-effort by
+        design; the Reinforcer additionally refreshes ``last_reinforced`` and
+        rebounds ``decay_weight`` (bounded at 1.0) for every above-floor hit.
         """
         chunk_ids = [entry.id for entry in context.entries if entry.kind == "chunk"]
-        if not chunk_ids:
+        node_ids = [entry.id for entry in context.entries if entry.kind == "graph"]
+        if not chunk_ids and not node_ids:
             return
         try:
-            self._stores.vector.update_chunk_state(chunk_ids, hit_increment=1)
+            self._reinforcer.record_hits(chunk_ids, node_ids)
         except Exception:  # pragma: no cover - usage accounting must not fail recall
             logger.warning("usage-event write failed; recall proceeds", exc_info=True)
 

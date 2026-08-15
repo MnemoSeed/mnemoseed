@@ -185,6 +185,8 @@ erDiagram
 | A graph node is rewritten by Reconcile | The associated vector chunks are retained; provenance.history appends a pointer |
 | Retrieval results contradict each other | Never silently pick one; go through flag_conflict paired return |
 
+**D1 shipped (2026-08-15, decay, PRD-04)**: the consolidated-chunk λ × 3 row above is implemented (`decay.model.lambda_for`, the marker written back by the dream engine). `ChunkStamp.last_reinforced` now surfaces on the vector read path (`list_chunks` / `get_chunk`), so the decay sweep's chunk pass reads the reinforcement baseline through the existing ports — no new port method.
+
 ---
 
 ## 5. Docker Compose Ecosystem (issue #5: split by purpose)

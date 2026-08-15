@@ -64,6 +64,8 @@ flowchart TB
 - filters: profile / node type / time window / Tier;
 - clicking a node → opens the ⑤ Memory Detail side panel.
 
+**Shipped (2026-08-15)**: page ④ is live at `/console/#/graph` — vendored three.js instanced layer (`three.module.js` under `/console/vendor`, never a CDN); bulk edges come from `list_edges` (PRD-08 B.2 v1.1), and a graph driver lacking that capability shows the Appendix C degrade notice and falls back to per-node edge fetching.
+
 **Decision record (three.js hand-rolled, approved 2026-08-12; benchmark evidence 2026-08-13 in [bench/graphview-three-results.md](../bench/graphview-three-results.md) (runnable artifact `.bench/graphview-three/`, local/gitignored))**: the layered alternative (three-forcegraph 1.43.4 on three.js 0.185.1) was benchmarked against the hand-rolled layer at 5,000 nodes / ~19k edges (RTX 3070, headed Chrome, real GPU, two runs stable):
 
 | scenario | layered (three-forcegraph) | hand-rolled (instanced three.js) |
