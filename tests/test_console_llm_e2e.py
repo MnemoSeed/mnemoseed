@@ -23,8 +23,11 @@ runs in-process only.
 
 from __future__ import annotations
 
+import json
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -98,13 +101,14 @@ def _client(
     monkeypatch: pytest.MonkeyPatch,
     *,
     home: Path | None = None,
+    cfg: Path | None = None,
 ) -> Iterator[TestClient]:
     """Boot the real daemon on a spare port with a throwaway config dir (the
     test twin of a fresh ``MNEMOSEED_HOME``); owner set up + token attached."""
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     home_dir = tmp_path / "home"
     monkeypatch.setenv("MNEMOSEED_HOME", str(home_dir))
-    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _config_toml(tmp_path))
+    monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", cfg if cfg is not None else _config_toml(tmp_path))
     monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
     if home is not None:
         monkeypatch.setenv("MNEMOSEED_USER_HOME", str(home))
@@ -118,6 +122,181 @@ def _client(
 def _roles(client: TestClient) -> dict[str, dict[str, object]]:
     body = client.get("/api/v1/llm/routes").json()
     return {entry["role"]: entry for entry in body["roles"]}
+
+
+# ------------------------------------------------- custom-provider echo endpoint (JH dogfood regression)
+
+#: The pasted key value JH walked the dogfood flow with (fictional here).
+_CUSTOM_KEY = "sk-test-moonshot-kimi-9012"
+
+_CUSTOM_MODEL = "moonshotai/Kimi-K3"
+
+
+class _AuthCheckingHandler(BaseHTTPRequestHandler):
+    """A throwaway OpenAI-compatible provider: GET /models answers 200 with the
+    catalog ONLY when a Bearer key rides along — 401 otherwise, exactly the
+    "wrong/missing key" rejection JH's modal.direct endpoint returned."""
+
+    def log_message(self, *args):  # silence test output
+        pass
+
+    def _authorized(self) -> bool:
+        return str(self.headers.get("Authorization", "")).startswith("Bearer ")
+
+    def do_GET(self):
+        if self.path.endswith("/models") and self._authorized():
+            body = json.dumps(
+                {"data": [{"id": _CUSTOM_MODEL}, {"id": "deepseek/deepseek-v4-flash"}]}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": "invalid api key"}).encode())
+
+    def do_POST(self):
+        if not self._authorized():
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "invalid api key"}).encode())
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode())
+
+
+@contextmanager
+def _echo_provider() -> Iterator[str]:
+    """A live auth-checking endpoint (base_url) on an ephemeral port."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AuthCheckingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/v1"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def _custom_config_toml(tmp_path: Path) -> Path:
+    """Embedded config whose deep_reflection role starts on openai_compatible
+    (the editor's custom-provider card), network-free short_increment."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'preset = "embedded"\n'
+        f'[storage.vector]\nuri = "{(tmp_path / "chunks.lance").as_posix()}"\ndimensions = 64\n'
+        f'[storage.graph]\npath = "{(tmp_path / "cortex.db").as_posix()}"\n'
+        f'[storage.meta]\npath = "{(tmp_path / "meta.db").as_posix()}"\n'
+        f'[storage.embed]\ndriver = "synthetic"\ndimension = 64\n'
+        "[dream.llm.deep_reflection]\n"
+        'driver = "openai_compatible"\n'
+        'model = "kimi-k3"\n'
+        'base_url = "http://127.0.0.1:9"\n'
+        "[dream.llm.short_increment]\n"
+        'driver = "stub"\n'
+        'model = "stub"\n',
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def test_custom_provider_paste_probe_save_end_to_end(tmp_path, monkeypatch) -> None:
+    """JH dogfood regression, green: the ⑧ editor's custom-provider
+    chain (paste key -> probe -> save) persists end to end — the key lands in
+    the secret store, the probe authenticates through the pinned reference, the
+    save writes every route field into the config mirror, and the routes
+    payload reports the custom endpoint. No dead ``provider = "other"`` field
+    is ever written."""
+    monkeypatch.setenv("MNEMOSEED_SECRET_BACKEND", "file")  # pin the file backend
+    cfg = _custom_config_toml(tmp_path)
+    role = "deep_reflection"
+    ref = f"secrets:mnemoseed/dream/{role}"
+    with _echo_provider() as base_url, _client(tmp_path, monkeypatch, cfg=cfg) as client:
+        # 1) llmKeyPaste -> POST /api/v1/llm/key {role, key} (no provider id)
+        response = client.post("/api/v1/llm/key", json={"role": role, "key": _CUSTOM_KEY})
+        assert response.status_code == 200, response.text
+        assert response.json()["ok"] is True
+        assert response.json()["masked_tail"] == "9012"
+        # the secret FILE materializes under the config home's secrets/ dir
+        secret_file = tmp_path / "secrets" / "mnemoseed.dream.deep_reflection.key"
+        assert secret_file.read_text(encoding="utf-8") == _CUSTOM_KEY
+
+        # 2) the probe carries the reference the SPA pins into the key field ->
+        #    the pasted key resolves through the SecretStore and authenticates
+        probe = client.post(
+            "/api/v1/llm/test",
+            json={
+                "role": role,
+                "driver": "openai_compatible",
+                "model": _CUSTOM_MODEL,
+                "base_url": base_url,
+                "api_key_env": ref,
+            },
+        )
+        assert probe.status_code == 200, probe.text
+        body = probe.json()
+        assert body["ok"] is True, body["detail"]
+        assert _CUSTOM_MODEL in body["detail"]["models"]
+
+        # 3) saveRoute -> one /api/v1/config/set per route field
+        sets = [
+            {"key_path": f"dream.llm.{role}.driver", "value": "openai_compatible"},
+            {"key_path": f"dream.llm.{role}.model", "value": _CUSTOM_MODEL},
+            {"key_path": f"dream.llm.{role}.base_url", "value": base_url},
+            {"key_path": f"dream.llm.{role}.max_tokens", "value": 2048},
+        ]
+        for set_body in sets:
+            response = client.post("/api/v1/config/set", json=set_body)
+            assert response.status_code == 200, response.text
+
+        # 4) the config mirror holds every route field — and the pinned ref is
+        #    never cleared by the save (api_key_env stays the secrets reference)
+        table = cfg.read_text(encoding="utf-8").split(f"[dream.llm.{role}]", 1)[1].split("[", 1)[0]
+        for line in (
+            'driver = "openai_compatible"',
+            f'model = "{_CUSTOM_MODEL}"',
+            f'base_url = "{base_url}"',
+            "max_tokens = 2048",
+            f'api_key_env = "{ref}"',
+        ):
+            assert line in table, f"missing {line!r} in the config mirror"
+        assert "provider" not in table  # no dead field
+
+        # 5) the routes payload reports the custom endpoint + the reference
+        role_row = _roles(client)[role]
+        assert role_row["base_url"] == base_url
+        assert role_row["api_key_env"] == ref
+        assert role_row["explicit"] is True
+        effective = client.get("/api/v1/llm/routes").json()["routes"][role]["effective"]
+        assert effective["base_url"] == base_url
+        assert effective["api_key_env"] == ref
+
+
+def test_custom_provider_probe_without_key_is_a_typed_authenticated_failure(tmp_path, monkeypatch) -> None:
+    """JH: before any key is wired, the custom-endpoint probe fails against the
+    provider (401) and that failure is a typed result — never a silent success
+    and never a silent no-op — so the console renders the failure text."""
+    with _echo_provider() as base_url, _client(tmp_path, monkeypatch) as client:
+        probe = client.post(
+            "/api/v1/llm/test",
+            json={
+                "role": "deep_reflection",
+                "driver": "openai_compatible",
+                "model": _CUSTOM_MODEL,
+                "base_url": base_url,
+                "api_key_env": "",  # the unauthenticated SPA payload before a paste
+            },
+        )
+        assert probe.status_code == 200
+        body = probe.json()
+        assert body["ok"] is False
+        assert "401" in str(body["detail"])
 
 
 # ---------------------------------------------------------------- wizard D4 share

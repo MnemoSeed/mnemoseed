@@ -498,10 +498,17 @@ def _patch_toml(path: Path, key_path: str, value: Any) -> None:
     place (never duplicated) or creating the table after the last existing one.
     A hand-written ``[<table_path>.<leaf>]`` sub-table spelling of the target
     key is dropped first, so the inline form never double-defines it.
+
+    The file's trailing newline splits to a phantom empty element; it is
+    dropped up front so a table span never carries it into the patched output
+    (a series of writes into the last table would otherwise drift one blank
+    line between every key).
     """
     table_path, _, leaf = key_path.rpartition(".")
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = _drop_nested_table(original.split("\n"), table_path, leaf)
+    while lines and lines[-1] == "":
+        lines.pop()
     spans = _table_spans(lines)
 
     if table_path in spans:
@@ -524,7 +531,9 @@ def _patch_toml(path: Path, key_path: str, value: Any) -> None:
         if value is None:
             return  # a clear with no table to edit writes nothing
         insert_at = max((finish for _, finish in spans.values()), default=len(lines))
-        block = [f"[{table_path}]", f"{leaf} = {_toml_value(value)}"]
+        # One blank separator before a freshly created table keeps the mirror
+        # readable; the final join strips it when the file was empty.
+        block = ["", f"[{table_path}]", f"{leaf} = {_toml_value(value)}"]
         out = lines[:insert_at] + block + lines[insert_at:]
 
     path.parent.mkdir(parents=True, exist_ok=True)

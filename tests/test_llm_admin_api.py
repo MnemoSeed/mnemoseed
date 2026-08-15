@@ -309,6 +309,45 @@ def test_llm_set_role_roundtrips_persists_and_audits(tmp_path, monkeypatch) -> N
         assert "sk-" not in json.dumps(entries[0].detail)
 
 
+def test_llm_set_role_never_persists_the_other_card_id(tmp_path, monkeypatch) -> None:
+    """JH dogfood: the custom "Another OpenAI-compatible API" card id
+    ("other") is UI metadata, never a route field — a probe+persist carrying it
+    must pass the same gate and land base_url/model WITHOUT a dead
+    ``provider = "other"`` line in the config mirror."""
+    cfg = _config_toml(tmp_path)
+    with _client(tmp_path, monkeypatch, cfg=cfg) as client:
+        probe = client.post(
+            "/api/v1/llm/test",
+            json={
+                "role": "short_increment",
+                "driver": "stub",
+                "model": "custom-model",
+                "base_url": "http://custom.test/v1",
+                "provider": "other",
+            },
+        )
+        assert probe.status_code == 200
+        assert probe.json()["ok"] is True
+        response = client.post(
+            "/api/v1/llm/routes/short_increment",
+            json={
+                "driver": "stub",
+                "model": "custom-model",
+                "base_url": "http://custom.test/v1",
+                "provider": "other",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["provider"] is None
+        on_disk = cfg.read_text(encoding="utf-8")
+        assert 'base_url = "http://custom.test/v1"' in on_disk
+        assert 'model = "custom-model"' in on_disk
+        assert 'provider = "other"' not in on_disk
+        roles = {r["role"]: r for r in client.get("/api/v1/llm/routes").json()["roles"]}
+        assert roles["short_increment"]["base_url"] == "http://custom.test/v1"
+        assert roles["short_increment"]["provider"] is None
+
+
 def test_llm_set_role_clears_optional_param(tmp_path, monkeypatch) -> None:
     cfg = _config_toml(tmp_path)
     with _client(tmp_path, monkeypatch, cfg=cfg) as client:

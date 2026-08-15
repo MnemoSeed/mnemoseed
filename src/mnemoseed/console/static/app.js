@@ -281,6 +281,9 @@ const state = {
     editingRole: null,
     message: null,
     probeOk: {},
+    // role -> the last probe's failure text while the save gate blocks (JH:
+    // a blocked save says WHY the exact values did not pass the probe)
+    probeError: {},
     // provider id -> model list fetched by a passing probe (the editor's
     // provider-scoped datalist catalog, §7.2)
     catalog: {},
@@ -912,7 +915,8 @@ function wizardPayload(wizard) {
   const payload = {
     driver: oauthMode ? "oauth" : provider ? provider.driver : "",
     model: wizard.model.trim(),
-    provider: oauthMode ? wizard.oauthProvider : provider ? provider.id : "",
+    // The custom "other" card id is UI metadata, never a route field.
+    provider: oauthMode ? wizard.oauthProvider : provider && provider.id !== "other" ? provider.id : "",
   };
   if (!oauthMode && provider) {
     const baseUrl = (wizard.baseUrl || provider.baseUrl || "").trim();
@@ -2891,6 +2895,26 @@ function llmOauthPasteHtml(oauth, activeId) {
   </details>`;
 }
 
+// The custom "Another OpenAI-compatible API" card's role-bound key paste: the
+// key goes straight to the daemon (POST /api/v1/llm/key {role, key}), which
+// pins the secrets: reference; the editor then carries that reference in the
+// key field so the probe authenticates with the stored key (JH dogfood
+// regression).
+function llmCustomPasteHtml(role) {
+  return `<details class="key-teaching" data-custom-paste hidden>
+    <summary>paste an API key instead</summary>
+    <div class="field">
+      <label for="llm-paste-key-${esc(role)}">API key for ${esc(role)}</label>
+      <input type="password" id="llm-paste-key-${esc(role)}" name="paste_key" placeholder="paste the API key for this endpoint" autocomplete="off" />
+    </div>
+    <p class="toolbar-note">The key goes straight to the daemon — never into browser storage. Storing it pins the secrets: reference and the next probe uses it.</p>
+    <div class="toolbar">
+      <button class="btn" type="button" data-act="llm-key-paste">store key</button>
+    </div>
+    <output class="feedback" data-key-paste-feedback></output>
+  </details>`;
+}
+
 // Keep the paste field bound to the host login currently picked in the form
 // (or the first known host login when no oauth card is selected).
 function llmBindOauthPaste(form, activeId) {
@@ -2945,11 +2969,18 @@ function llmSyncEditorGate(form, activeId) {
 }
 
 async function llmKeyPaste(form, provider) {
-  const output = form.querySelector("[data-key-paste-feedback]");
-  const input = form.elements.oauth_token;
+  // The active paste block is whichever the picked provider card exposes: the
+  // host-login token block (oauth cards) or the role-bound key block (the
+  // custom "other" card). Only the visible block's input/feedback are touched.
+  const block =
+    form.querySelector("[data-oauth-paste]:not([hidden])") ||
+    form.querySelector("[data-custom-paste]:not([hidden])") ||
+    form;
+  const output = block.querySelector("[data-key-paste-feedback]");
+  const input = block.querySelector('input[type="password"]');
   const token = input ? String(input.value || "").trim() : "";
   if (!token) {
-    if (output) output.innerHTML = errorInline("paste the token first");
+    if (output) output.innerHTML = errorInline("paste the key first");
     return;
   }
   const role = form.dataset.role || "";
@@ -2957,7 +2988,7 @@ async function llmKeyPaste(form, provider) {
     if (output) output.innerHTML = errorInline("no role bound to this editor");
     return;
   }
-  if (output) output.innerHTML = '<span class="dim">storing token…</span>';
+  if (output) output.innerHTML = '<span class="dim">storing key…</span>';
   try {
     await api("/api/v1/llm/key", {
       method: "POST",
@@ -2965,25 +2996,46 @@ async function llmKeyPaste(form, provider) {
       body: JSON.stringify({ role, key: token }),
     });
     if (input) input.value = "";
-    if (output) output.innerHTML = '<span class="badge badge-ok">token stored</span>';
+    if (block.hasAttribute("data-custom-paste")) {
+      // Pin the written reference into the key field so the probe and the save
+      // authenticate with the stored key instead of clearing it back to empty.
+      const envField = form.elements.api_key_env;
+      if (envField) envField.value = `secrets:mnemoseed/dream/${role}`;
+    }
+    if (output) output.innerHTML = '<span class="badge badge-ok">key stored</span>';
   } catch (error) {
-    const cmd = LLM_OAUTH_LOGIN_CMD[provider] || `${provider} login`;
+    const cmd = provider ? LLM_OAUTH_LOGIN_CMD[provider] || `${provider} login` : "";
     if (output) {
-      output.innerHTML = /HTTP (404|405|501|502)/.test(error.message)
-        ? errorInline(`key paste is not available on this daemon yet — run ${cmd} instead`)
-        : errorInline(`store failed: ${error.message}`);
+      output.innerHTML =
+        provider && /HTTP (404|405|501|502)/.test(error.message)
+          ? errorInline(`key paste is not available on this daemon yet — run ${cmd} instead`)
+          : errorInline(`store failed: ${error.message}`);
     }
   }
 }
 
 // The provider card id currently in play for a role: a saved oauth route maps to
-// its "oauth:<provider>" card, a driver/provider route to its matching card.
+// its "oauth:<provider>" card, a driver/provider route to its matching card. A
+// custom route (explicit base_url, no provider — the "other" card never writes
+// its id into config) is matched by its endpoint: a base_url that belongs to no
+// known provider default maps to the "Another OpenAI-compatible API" card.
 function llmActiveProviderId(role) {
   const route = findLLMRoute(role);
   if (!route) return "";
   if (route.driver === "oauth") return `oauth:${route.provider || ""}`;
-  const provider = llmProviderFor(route.driver, route.provider);
-  return provider ? provider.id : "";
+  if (route.provider) {
+    const byName = llmProviderById(route.provider);
+    if (byName) return byName.id;
+  }
+  const driverCards = LLM_PROVIDERS.filter((card) => card.driver === route.driver);
+  if (route.base_url) {
+    const byUrl = driverCards.find(
+      (card) => card.baseUrl && String(route.base_url).startsWith(card.baseUrl),
+    );
+    return byUrl ? byUrl.id : "other";
+  }
+  const fallback = driverCards.find((card) => card.id !== "other");
+  return fallback ? fallback.id : "";
 }
 
 // §3.2 morphing: the editor form's fields follow the picked provider card.
@@ -3001,14 +3053,32 @@ function llmApplyEditorProvider(form, activeId, morphValues) {
   const role = form.dataset.role || "";
   const driverInput = form.elements.driver;
   if (driverInput) driverInput.value = isOAuth ? "oauth" : provider ? provider.driver : "";
-  const needsKey = Boolean(provider && provider.keyEnv);
+  // Every cloud provider needs a key source: the standard providers carry
+  // their env-var NAME, the custom "other" card falls back to the role's env
+  // name (or the secrets: reference a paste pins). Only ollama and oauth mode
+  // hide the field.
+  const needsKey = Boolean(provider && provider.driver !== "ollama");
   const keyField = form.querySelector("[data-key-field]");
   const keyInput = form.elements.api_key_env;
   if (keyField) keyField.hidden = isOAuth || !needsKey;
   if (keyInput) {
     if (isOAuth || (morphValues && !needsKey)) keyInput.value = "";
-    else if (morphValues && needsKey) keyInput.value = provider.keyEnv || LLM_ROLE_KEY_ENV[role] || "";
+    else if (morphValues && needsKey) {
+      // A custom card keeps the field's current key source (a pinned secrets:
+      // reference) instead of blanking it; known providers re-seed their name.
+      if (provider.keyEnv || !keyInput.value) {
+        keyInput.value = provider.keyEnv || LLM_ROLE_KEY_ENV[role] || "";
+      }
+    }
   }
+  // JH: while the custom "other" card is picked, the ONLY paste surface is its
+  // role-bound key block; the host-login token paste stays scoped to the oauth
+  // cards (and vice versa — never both at once).
+  const isOther = Boolean(provider && provider.id === "other");
+  const oauthPaste = form.querySelector("[data-oauth-paste]");
+  if (oauthPaste) oauthPaste.hidden = isOther;
+  const customPaste = form.querySelector("[data-custom-paste]");
+  if (customPaste) customPaste.hidden = !isOther;
   const endpointField = form.querySelector("[data-endpoint-field]");
   const urlInput = form.elements.base_url;
   if (endpointField) endpointField.hidden = isOAuth;
@@ -3062,6 +3132,7 @@ function llmEditFormHtml(role, drivers) {
     <h4>Which provider?</h4>
     <div class="filter-grid">${cards}</div>
     ${llmOauthPasteHtml(state.llm.oauth, activeId)}
+    ${llmCustomPasteHtml(role.role)}
     <div class="filter-grid">
       <div class="field"><label for="llm-model-${esc(role.role)}">model</label>
         <input type="text" id="llm-model-${esc(role.role)}" name="model" list="llm-models-${esc(role.role)}" value="${esc(modelValue)}" placeholder="type or pick a model" required autocomplete="off" />
@@ -3159,6 +3230,7 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
     if (result.ok) {
       // A passing probe for the exact current form values arms the save gate.
       state.llm.probeOk[role] = llmProbeSignature(driver, model, baseUrl || "", apiKeyEnv || "", provider || "");
+      delete state.llm.probeError[role];
       // §7.2: the model combobox catalog refreshes from the probe's models list
       // and is cached per provider (so a card switch back re-lists it).
       const models =
@@ -3176,6 +3248,9 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
       }
     } else {
       delete state.llm.probeOk[role];
+      // Keep the last probe's failure so a blocked save can say WHY (JH: a
+      // blocked save is never a silent no-op).
+      state.llm.probeError[role] = llmProbeMessage(result, payload, providerMeta);
     }
     if (feedbackEl) {
       feedbackEl.innerHTML = result.ok
@@ -3184,6 +3259,7 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
     }
   } catch (error) {
     delete state.llm.probeOk[role];
+    state.llm.probeError[role] = error.message;
     if (feedbackEl) feedbackEl.innerHTML = errorInline(`test failed: ${error.message}`);
   }
 }
@@ -3233,7 +3309,13 @@ async function saveRoute(role, form) {
     }
   }
   if (state.llm.probeOk[role] !== llmProbeSignature(driver, model, baseUrl, apiKeyEnv, provider)) {
-    if (feedback) feedback.innerHTML = errorInline("Test the connection first — a route can only be saved after a passing probe of these exact values.");
+    const reason = state.llm.probeError[role];
+    if (feedback) {
+      // JH: a blocked save says WHY the exact values did not pass the probe.
+      feedback.innerHTML = reason
+        ? errorInline(`Test the connection first — the last probe failed: ${reason}`)
+        : errorInline("Test the connection first — a route can only be saved after a passing probe of these exact values.");
+    }
     return;
   }
   const current = llmRoleConfig(role);
@@ -3243,7 +3325,12 @@ async function saveRoute(role, form) {
   if (current.model !== model) sets.push({ key_path: keyPath("model"), value: model });
   if ((current.base_url || "") !== baseUrl) sets.push({ key_path: keyPath("base_url"), value: baseUrl || null });
   if ((current.api_key_env || "") !== apiKeyEnv) sets.push({ key_path: keyPath("api_key_env"), value: apiKeyEnv || null });
-  if ((current.provider || "") !== provider) sets.push({ key_path: keyPath("provider"), value: provider || null });
+  // JH: the "Another OpenAI-compatible API" card id ("other") is UI metadata,
+  // never a route field — a custom endpoint is identified by its base_url, so
+  // the dead provider id must not reach the config mirror.
+  if (provider !== "other" && (current.provider || "") !== provider) {
+    sets.push({ key_path: keyPath("provider"), value: provider || null });
+  }
   if ((current.max_tokens ?? null) !== maxTokens) sets.push({ key_path: keyPath("max_tokens"), value: maxTokens });
   if (!sets.length) {
     if (feedback) feedback.innerHTML = '<span class="ok-inline">no changes — the resolved route already matches</span>';
@@ -3333,6 +3420,7 @@ function handleClick(event) {
       state.llm.editingRole = state.llm.editingRole === editRole ? null : editRole;
       // Any re-entry into the editor invalidates a previously passing probe.
       delete state.llm.probeOk[editRole];
+      delete state.llm.probeError[editRole];
       if (state.llm.editingRole === editRole) {
         const route = findLLMRoute(editRole);
         state.llm.editModel[editRole] = route ? route.model || "" : "";

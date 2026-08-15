@@ -138,6 +138,110 @@ def test_editor_oauth_gate_blocks_expired_route(app_js: str) -> None:
     assert "llmSyncEditorGate" in app_js
 
 
+# ------------------------------------------------- ⑧ custom-provider flow (JH dogfood regression)
+
+# A real user walked the ⑧ editor's "Another OpenAI-compatible API" card with a
+# custom base_url + model + pasted key and NOTHING persisted: no
+# [dream.llm.<role>] section, no secret, the role card kept the defaults. The
+# guards below pin the fixed contract: a role-bound key paste for the custom
+# card, a save that writes EVERY route field and never the dead "other" card
+# id, a probe that authenticates through the pinned secrets reference, and
+# error copy that renders the server's failure text next to the save area.
+
+
+def _needs_key_gate(app_js: str) -> str:
+    """The ``needsKey`` expression — the editor's key-field visibility gate."""
+    rule = re.search(r"const needsKey = ([^;]+);", app_js)
+    assert rule is not None, "needsKey rule missing in app.js"
+    return rule.group(1)
+
+
+def test_key_field_visibility_names_only_ollama_and_oauth_exceptions(app_js: str) -> None:
+    """§11.2: cloud-key fields are hidden ONLY for ollama (no key needed) and
+    oauth mode (host login) — every cloud provider, including the custom
+    "other" card, always renders the key field. The gate is driver-based; the
+    old ``Boolean(provider && provider.keyEnv)`` form (which hid the "other"
+    card because it ships ``keyEnv:""``) must fail here."""
+    gate = _needs_key_gate(app_js)
+    assert 'provider.driver !== "ollama"' in gate, f"ollama driver exception missing: {gate}"
+    assert "keyEnv" not in gate, f"keyEnv must not be an operand of the visibility gate: {gate}"
+    # the hide paths are exactly oauth mode and !needsKey
+    assert "keyField.hidden = isOAuth || !needsKey" in app_js
+    assert "teaching.hidden = isOAuth || !needsKey" in app_js
+
+
+def test_other_card_keyenv_empty_step_keeps_key_field_for_openai_compatible(app_js: str) -> None:
+    """The "Another OpenAI-compatible API" card ships ``keyEnv:""`` — an env-var
+    NAME step, never a clear. The key field must stay visible: the gate's
+    operands are (provider, driver), so an empty keyEnv cannot collapse it, and
+    the value re-seed falls through to the role's env-var name."""
+    block = _providers_block(app_js)
+    other = re.search(r'\{\s*id: "other",(.*?)\n\s*\},', block, re.DOTALL)
+    assert other is not None, '"other" card definition missing'
+    assert 'driver: "openai_compatible"' in other.group(1)
+    assert 'keyEnv: ""' in other.group(1)
+    # the gate's operands never include keyEnv — provider.keyEnv="" cannot hide
+    # the field or blank its value on a card switch
+    gate = _needs_key_gate(app_js)
+    assert "provider.driver" in gate
+    assert "keyEnv" not in gate
+    assert 'provider.keyEnv || LLM_ROLE_KEY_ENV[role] || ""' in app_js
+
+
+def test_custom_provider_editor_has_role_bound_key_paste(app_js: str) -> None:
+    """JH: the custom card must offer its own role-bound key paste — llmKeyPaste
+    posts {role, key} (never a hardcoded host provider) and pins the
+    ``secrets:mnemoseed/dream/<role>`` reference into the key field so the
+    probe authenticates with the stored key."""
+    for string in (
+        "paste an API key instead",
+        'data-act="llm-key-paste"',
+        "JSON.stringify({ role, key: token })",
+        "`secrets:mnemoseed/dream/${role}`",
+    ):
+        assert string in app_js
+
+
+def test_custom_provider_save_writes_every_route_field_never_dead_provider(app_js: str) -> None:
+    """JH: saveRoute writes driver/model/base_url/api_key_env/max_tokens under
+    ``dream.llm.<role>.`` (the registry contract) and must never persist the
+    "other" card id — the dead ``provider = "other"`` field must not reach the
+    config mirror."""
+    assert "const keyPath = (leaf) => `dream.llm.${role}.${leaf}`;" in app_js
+    assert 'keyPath("max_tokens")' in app_js
+    # the provider write is gated to real provider cards ("other" is UI-only)
+    assert 'provider !== "other"' in app_js
+
+
+def test_custom_provider_paste_wires_the_secrets_ref_into_the_key_field(app_js: str) -> None:
+    """After a successful paste the editor's api_key_env field carries the
+    pinned reference, so the probe and the save use the stored key instead of
+    clearing it back to nothing."""
+    assert "envField.value" in app_js
+    assert "`secrets:mnemoseed/dream/${role}`" in app_js
+
+
+def test_saved_custom_route_reopens_on_the_other_card(app_js: str) -> None:
+    """A saved custom route (explicit base_url, no provider field) must re-open
+    the editor on the "Another OpenAI-compatible API" card — matched by its
+    endpoint, never defaulting to the first provider card of the driver."""
+    assert "route.base_url" in app_js
+    assert 'byUrl ? byUrl.id : "other"' in app_js
+
+
+def test_save_test_paste_failures_render_server_error_text(app_js: str) -> None:
+    """JH: no REST failure in the save/test/paste chain is a silent no-op — the
+    server's actual error text renders next to the save area, and a blocked
+    save says WHY (the last probe's failure reason)."""
+    for string in (
+        "save failed:",
+        "store failed:",
+        "test failed:",
+        "the last probe failed",
+    ):
+        assert string in app_js
+
+
 # ------------------------------------------------- provider-scoped model picker (§3.2/§7.2)
 
 

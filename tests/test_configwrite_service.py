@@ -189,6 +189,89 @@ def test_set_api_key_env_persists_names_only(tmp_path) -> None:
     assert load_config(path).llm["short_increment"].params["api_key_env"].startswith("MNEMOSEED_")
 
 
+def test_set_role_fields_accumulate_no_blank_lines(tmp_path) -> None:
+    """The surgical patch keeps a written role table tight — including the LAST
+    table in the file, where the trailing-newline phantom would otherwise land.
+    Sequential sets of driver/model/base_url/max_tokens/api_key_env must produce
+    one key per line with NO blank lines inside the table body (raw, unfiltered
+    lines — a trailing phantom drifting between keys is the exact regression),
+    and the neighboring tables must stay intact with their ``[`` headers
+    untouched."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "# MnemoSeed configuration\n"
+        'preset = "embedded"\n'
+        "\n"
+        "[dream]\n"
+        "token_budget_usd = 5.0\n"
+        "\n"
+        "[dream.llm.short_increment]\n"
+        'driver = "stub"\n'
+        'model = "stub"\n'
+        "\n"
+        "[dream.llm.deep_reflection]\n"
+        'driver = "stub"\n'
+        'model = "stub"\n',
+        encoding="utf-8",
+    )
+    service = ConfigWriteService(load_config(path), None, clock=lambda: 1_700_000_000.0)
+    for field, value in (
+        ("driver", "openai_compatible"),
+        ("model", "moonshotai/Kimi-K3"),
+        ("base_url", "http://custom.test/v1"),
+        ("max_tokens", 4096),
+        ("api_key_env", "MNEMOSEED_DEEP_REFLECTION_API_KEY"),
+    ):
+        service.set(f"dream.llm.deep_reflection.{field}", value, actor="console")
+
+    blob = path.read_text(encoding="utf-8")
+    lines = blob.splitlines()
+    start = lines.index("[dream.llm.deep_reflection]")
+    body = lines[start + 1 :]
+    # raw splitlines of the LAST table: no blank line (hence no consecutive
+    # blank lines) drifted into the body — the trailing-newline phantom was
+    # stripped, never carried into the patched span
+    assert body, "deep_reflection table body is empty"
+    assert all(line.strip() for line in body), f"blank line(s) drifted into the last table body: {body!r}"
+    assert body == [
+        'driver = "openai_compatible"',
+        'model = "moonshotai/Kimi-K3"',
+        'base_url = "http://custom.test/v1"',
+        "max_tokens = 4096",
+        'api_key_env = "MNEMOSEED_DEEP_REFLECTION_API_KEY"',
+    ]
+    # the neighboring tables are intact: every header survives in order, no key
+    # line swallowed a ``[`` header
+    headers = [line for line in lines if line.startswith("[")]
+    assert headers == ["[dream]", "[dream.llm.short_increment]", "[dream.llm.deep_reflection]"]
+    assert 'driver = "stub"' in blob.split("[dream.llm.short_increment]")[1]
+    assert load_config(path).llm["deep_reflection"].driver == "openai_compatible"
+    assert load_config(path).llm["deep_reflection"].params["base_url"] == "http://custom.test/v1"
+
+
+def test_set_creates_role_table_cleanly_when_missing(tmp_path) -> None:
+    """A route's first write creates [dream.llm.<role>] after the last table
+    with exactly one blank separator — the mirror is clean and parseable (the
+    JH flow's first write lands in a config with no role table at all)."""
+    path = _config_toml(tmp_path)
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        '[dream.llm.deep_reflection]\ndriver = "stub"\nmodel = "stub"\n'
+        'base_url = "http://example.test/v1"\n\n',
+        "",
+    )
+    path.write_text(text, encoding="utf-8")
+    service = ConfigWriteService(load_config(path), None, clock=lambda: 1_700_000_000.0)
+    service.set("dream.llm.deep_reflection.driver", "openai_compatible", actor="console")
+    service.set("dream.llm.deep_reflection.model", "moonshotai/Kimi-K3", actor="console")
+    blob = path.read_text(encoding="utf-8")
+    table = blob.split("[dream.llm.deep_reflection]", 1)[1].split("[", 1)[0]
+    lines = [line for line in table.splitlines() if line.strip()]
+    assert lines == ['driver = "openai_compatible"', 'model = "moonshotai/Kimi-K3"']
+    assert load_config(path).llm["deep_reflection"].driver == "openai_compatible"
+    assert load_config(path).llm["deep_reflection"].model == "moonshotai/Kimi-K3"
+
+
 # ---------------------------------------------------------------- typed validation
 
 

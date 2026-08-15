@@ -35,16 +35,18 @@
 
 ### 2.3 死输入的具体位置（exact dead-input）
 
-- **向导**（`console/static/app.js` `dreamSetupHtml`，约 474-520 行）：BYOK 表单无论选中哪个驱动，都固定渲染五个字段，包括 `oauth provider`（占位符 `codex | grok`）。选 `openai_compatible` 它照样显示。源码已确认。
-- **console ⑧ 编辑表单**（`llmEditFormHtml`，约 2387-2407 行）：`oauth provider` 文本输入框对每个驱动都渲染，包括 openai_compatible / anthropic / ollama。
+> 现状代码（2026-08-15）已修复自由文本 `oauth provider` 字段（`llmEditFormHtml` 改为 provider 卡单选，`llmEditorOAuthCards` 三态卡）。**仍存在的向导级缺陷**：`showDreamSetup()`（`app.js:695`）一进向导就并发预拉 `oauth-availability`（行 706），`wizardStep1Html`（行 793）把 `wizardOAuthRows`（行 798）**先于任何选择**渲染——即"codex/grok 未登录状态在用户做任何选择之前就摆出来"。修复见 §10.4。
 
-存在原因：`provider` 是真实的路由参数，OAuth 路径需要它。但 UI 把它当作文本字段暴露给所有流程。正确做法：OAuth 路径是**一条独立的路由选择**，不是通用表单上的一个字段（见 §6）。
+- **向导（历史缺陷，已随重写消失）**（旧 `dreamSetupHtml`，约 474-520 行）：BYOK 表单无论选中哪个驱动，都固定渲染五个字段，包括 `oauth provider`（占位符 `codex | grok`）。选 `openai_compatible` 它照样显示。
+- **console ⑧ 编辑表单（历史缺陷，已修复）**（旧 `llmEditFormHtml`，约 2387-2407 行）：`oauth provider` 文本输入框对每个驱动都渲染，包括 openai_compatible / anthropic / ollama。
+
+存在原因（历史）：`provider` 是真实的路由参数，OAuth 路径需要它。但 UI 把它当作文本字段暴露给所有流程。正确做法：OAuth 路径是**一条独立的路由选择**，不是通用表单上的一个字段（见 §6 / §10.4）。
 
 ### 2.4 术语与心智模型错位
 
 - 向导的驱动下拉列出原始名：`anthropic / oauth / ollama / openai_compatible / stub`。用户按品牌思考，不是按驱动。
 - 占位符对每个驱动都是 Anthropic 中心的：model `e.g. claude-opus-5`、key `e.g. ANTHROPIC_API_KEY`。`claude-opus-5` 与配置样例里的 `claude-sonnet-5`（`config.py:376`）都是**未经核实的 model id**——默认值里不要放未核实 id。
-- 向导**只**配置 `deep_reflection`（`submitWizard` POST 到 `/api/v1/llm/routes/deep_reflection`，app.js:572）；没有任何角色说明，没有选择。
+- 向导**只**配置 `deep_reflection`（`wizardSave` POST 到 `/api/v1/llm/routes/deep_reflection`，app.js:975，可选共享 `short_increment`）；没有任何角色说明，没有选择。
 - 连通性失败暴露原始内部信息：`unreachable — {"error":"GET /models returned HTTP 401"}`（console）、`connectivity test failed: GET /models returned HTTP 401`（CLI `llm set`、`onboard`）。没有任何修复指引。
 - `stub` 是向导/console 下拉中的合法选项——把测试驱动摆给了用户。
 
@@ -190,6 +192,8 @@ delete it any time. Changes apply immediately — no daemon restart.
 
 ## 6. OAuth 可见性逻辑（消灭死输入）
 
+> **向导侧已被 §10.4 取代**（连接方式先行 → 选①宿主登录后才探测 codex/grok；本章的"面板渲染在服务商卡片上方"仅适用于 ⑧ 编辑器）。⑧ 编辑器侧本节仍然有效。
+
 **规则：OAuth 控件只在 OAuth 路径真正被提供时出现，且 `provider` 值只能由专用控件设置——绝不来自自由文本字段。OAuth 双路径（宿主登录卡片 / 粘贴 token）在向导与 ⑧ 编辑器中一致存在。**
 
 1. **永不**在任何 BYOK/驱动表单里渲染自由文本的 `oauth provider` 字段。从 `dreamSetupHtml` 与 `llmEditFormHtml` 中移除。
@@ -280,8 +284,8 @@ delete it any time. Changes apply immediately — no daemon restart.
 | 状态 | 行为 |
 |---|---|
 | 加载（向导/⑧） | 沿用现有 `Loading…` 骨架，带角色/服务商占位；绝不让页面空白。 |
-| `oauth-availability` 拉取失败 | OAuth 面板隐藏，服务商卡片 + BYOK 仍可用（`showDreamSetup` 的 catch 已如此）。 |
-| 未检测到任何服务商（向导） | OAuth 面板显示一行置灰文字："No Codex/Grok login detected on this machine — you can still use an API key below." |
+| `oauth-availability` 拉取失败 | **向导**：连接方式卡③（API key / Ollama）不受影响，选①宿主登录时才拉取（§10.4）——拉取失败时该卡下方显示一行错误 + 重试，BYOK 仍可用。**⑧**：OAuth 卡片区隐藏，服务商卡片 + BYOK 仍可用。 |
+| 未检测到任何服务商（向导） | **只在选①宿主登录后**出现（§10.4），一行置灰文字："No Codex/Grok login detected on this machine — you can still use an API key below." |
 | 探测成功但目录为空 | model 选择器回退到精选建议 + 自由输入；提示 "The catalog returned no models — pick from the suggestions or type the exact model id." |
 | 模型列表加载中（Load model list） | 按钮转 spinner 并禁用；成功后组合框填充该端点 live 目录；失败回到精选建议并提示。 |
 | 粘贴的 key 已保存 | 显示 chip `key saved — ****1234`（掩码尾缀）+ `[delete]`；删除后回到空粘贴态；改动立即生效，无需重启。 |
@@ -356,6 +360,8 @@ delete it any time. Changes apply immediately — no daemon restart.
 
 ### 10.2 首次运行向导（owner 创建后）
 
+> **已被 §10.4 取代**（连接方式先行）。本节保留作历史/参考，工程实现以 §10.4 为准。
+
 ```
 ┌─ dream model ───────────────────────────────────────────────────────┐
 │  "Pick the model that distills your sessions into long-term memory. │
@@ -419,6 +425,61 @@ delete it any time. Changes apply immediately — no daemon restart.
 
 CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/api/v1/llm/routes/deep_reflection`）、同一张服务商表、同一条大白话探测文案、同一个默认值出处。术语在首次出现时内联定义（"env var = 这台电脑上一个具名值，MnemoSeed 从它读 key"）。
 
+### 10.4 首次运行向导 IA（新版，取代 §10.2 —— 连接方式先行）
+
+> **取代 §10.2 的向导结构。** 用户的两条真实投诉直接驱动这次重排：(1) "codex/grok 未登录状态在**任何选择之前**就摆出来"；(2) "保存静默无操作"——连接方式的错误必须在一步之遥、一眼可见。核心原则：**选择先行，状态后置；连接方式是一等选择，不是面板。**
+
+#### 10.4.1 四步走（Step 0–3）
+
+```
+┌─ step 0 ─ connection ────────────────────────────────────────────────┐
+│  How should MnemoSeed reach a model?                                  │
+│                                                                       │
+│  [ ① Use a login on this computer ]    ⚡ 无死输入：card① 之下此刻     │
+│      Reuse a Codex or Grok sign-in.     不渲染任何 codex/grok 状态。   │
+│      No key to manage.                  ← 修复点：OAuth 状态只在       │
+│  [ ② Bring your own API key ]             选①后才探测/显示            │
+│      Fireworks · OpenRouter · Anthropic ·                              │
+│      or any OpenAI-compatible endpoint.                               │
+│  [ ③ Run locally on this computer ]                                    │
+│      Ollama — free, offline, lower synthesis quality.                 │
+│                                                                       │
+│  ───────────────────────────────────────────────────────────────────  │
+│  [Skip for now — capture-only ✓ dream off until you configure a model]│
+│  (一等可见的 skip，不在角落；点击后展示确认行)                         │
+│  [continue]  (primary，仅在选中一张卡后武装)                           │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+- **Step 0 只问一件事：连接方式。** 三张卡（① Host login ② API key ③ Ollama local）+ 一个一等可见的 Skip。**此处绝不渲染 codex/grok 状态**——`oauth-availability` 探测延迟到 ① 被选中之后（§10.4.2），"两个 codex/grok 未登录 plaque" 缺陷被显式移除。
+- **每步恰有一个 primary CTA**：Step 0 `continue`、Step 1 `continue`、Step 2 `continue`、Step 3 `save`（探测通过后武装）。back 永远是 secondary。
+- **Skip 是一等可见选项**：Step 0 底部整行按钮 + 文案 `Skip for now — capture-only ✓ dream off until you configure a model`，点击后确认行（§11 文案）并直达 capture-only daemon。
+
+#### 10.4.2 Step 1 —— 按连接方式变形
+
+| 选中的卡 | Step 1 内容 | OAuth 探测时机 |
+|---|---|---|
+| ① Host login | 此刻**才** `GET /api/v1/llm/oauth-availability`（loading 态先于状态渲染）；随后每个检测到的服务商一行三态：live → 可选 `Use Codex login`；expired → `log in first` + 精确命令 + 文档链接 + **粘贴 token** 兜底；absent → 同样"先登录 + 粘贴 token"。 | **选①后立即**，绝不在 Step 0 之前 |
+| ② API key | 服务商卡（Fireworks / OpenRouter / Anthropic / 其他 OpenAI-compatible），每张卡附 key 教学（§5）。 | 不探测 |
+| ③ Ollama | 直接进 Step 2（无 key、无服务商卡）；Step 2 渲染质量提示 + `ollama pull` 指引。 | 不探测 |
+
+**zero dead inputs 清单（实现时逐条断言）**：Step 0 上没有任何 oauth 行；选②③时绝不出现任何 oauth/粘贴 token 控件；选①时若全部 expired/absent → 每行都给出"登录先行或粘贴 token"的**可行动**路径，绝不出现"只能看不能做"的死卡（§11.1 文案）。
+
+#### 10.4.3 Step 2 —— key + model（按连接方式变形）
+
+- **① Host login**：model 字段 + 精选建议；无 key、无 endpoint。
+- **② API key**：key 字段（粘贴一次 / env var 名）+ endpoint（高级）+ model 组合框（curated + 目录）。
+- **③ Ollama**：model 字段（curated 列表）+ 质量提示 + `pull` 指引；无 key、无 endpoint。
+
+#### 10.4.4 Step 3 —— test & save
+
+- `Test connection` → 通过后 `save` 武装（探测 signature 门，§7）；**失败时错误行内联显示"先去测试"原因（§7.1）**——绝不静默。
+- 共享复选框 `also apply to short_increment`（D4）保留在 Step 3。
+
+#### 10.4.5 与现状代码的差异（为什么是"取代"）
+
+现状 `showDreamSetup()` 在 `app.js:695-727` **一进向导就并发拉取 `oauth-availability`**（行 706）并在 `wizardStep1Html`（行 793）**先行渲染 `wizardOAuthRows`**（行 798）——正是"选择之前就摆出未登录状态"的根因。新版把该探测移入 Step 1 的 ① 分支，Step 0 只渲染三张连接卡 + Skip。§10.2 的向导结构作废；⑧ 编辑器 IA（§10.1）不变。
+
 ---
 
 ## UI 文案（English —— 产品界面用）
@@ -427,6 +488,30 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 
 ### 11.1 向导
 
+**Step 0 · connection（§10.4，取代旧 Step 1 结构）**：
+- Step 0 title: `How should MnemoSeed reach a model?`
+- Card ① label: `Use a login on this computer` — subtitle `Reuse a Codex or Grok sign-in. No key to manage.`
+- Card ② label: `Bring your own API key` — subtitle `Fireworks · OpenRouter · Anthropic · or any OpenAI-compatible endpoint.`
+- Card ③ label: `Run locally on this computer` — subtitle `Ollama — free, offline, lower synthesis quality.`
+- Skip (first-class, Step 0): `Skip for now — capture-only ✓ dream off until you configure a model`
+- Skip confirm: `Skipped — capture-only daemon. Dreaming stays off until you configure a model. Set one any time in Models.`
+
+**Step 1 · host login（仅选①后出现；OAuth 探测此刻才触发）**：
+- OAuth loading: `Checking for logins on this computer…`
+- OAuth live: `Codex login found — sign in is current.` / button `Use Codex login`
+- OAuth expired: `Codex login found but expired — log in again first, then return here.` (card
+  disabled) / command line `codex login` (copy-to-clipboard)
+- OAuth absent: `Log in to the Codex CLI first, then come back.` (card disabled;
+  per-provider: `<provider>` = Codex / Grok)
+- Login-first fallback (expired/absent): `Log in first, or paste a token instead.` → official
+  doc links: `How to create a Codex token` → https://developers.openai.com/codex/auth ·
+  `How to create an xAI API key` → https://docs.x.ai/developers/quickstart
+- OAuth blocked-save: `This route can't be saved until a login is available — log in to the
+  Codex CLI first, or paste a token instead.`
+- OAuth banner (after selection): `Using the Codex login on this machine — no key needed.
+  It refreshes itself while you're signed in.`
+
+**Step 1 · API key / Step 2 · key + model（选②后出现）**：
 - Title: `dream model`
 - Intro: `Pick the model that distills your sessions into long-term memory. One model gets
   you started — you can change any role later in Models.`
@@ -437,28 +522,13 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - Anthropic card: label `Anthropic (Claude)`, blurb `Requires an Anthropic API key from
   platform.claude.com.`
 - Ollama card: label `Ollama on this computer`, blurb `Free and offline. Runs entirely on
-  this machine; lower synthesis quality.`
+  this machine; lower synthesis quality.`（Ollama 走连接卡③直达 Step 2）
 - Ollama quality hint (shown when the role being configured picks Ollama): `Lower
   synthesis quality than cloud models — you accept this for privacy or cost.`
 - Share checkbox (D4): label `also apply to short_increment`, note `Uses the same provider
   and key for the quick consolidation model.`
 - Other card: label `Another OpenAI-compatible API`, blurb `Point at any other endpoint
   that speaks the OpenAI chat API.`
-- OAuth panel header: `Or reuse a login already on this computer`
-- OAuth hint: `MnemoSeed uses that login's access — you don't paste a key. No key value is
-  read, sent, or stored.`
-- OAuth live: `Codex login found — sign in is current.` / button `Use Codex login`
-- OAuth expired: `Codex login found but expired — log in again first, then return here.` (card
-  disabled) / command line `codex login` (copy-to-clipboard)
-- OAuth absent: `Log in to the Codex CLI first, then come back.` (card disabled;
-  per-provider: `<provider>` = Codex / Grok)
-- Paste-token affordance (second path): `or paste a token instead` → official doc links:
-  `How to create a Codex token` → https://developers.openai.com/codex/auth · `How to create
-  an xAI API key` → https://docs.x.ai/developers/quickstart
-- OAuth blocked-save: `This route can't be saved until a login is available — log in to the
-  Codex CLI first, or paste a token instead.`
-- OAuth banner (after selection): `Using the Codex login on this machine — no key needed.
-  It refreshes itself while you're signed in.`
 - Key label: `api key` — `paste once (stored locally, never shown again)` / `or an env var
   name for headless/CI use`
 - Key teaching intro: `Paste your key once — MnemoSeed stores it locally under
@@ -481,9 +551,8 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 - Probe ok: `Connected — key in FIREWORKS_API_KEY works.`
 - Probe saved: `dream model configured: deep reflection → <model>` (shared: `deep
   reflection + short increment → <model>`)
-- Skip button: `Skip for now — capture-only (dreaming stays off)`
-- Skip confirm: `Skipped — MnemoSeed keeps capturing sessions, dreaming stays off until a
-  model is configured. You can set one any time in Models.`
+- Skip button (legacy, superseded by Step 0 skip): `Skip for now — capture-only (dreaming stays off)`
+- Skip confirm (legacy): `Skipped — MnemoSeed keeps capturing sessions, dreaming stays off until a model is configured. You can set one any time in Models.`
 
 ### 11.2 console ⑧
 
@@ -571,6 +640,176 @@ CLI 与 console **共享同一套**后端（先 `POST /api/v1/llm/test`，再 `/
 
 ### 12.1 核实说明（本规格的落地依据）
 
-- 代码阅读：`console/static/app.js`（向导 + ⑧ 渲染/编辑/探测，行号已在文中内联引用）、`config.py` `DEFAULT_LLM_ROUTES`、`llm/admin.py` + `admin_routes.py`（仅显式 payload、探测签名、409 门槛化保存）、`llm/routing.py`（env 解析 + 实例缓存）、`llm/drivers/*`（五个驱动，目录在探测 detail 中）、`configwrite/service.py`（env 名校验）、`onboard/service.py`（LLM 步骤）、`cli.py`（`llm status/set`、`onboard`）。
+- 代码阅读：`console/static/app.js`（4648 行，2026-08-15 状态——向导已重构为 `wizardStep1/2/3Html` + `showDreamSetup` 于行 695，⑧ 编辑器 `llmEditFormHtml` 于行 3114；§2.3/§14 的行号以本次阅读为准）、`config.py` `DEFAULT_LLM_ROUTES`、`llm/admin.py` + `admin_routes.py`（仅显式 payload、探测签名、409 门槛化保存）、`llm/routing.py`（env 解析 + 实例缓存）、`llm/drivers/*`（五个驱动，目录在探测 detail 中）、`configwrite/service.py`（env 名校验）、`onboard/service.py`（LLM 步骤）、`cli.py`（`llm status/set`、`onboard`）。
+- 本次新增阅读（§10.4/§13/§14 依据）：`app.js` 向导与编辑器全部相关函数（`showDreamSetup` 695-727、`wizardOAuthRows` 749-773、`wizardStep1Html` 793-808、`wizardStep2Html` 854-881、`wizardStep3Html` 883-910、`wizardPayload/Test/Save` 912-1011、`llmEditorProviderCard` 2830、`llmEditorOAuthCards` 2844、`llmOauthPasteHtml` 2872、`llmSyncEditorGate` 2951、`llmEditFormHtml` 3114-3159、`testRoute` 3201、`saveRoute` 3283-3359、`wz-*` 事件 3497-3545）、`styles.css` `:root`（4-25）与向导卡样式（441-458）。`oauth-availability` 在 `showDreamSetup` 行 706 被并发预拉——§10.4 的修复点，源码确认。
 - 本机实测：用临时 `MNEMOSEED_HOME` 在备用端口（嵌入式预设，`127.0.0.1:18764`）启动 daemon，走通：owner 设置 → 登录 → `/api/v1/llm/routes`（确认仅显式 payload）→ `/api/v1/llm/oauth-availability`（本机两个登录都已检测到但过期）→ `/api/v1/llm/test` 探测形态（无 key Fireworks 401；离线 Ollama 连接被拒；未知 driver；未探测直接保存 → 409）。在驱动目录里观察到 `stub`，并在线上 payload 中确认默认值不可见。
 - 未核实：当前 model 占位符 `claude-opus-5` / 配置样例 `claude-sonnet-5`（D9），以及 OAuth mode 的 `gpt-5.6-codex` 占位符。Grok 宿主登录的重新登录命令（随已装 CLI 而异）未在官方文档核实——UI 以 "log in to the <provider> CLI first" + 粘贴 token 兜底。console.x.ai 需登录（匿名 403），其 API Keys 页 URL 以官方文档指向为准。
+
+---
+
+## 13. Design tokens（暗色现代主题，Linear/Vercel 档）
+
+> 响应"整个界面毫无美感"——替换现状 console 的深灰工作台风格为**安静、克制的暗色现代主题**。token 直接替换 `styles.css` 的 `:root`（现状行 4-25），渐进式采纳：新向导/⑧ 编辑器先吃新 token，其余页面随后迁移（§14）。**仅 token 值变化，不改类名契约**——现有 `--bg/--accent/--err/--ok/--warn/--violet` 类名全部保留为别名，兼容不动。
+
+```css
+:root {
+  color-scheme: dark;
+  /* --- 色板（暗色、低饱和、蓝紫 accent）--- */
+  --ms-bg: #0b0e14;          /* 页面底 */
+  --ms-surface: #10141d;     /* header / 侧栏 */
+  --ms-card: #141926;        /* 卡片面 */
+  --ms-border: #232b3d;      /* 常规描边 */
+  --ms-border-soft: #1b2230; /* 弱描边 / 分隔线 */
+  --ms-fg: #e7ecf4;          /* 主文本 */
+  --ms-muted: #8a94a8;       /* 次文本 / hint */
+  --ms-accent: #6ea8fe;      /* 主 accent（action / 焦点） */
+  --ms-accent-soft: rgba(110, 168, 254, 0.13);
+  --ms-error: #ff6b6b;       /* 错误 */
+  --ms-success: #4ade80;     /* 成功 */
+  --ms-warn: #fbbf24;        /* 警示 */
+  --ms-ink-on-accent: #0b0e14; /* accent 上的反色（按钮文字） */
+
+  /* --- 类型阶：8 / 14 / 16 / 20 / 28（px）--- */
+  --ms-t-xs: 0.5rem;   /* 8  — micro / badge / tile-label */
+  --ms-t-sm: 0.875rem; /* 14 — body / field 正文 */
+  --ms-t-md: 1rem;     /* 16 — card title / role h2 */
+  --ms-t-lg: 1.25rem;  /* 20 — section h2 / 向导标题 */
+  --ms-t-xl: 1.75rem;  /* 28 — page h1 */
+
+  /* --- 间距：4-base --- */
+  --ms-s-1: 4px;
+  --ms-s-2: 8px;
+  --ms-s-3: 12px;
+  --ms-s-4: 16px;
+  --ms-s-6: 24px;
+  --ms-s-8: 32px;
+
+  /* --- 圆角 / 焦点环 --- */
+  --ms-radius: 8px;
+  --ms-radius-sm: 6px;
+  --ms-focus-ring: 0 0 0 2px var(--ms-bg), 0 0 0 4px var(--ms-accent);
+
+  /* --- 组件 token --- */
+  --ms-card-bg: var(--ms-card);
+  --ms-card-border: var(--ms-border);
+  --ms-chip-bg: var(--ms-card);
+  --ms-chip-border: var(--ms-border);
+  --ms-input-bg: #0d1119;
+  --ms-input-border: var(--ms-border);
+  --ms-btn-bg: var(--ms-card);
+  --ms-btn-border: var(--ms-border);
+  --ms-btn-fg: var(--ms-fg);
+  --ms-btn-primary-bg: var(--ms-accent);
+  --ms-btn-primary-fg: var(--ms-ink-on-accent);
+  --ms-btn-primary-hover: #84b6ff;
+  --ms-btn-primary-disabled: rgba(110, 168, 254, 0.35);
+
+  /* --- 现状类名 → 新 token 的别名（保持既有组件不动）--- */
+  --bg: var(--ms-bg);
+  --bg-raised: var(--ms-surface);
+  --bg-inset: #0b0e14;
+  --border: var(--ms-border);
+  --border-soft: var(--ms-border-soft);
+  --text: var(--ms-fg);
+  --text-dim: var(--ms-muted);
+  --text-faint: #59647a;
+  --accent: var(--ms-accent);
+  --accent-soft: var(--ms-accent-soft);
+  --ok: var(--ms-success);
+  --warn: var(--ms-warn);
+  --err: var(--ms-error);
+  --violet: #a78bfa;
+}
+```
+
+### 13.1 状态规则（每个 token 组件的 hover/selected/disabled/error/loading）
+
+| 组件 | normal | hover | selected / armed | disabled | error | loading |
+|---|---|---|---|---|---|---|
+| 连接卡 / 服务商卡 `.wizard-provider-card` | `--ms-card-bg` + `--ms-card-border` | `border-color: var(--ms-accent)`；`--ms-accent-soft` 底 | `border: 2px var(--ms-accent)` + `--ms-accent-soft` 底 | `.muted`：opacity .6、cursor default、hover 不变 | 卡内容含 `--ms-error` 文本行 | 骨架占位（§9） |
+| 主按钮 `.btn-primary` | `--ms-btn-primary-bg` | `--ms-btn-primary-hover` | — | `--ms-btn-primary-disabled`，cursor not-allowed | — | 文字侧加 spinner / `Testing…` |
+| 次按钮 `.btn` | `--ms-btn-bg` + border | `--ms-accent-soft` 底 | — | opacity .5 | — | 同主按钮 |
+| 输入 `.field input` | `--ms-input-bg` + `--ms-input-border` | `border-color: var(--ms-accent)` | focus：`--ms-focus-ring` | 禁用输入 opacity .5 | `border-color: var(--ms-error)` + 错误文本 | — |
+| chip / badge | `--ms-chip-bg` + border | 不变 | `.badge-ok`/`.badge-err` 换色 | 灰 | 红 | — |
+| 反馈行 `.feedback` | — | — | — | `--ms-error` 底 + 文本 | — | spinner |
+
+- **focus 纪律**：所有可聚焦控件 focus 时应用 `--ms-focus-ring`（键盘可达，`aria-checked` 卡片同规则）。
+- **语义色绝不停留在颜色上**：success/error/warn 必有图标或文字前缀（§9.2 已有约定，token 化后保持）。
+- **accent 对比**：`--ms-accent #6ea8fe` 在 `--ms-bg #0b0e14` 上对比度 > 7:1（WCAG AA 达标）；`--ms-btn-primary-fg` 用深色反白保证按钮内对比。
+- **加载态骨架**：向导 Step 1 的 OAuth loading 用两行 `.wizard-provider-card` 占位（`--ms-card` + 60% 不透明度），无闪烁。
+
+---
+
+## 14. 实现交接地图（app.js / styles.css：REPLACE vs KEEP）
+
+> 行号基于 `src/mnemoseed/console/static/app.js`（4648 行，2026-08-15 状态）。**REPLACE = 改结构；KEEP = 保留逻辑，仅吃新 token/新渲染壳。**
+
+### 14.1 向导（§10.4）—— REPLACE
+
+| 现状函数 | 行 | 动作 | 说明 |
+|---|---|---|---|
+| `showDreamSetup()` | 695-727 | **REPLACE** | 移除行 706 对 `oauth-availability` 的并发预拉取；改为只拉 `routes`；新增 `wizard.step=0`、`wizard.connection=null`；Step 0 渲染三张连接卡 + skip。 |
+| `renderWizardPanel()` | 729-736 | **REPLACE** | step 0/1/2/3 四态分发；Step 1 按 `connection` 变形。 |
+| `wizardStepBar()` | 738-747 | **REPLACE** | 步骤标签改为 `connection → host login / key + model → test & save`（或按连接方式动态）。 |
+| `wizardOAuthRows()` | 749-773 | **REPLACE** | 移入 Step 1 ① 分支，且**仅在 ① 选中后**调用；loading 态先行；三态 + 粘贴 token 兜底（§10.4.2）。 |
+| `wizardStep1Html()` | 793-808 | **REPLACE** | 拆为 `wizardStep0Html()`（连接卡 + skip，去掉行 798 的 `wizardOAuthRows` 先行渲染）+ `wizardStep1Html()`（按连接方式变形）。 |
+| `wizardStep2Html()` | 854-881 | **KEEP**（壳换 token） | key + endpoint + model 变形逻辑不动；Ollama/oauth 隐藏规则沿用。 |
+| `wizardStep3Html()` | 883-910 | **KEEP** | 共享复选框 + test/save 逻辑不动。 |
+| `wizardPayload/Collect/Test/Save` | 912-1011 | **KEEP** | 后端契约不变；save gate（probe signature）是静默修复的兜底，保留。 |
+| 事件 `wz-*`（`handleClick`） | 3497-3545 | **REPLACE** | `wz-next`/`wz-back` 改为按 step 0-3 + connection 分发；新增 `wz-conn`（选连接卡）、`wz-oauth-lazy`（选①后拉 availability）；`wz-skip` 文案换一等可见版本。 |
+
+### 14.2 ⑧ 编辑器（§10.1）—— 逻辑 KEEP，视觉 token
+
+| 现状函数 | 行 | 动作 |
+|---|---|---|
+| `llmEditFormHtml()` | 3114-3159 | **KEEP**（表单结构、morph 字段、save gate 全部保留） |
+| `llmEditorProviderCard()` / `llmEditorOAuthCards()` | 2830 / 2844 | **KEEP**（三态 oauth 卡逻辑正确）；重排：`llmEditorOAuthCards` 作为选中的"host login 卡"呈现，不必置顶 |
+| `llmOauthPasteHtml()` / `llmCustomPasteHtml()` | 2872 / 2903 | **KEEP**（粘贴 token/key 双路径保留） |
+| `llmApplyEditorProvider()` | 3049-3101 | **KEEP**（morph 规则完整） |
+| `llmSyncEditorGate()` | 2951-2969 | **KEEP**（per-route gate：expired/absent 时 Test/Save/Load 禁用 + fix note——静默修复的兜底） |
+| `saveRoute()` | 3283-3359 | **KEEP**（probe-signature 门 + 显式 reason，§7） |
+| `testRoute()` / `llmProbeMessage()` | 3201 / 666-692 | **KEEP**（大白话探测文案已实现） |
+| `oauthHintsHtml()` / `llmRoleCard()` / `llmShellHtml()` | 2757 / 2775 / 2732 | **KEEP**（shell 结构）；只吃新 token |
+
+### 14.3 styles.css（token 化）
+
+| 现状 | 行 | 动作 |
+|---|---|---|
+| `:root` | 4-25 | **REPLACE** 为 §13 的 token 集（保留旧类名别名） |
+| `.wizard-provider-card` + `.selected`/`.muted` | 442-452 | **REPLACE** 样式体为 §13 状态规则；结构类名保留（JS 依赖它们） |
+| `.key-teaching` / `.wizard-step-active` / `.wizard-share` | 455-458 | **KEEP** 结构；换 token 色 |
+| 新增 `.wizard-conn-card`（Step 0 连接卡）、`.wizard-oauth-loading`（OAuth 探测 loading 占位）、`.skip-firstclass`（一等 skip 行）、`.gate-note`（per-route blocked note） | 新增 | 跟随 §10.4 新增类 |
+| 其余组件（`.btn`/`.field`/`.badge`/`.tile`/`.card`） | 全局 | 渐进换 `--ms-*` token（别名先行，逐步收紧） |
+
+---
+
+## 15. Playwright 验收计划（我的后续职责）
+
+> 实现完成后的 UI 验收由我（web-designer）通过 Playwright 完成——**交付前最终验收不再只靠代码评审**。复用仓库内已装的 Playwright（`.bench/graphview-three/node_modules`，v1.62.1；`node` 脚本直接 `require` 该路径）。
+
+### 15.1 运行方式
+
+```
+MNEMOSEED_HOME=<临时目录> mnemoseed up --port 18765   # 临时 daemon，绝不动 dogfood 18763
+node .bench/llm-ux-check.mjs                          # require(".bench/graphview-three/node_modules/playwright")
+```
+
+- 脚本：登录（owner setup → token）→ 依次打开各页 → 断言 → **截图进 `.bench/shots/` 供 JH 审阅**（Step 0、Step 1 ① 三态、Step 2 morph、⑧ 编辑器、blocked-save、窄屏）。
+- 窄屏：`viewport { width: 360, height: 800 }` 走一遍向导 + ⑧，断言无横向滚动、卡片可点。
+
+### 15.2 页面与断言清单
+
+| 页面 | 断言（全部可脚本化） |
+|---|---|
+| 向导 Step 0 | `data-wizard-panel` 存在；**恰好三张连接卡**；**0 个 oauth 行 / 0 个 codex/grok plaque**（`[data-oauth-*]` 计数 = 0）；skip 可见；continue 在选卡前 disabled、选卡后 enabled。 |
+| 向导 Step 1 ① | 选①后 `oauth-availability` 被调用（网络日志）；loading 占位 → 三态行；expired/absent 行按钮 disabled + 显示"log in first"文案 + 粘贴 token 兜底可见。 |
+| 向导 Step 1/2 ② | 选②后出现服务商卡；**无任何 oauth 控件**（死输入断言）；key + endpoint + model morph 正确（Ollama 无 key 字段）。 |
+| 向导 Step 3 | `Test connection` → 失败时 save 保持 disabled 且错误行显示原因（静默修复断言）；通过后 save enabled。 |
+| ⑧ 编辑器 | 编辑 deep_reflection：provider 卡单选；oauth 卡仅当选 host login 出现；`data-llm-gate-note` 在 expired/absent 时可见且带修复文案；save 在未探测时 disabled 且点击出原因。 |
+| ⑧ 窄屏 360px | 无 `document.documentElement.scrollWidth > innerWidth`；连接卡/服务商卡可点击；无元素溢出。 |
+| 全站 token | `getComputedStyle(:root)` 读取 `--ms-bg/--ms-card/--ms-accent/--ms-radius` 均为 §13 值；`--bg` 别名仍解析（兼容）。 |
+
+### 15.3 通过门槛
+
+- 上述断言全绿 **且** 截图中无死输入、无静默 no-op、窄屏无溢出 → 我出验收结论（PASS/FAIL + 截图路径）交 orchestrator。
+- **FAIL 打回工程师**（与 QA gate 同纪律），不自己改源码。

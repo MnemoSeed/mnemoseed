@@ -486,6 +486,12 @@ class LLMAdminService:
         ):
             if field_value is None:
                 continue
+            # The console's "Another OpenAI-compatible API" card id is UI
+            # metadata, never a route field: dropping it here keeps the probe
+            # and the persist on one signature and the config mirror free of a
+            # dead ``provider = "other"`` line.
+            if name == "provider" and field_value.strip() == "other":
+                continue
             if not field_value.strip():
                 table.pop(name, None)
             else:
