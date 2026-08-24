@@ -146,6 +146,12 @@ class LanceDbEmbeddedStore:
         return count
 
     def update_weights(self, updates: Sequence[WeightUpdate]) -> None:
+        # One lock acquisition + one commit per update is the natural shape, but
+        # under dual-surface load a recall can reinforce several hits at once
+        # and each separate _table.update re-commits a fragment; collecting the
+        # whole batch inside a single hold keeps one writer's N updates from
+        # interleaving with another surface's capture commits N times over.
+        batched: list[tuple[str, dict[str, Any]]] = []
         for update in updates:
             values: dict[str, Any] = {}
             if update.decay_weight is not None:
@@ -155,8 +161,12 @@ class LanceDbEmbeddedStore:
             if update.reinforce_count is not None:
                 values["reinforce_count"] = int(update.reinforce_count)
             if values:
-                with self._write_lock:
-                    self._table.update(where=f"chunk_id = {_escape(update.chunk_id)}", values=values)
+                batched.append((update.chunk_id, values))
+        if not batched:
+            return
+        with self._write_lock:
+            for chunk_id, values in batched:
+                self._table.update(where=f"chunk_id = {_escape(chunk_id)}", values=values)
 
     def update_chunk_state(
         self,
@@ -443,7 +453,9 @@ class LanceDbEmbeddedStore:
                 "total": float(chunk.score),
             },
             "decay_weight": float(chunk.decay_weight),
-            "last_reinforced": float(chunk.ingested_at),
+            "last_reinforced": float(
+                chunk.last_reinforced if chunk.last_reinforced is not None else chunk.ingested_at
+            ),
             "consolidated": bool(chunk.consolidated),
             "ingested_at": float(chunk.ingested_at),
             "peripheral_gaps": bool(emotion.peripheral_gaps) if emotion else False,
@@ -493,6 +505,7 @@ class LanceDbEmbeddedStore:
                 ],
             ),
             decay_weight=float(row["decay_weight"]),
+            last_reinforced=float(row["last_reinforced"]) if row.get("last_reinforced") is not None else None,
             score=float(score_row.get("total", 0.0)),
             consolidated=bool(row["consolidated"]),
             ingested_at=float(row["ingested_at"]),

@@ -29,8 +29,8 @@
 | [PRD-03 retrieval & MCP gateway](prd/PRD-03-retrieval-mcp.md) | Hybrid retrieval API, MCP tool definitions, context assembly |
 | [PRD-04 decay, reconcile & provenance](prd/PRD-04-decay-reconcile.md) | Decay weights, Reconcile conflict protocol, Provenance schema |
 | [PRD-05 cloud sync & TEE](prd/PRD-05-cloud-tee.md) | E2EE sync, Nitro Enclaves, billing arbitrage gateway |
-| [PRD-06 host integration & install](prd/PRD-06-host-integration.md) | daemon embedded mode, installer, login/link identity binding, Claude Code plugin (hooks), MCP degraded mode, uninstall |
-| [PRD-07 console](prd/PRD-07-console.md) | Console SPA: Dashboard/Profiles/memory browser/dream review/conflict inbox (M1 read-only core, M2 completes) |
+| [PRD-06 host integration & install](prd/PRD-06-host-integration.md) | daemon embedded mode, installer, login/link identity binding, Claude Code plugin (hooks), MCP degraded mode, uninstall, `mnemoseed onboard` guided wizard |
+| [PRD-07 console](prd/PRD-07-console.md) | Console SPA: Dashboard/Profiles/memory browser/dream review/conflicts + write ops/Settings/models/Audit/Graph View (console-COMPLETE = the pre-marketing demo gate) |
 | [PRD-08 M0 foundation](prd/PRD-08-m0-foundation.md) | Repo skeleton + CI, four storage interfaces with dual drivers, capability checks, schema freeze + forward-only migrations (blocks all later PRDs) |
 
 ## Theory & Literature Registry

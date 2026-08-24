@@ -179,9 +179,18 @@ def make_edge(
     *,
     rel: RelType = RelType.EVIDENCED_BY,
     profile_id: str = PROFILE,
+    weight: float = 1.0,
+    created_at: float | None = None,
 ) -> Edge:
     """Edge helper (profile scopes traversal, not node membership)."""
-    return Edge(src=src, dst=dst, rel=rel, profile_id=profile_id)
+    return Edge(
+        src=src,
+        dst=dst,
+        rel=rel,
+        profile_id=profile_id,
+        weight=weight,
+        created_at=time.time() if created_at is None else created_at,
+    )
 
 
 def make_intention(over: dict[str, Any] | None = None, **kw: object) -> GraphNode:

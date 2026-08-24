@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 
 from mnemoseed.capture import PoolEvent, PoolEventKind
 from mnemoseed.daemon.app import create_app
-from mnemoseed.schema.graph import GraphNode, NodeType
+from mnemoseed.schema.graph import Edge, GraphNode, NodeType, RelType
 from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance, ProvenanceEvent
 from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_meta
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
@@ -297,6 +297,19 @@ def test_status_dashboard_counts_reconcile_and_pending(tmp_path, monkeypatch) ->
         assert row["counts"]["pending_consolidation"] == 1
 
 
+def test_status_profile_row_surfaces_display_name_and_archived(tmp_path, monkeypatch) -> None:
+    """FR-7.3: /api/v1/status profile rows expose display_name + archived so the
+    Profiles page can list/rename/archive from the dashboard surface alone."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        client.post(f"/api/v1/profiles/{_PROFILE}/rename", json={"display_name": "Home"})
+        client.post(f"/api/v1/profiles/{_PROFILE}/archive", json={"archived": True})
+
+        row = next(p for p in client.get("/api/v1/status").json()["profiles"] if p["profile_id"] == _PROFILE)
+        assert row["display_name"] == "Home"
+        assert row["archived"] is True
+
+
 # ---------------------------------------------------------------- memory browse (FR-7.4)
 
 
@@ -521,6 +534,133 @@ def test_get_node_404_unknown(tmp_path, monkeypatch) -> None:
         assert response.status_code == 404
 
 
+# ---------------------------------------------------------------- graph view (FR-7.8)
+
+
+def _write_edge(
+    client: TestClient,
+    src: str,
+    dst: str,
+    *,
+    rel: str = "evidenced_by",
+    weight: float = 1.0,
+    profile_id: str = _PROFILE,
+) -> None:
+    client.portal.call(
+        client.app.state.stores.graph.add_edge,
+        Edge(src=src, dst=dst, rel=RelType(rel), weight=weight, profile_id=profile_id),
+    )
+
+
+def test_graph_subgraph_returns_nodes_and_paginated_edges(tmp_path, monkeypatch) -> None:
+    """FR-7.8: /api/v1/graph/subgraph returns the profile's current nodes plus
+    one paginated edge page with id / endpoints / kind / weight / timestamp.
+    The embedded driver declares GRAPH_EDGE_LIST, so the view is not degraded."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _write_node(client, _pref("g-a", "prefers tabs", entities=("Fmt",)))
+        _write_node(client, _pref("g-b", "prefers spaces", entities=("Fmt",)))
+        _write_node(client, _pref("g-c", "prefers tabs in go", entities=("Fmt",)))
+        _write_edge(client, "g-a", "g-b", rel="evidenced_by", weight=0.8)
+        _write_edge(client, "g-b", "g-c", rel="contains", weight=0.4)
+        client.portal.call(client.app.state.stores.graph.bump_cooccurrence, "g-a", "g-b", _PROFILE)
+
+        body = client.get("/api/v1/graph/subgraph", params={"profile_id": _PROFILE}).json()
+        node_ids = {n["node_id"] for n in body["nodes"]}
+        assert node_ids == {"g-a", "g-b", "g-c"}
+        first_node = body["nodes"][0]
+        for field in (
+            "node_type",
+            "statement",
+            "decay_weight",
+            "cognitive_tier",
+            "created_at",
+            "never_decay",
+            "conflict_flag",
+        ):
+            assert field in first_node
+
+        assert body["paging"] == {"total": 3, "offset": 0, "limit": 2000}
+        assert len(body["edges"]) == 3
+        kinds_by_pair: dict[frozenset, set[str]] = {}
+        for e in body["edges"]:
+            kinds_by_pair.setdefault(frozenset((e["src"], e["dst"])), set()).add(e["kind"])
+        assert kinds_by_pair[frozenset(("g-a", "g-b"))] == {"relation", "cooccurrence"}
+        assert kinds_by_pair[frozenset(("g-b", "g-c"))] == {"relation"}
+        cooc_edges = [e for e in body["edges"] if e["kind"] == "cooccurrence"]
+        assert len(cooc_edges) == 1
+        assert cooc_edges[0]["weight"] == pytest.approx(1.0)  # fresh bump, weight 1
+        for e in body["edges"]:
+            assert e["edge_id"] and e["src"] and e["dst"] and isinstance(e["weight"], float)
+            assert e["created_at"] > 0
+        assert body["degraded"] is False
+        assert body["notice"] is None
+
+        paged = client.get(
+            "/api/v1/graph/subgraph", params={"profile_id": _PROFILE, "offset": 2, "limit": 1}
+        ).json()
+        assert len(paged["edges"]) == 1
+        assert paged["paging"]["total"] == 3
+
+
+def test_graph_subgraph_degrades_honestly_without_edge_list_capability(tmp_path, monkeypatch) -> None:
+    """Appendix C: a graph driver without GRAPH_EDGE_LIST degrades the bulk
+    edge view to per-node traverse() adjacency with an explicit notice — never
+    a faked bulk view."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _write_node(client, _pref("dg-a", "prefers tabs", entities=("Fmt",)))
+        _write_node(client, _pref("dg-b", "prefers spaces", entities=("Fmt",)))
+        _write_edge(client, "dg-a", "dg-b", rel="evidenced_by", weight=0.7)
+        client.app.state.stores.instances["graph"]["main"] = _NoEdgeListGraph(client.app.state.stores.graph)
+
+        body = client.get("/api/v1/graph/subgraph", params={"profile_id": _PROFILE}).json()
+        assert body["degraded"] is True
+        assert body["notice"] and "graph.edge_list" in body["notice"]
+        assert body["paging"]["total"] == 1
+        edge = body["edges"][0]
+        assert {edge["src"], edge["dst"]} == {"dg-a", "dg-b"}
+        assert edge["kind"] == "relation"  # traverse cannot see edge kinds
+        assert {n["node_id"] for n in body["nodes"]} == {"dg-a", "dg-b"}
+
+
+class _NoEdgeListGraph:
+    """Contract wrapper: the live sqlite graph minus the GRAPH_EDGE_LIST cap."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def capabilities(self):
+        from mnemoseed.storage.ports import Capability
+
+        return frozenset(c for c in self._inner.capabilities() if c is not Capability.GRAPH_EDGE_LIST)
+
+
+def test_graph_subgraph_excludes_edges_with_stale_endpoints_unfiltered(tmp_path, monkeypatch) -> None:
+    """FR-7.8 / QA defect 3: the subgraph edge query always restricts endpoints
+    to current-revision nodes, even with NO type/tier filter — a tombstoned
+    node's edges never ghost into the payload (the client's origin fallback
+    must never have to hide them)."""
+    with _client(tmp_path, monkeypatch) as client:
+        _seed_profile(client)
+        _write_node(client, _pref("gs-a", "prefers tabs", entities=("Fmt",)))
+        _write_node(client, _pref("gs-b", "prefers spaces", entities=("Fmt",)))
+        _write_node(client, _pref("gs-c", "prefers go", entities=("Fmt",)))
+        _write_edge(client, "gs-a", "gs-b", rel="evidenced_by", weight=0.8)
+        _write_edge(client, "gs-b", "gs-c", rel="evidenced_by", weight=0.6)
+        client.portal.call(client.app.state.stores.graph.tombstone, "gs-b", time.time())
+
+        body = client.get("/api/v1/graph/subgraph", params={"profile_id": _PROFILE}).json()
+        node_ids = {n["node_id"] for n in body["nodes"]}
+        assert node_ids == {"gs-a", "gs-c"}  # the tombstoned node is out of the view
+        assert body["edges"] == []  # every edge touching it is gone too
+        assert body["paging"]["total"] == 0
+        assert body["degraded"] is False
+
+
 # ---------------------------------------------------------------- dream panel (FR-7.6)
 
 
@@ -705,6 +845,7 @@ def test_console_static_assets_served_with_content_types(tmp_path, monkeypatch) 
         ("/console/", "text/html"),
         ("/console/styles.css", "text/css"),
         ("/console/app.js", None),
+        ("/console/vendor/three.module.js", None),
         ("/console/banner.png", "image/png"),
         ("/console/logo.png", "image/png"),
     ]

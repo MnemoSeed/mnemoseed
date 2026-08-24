@@ -49,6 +49,16 @@ class LLMRegistry:
         """True when a driver with this name is registered."""
         return name in self._drivers
 
+    def catalog(self) -> tuple[LLMDriverInfo, ...]:
+        """Registered driver metadata, deterministic name order (the API
+        ``/api/v1/llm/routes`` surface shows the built-in driver catalog)."""
+        infos: list[LLMDriverInfo] = []
+        for name in self.names():
+            info = self._drivers[name].info
+            if isinstance(info, LLMDriverInfo):
+                infos.append(info)
+        return tuple(infos)
+
     def build(self, name: str, params: dict[str, Any] | None = None) -> Any:
         """Construct one driver instance. Construction failures are typed:
         unknown names raise ``UnknownLLMDriverError``; a driver constructor

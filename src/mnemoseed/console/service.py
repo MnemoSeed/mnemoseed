@@ -19,8 +19,10 @@ Deviations carried by the current schema (reported, not papered over):
   breakdowns yet, so ``/dream/runs`` is a global run history and split counts
   stay out of scope until the run record grows them.
 
-Writes that M1 owns (``dream_once``, the ``auto_trigger`` toggle) all land in
-the append-only audit trail.
+Writes that M1 owns (``dream_once``, the ``auto_trigger`` toggle, conflict
+resolutions, review verdicts, and the FR-7.9 console write ops -- forget /
+pin / weight adjust / profile create-rename-archive / token issue-revoke) all
+land in the append-only audit trail.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from typing import Any
 
 from mnemoseed import __version__
 from mnemoseed.config import Config
+from mnemoseed.configwrite.service import ConfigWriteService
 from mnemoseed.daemon.memory import _trigger_payload
 from mnemoseed.dream import DreamTrigger, TokenLedger
 from mnemoseed.dream import snapshot as _dream_snapshot
@@ -44,13 +47,18 @@ from mnemoseed.storage.factory import Stores
 from mnemoseed.storage.ports import (
     AuditEntry,
     AuditFilter,
+    Capability,
     ChunkFilter,
     DreamRun,
     DreamRunFilter,
+    EdgeFilter,
     GraphFlag,
+    GraphWeightUpdate,
     NodeFilter,
     Page,
+    StoredProfile,
     TurnRange,
+    WeightUpdate,
 )
 
 # Bounded scan shape: pages are cheap; a client-side overlay over the scan is
@@ -58,8 +66,6 @@ from mnemoseed.storage.ports import (
 # filter from starving a local daemon).
 _SCAN_PAGE = 500
 _SCAN_CAP = 10_000
-
-_AUTO_TRIGGER_LINE = re.compile(r"(\s*)auto_trigger\s*=\s*(?:true|false)(.*)")
 
 # FR-7.6 quality-review verdicts and FR-7.7 Reconcile branches (design/01
 # section 4a semantics) live as closed vocabulary on the console surface.
@@ -106,10 +112,17 @@ class ConsoleService:
         config: Config,
         trigger: DreamTrigger,
         journal_dir: Path | None = None,
+        configwrite: ConfigWriteService | None = None,
     ) -> None:
         self._stores = stores
         self._config = config
         self._trigger = trigger
+        # The single config writer (PRD-07 FR-7.11): every console settings
+        # change funnels through its registry -> validate -> patch -> record ->
+        # audit flow instead of a hand-rolled TOML patch.
+        self._configwrite = (
+            configwrite if configwrite is not None else ConfigWriteService(config, stores.meta)
+        )
         # The dream snapshot journal (the same directory the snapshotter and
         # reflect pass write) is the review view's source of triples + source
         # chunks. Read the module attribute at construction so a test patch of
@@ -146,6 +159,7 @@ class ConsoleService:
     def _profile_status(self, profile_id: str) -> dict[str, Any]:
         """One profile row: dream state, pool, counts, token usage."""
         stores = self._stores
+        stored = stores.meta.get_profile(profile_id)
         trigger = self._trigger.status(profile_id)
         pool = stores.meta.pool_state(profile_id)
         ledger = self._ledger().status(profile_id)
@@ -158,6 +172,8 @@ class ConsoleService:
         nodes = self._scan_nodes(node_filter)
         return {
             "profile_id": profile_id,
+            "display_name": stored.display_name if stored is not None else "",
+            "archived": stored.archived if stored is not None else False,
             "dream": {
                 "state": trigger.state.value,
                 "pending_queue": trigger.pending_queue,
@@ -361,6 +377,102 @@ class ConsoleService:
 
     # ------------------------------------------------------------ memory detail
 
+    def graph_subgraph(
+        self,
+        *,
+        profile_id: str,
+        node_types: tuple[NodeType, ...] = (),
+        time_after: float | None = None,
+        time_before: float | None = None,
+        tier: int | None = None,
+        min_weight: float = 0.0,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> dict[str, Any]:
+        """FR-7.8 Graph View subgraph: the profile's current nodes plus one
+        paginated edge page.
+
+        Edges come from the B.2 v1.1 ``list_edges`` bulk port when the graph
+        driver declares ``GRAPH_EDGE_LIST``; the filter parameters are pushed
+        down to the port (the client re-filters locally on top of the full
+        node set). Without the capability the view degrades per appendix C to
+        a per-node ``traverse()`` adjacency read with an explicit notice —
+        never a faked bulk view. Centrality stays client-side (appendix B.2:
+        no standalone centrality query in M0).
+        """
+        nodes = self._scan_nodes(NodeFilter(profile_id=profile_id))
+        if Capability.GRAPH_EDGE_LIST in self._stores.graph.capabilities():
+            page = self._stores.graph.list_edges(
+                EdgeFilter(
+                    profile_id=profile_id,
+                    node_types=node_types,
+                    created_after=time_after,
+                    created_before=time_before,
+                    tier=tier,
+                    min_weight=min_weight,
+                ),
+                Page(offset=offset, limit=limit),
+            )
+            edges = [self._graph_edge_payload(edge) for edge in page.items]
+            total = page.total
+            degraded = False
+            notice: str | None = None
+        else:
+            edges, total = self._degraded_graph_edges(nodes, profile_id, node_types, tier)
+            degraded = True
+            notice = (
+                "bulk edge view unavailable: this graph driver lacks graph.edge_list. "
+                "Showing adjacency only (per-node traversal) — slower and without edge kinds/weights."
+            )
+        return {
+            "nodes": [self._graph_node_payload(node) for node in nodes],
+            "edges": edges,
+            "paging": {"total": total, "offset": offset, "limit": limit},
+            "degraded": degraded,
+            "notice": notice,
+        }
+
+    def _degraded_graph_edges(
+        self,
+        nodes: list[GraphNode],
+        profile_id: str,
+        node_types: tuple[NodeType, ...],
+        tier: int | None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Appendix C degrade path: per-node ``traverse()`` adjacency, deduped.
+
+        ``traverse`` returns nodes, not edges, so the degraded view honestly
+        reports unweighted adjacency-only edges (kind/weight are unavailable
+        without the bulk port).
+        """
+        edges: list[dict[str, Any]] = []
+        seen: set[tuple[str, ...]] = set()
+        for node in nodes:
+            if node_types and node.node_type not in node_types:
+                continue
+            if tier is not None and int(node.cognitive_tier) != tier:
+                continue
+            for neighbor in self._stores.graph.traverse(
+                node.node_id, depth=1, filter=NodeFilter(profile_id=profile_id)
+            ):
+                if neighbor.node_id == node.node_id:
+                    continue  # traverse includes the start node itself
+                key = tuple(sorted((node.node_id, neighbor.node_id)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append(
+                    {
+                        "edge_id": f"{key[0]}~{key[1]}",
+                        "src": key[0],
+                        "dst": key[1],
+                        "kind": "relation",
+                        "weight": 1.0,
+                        "created_at": node.created_at,
+                    }
+                )
+        return edges, len(edges)
+
     def get_chunk(self, *, profile_id: str, chunk_id: str) -> dict[str, Any]:
         """FR-7.5 chunk dossier: verbatim channel + full provenance history."""
         chunk = self._stores.vector.get_chunk(chunk_id)
@@ -499,66 +611,27 @@ class ConsoleService:
 
     # ------------------------------------------------------------ dream writes
 
-    def dream_once(self, profile_id: str) -> dict[str, Any]:
+    def dream_once(self, profile_id: str, *, actor: str = "console") -> dict[str, Any]:
         """FR-7.6 manual trigger: reuse the trigger's ``dream_once`` seam."""
         launched = self._trigger.dream_once(profile_id)
         payload = _trigger_payload(self._trigger.status(profile_id))
         payload["launched"] = launched
-        self._audit("dream_once", {"profile_id": profile_id, "launched": launched})
+        self._audit("dream_once", {"profile_id": profile_id, "launched": launched}, actor=actor)
         return payload
 
-    def set_auto_trigger(self, enabled: bool) -> dict[str, Any]:
-        """FR-7.6 auto-trigger toggle: live flag + config-file persistence."""
-        self._trigger.set_auto_trigger(enabled)
-        path = self._persist_auto_trigger(enabled)
-        self._audit("console.auto_trigger", {"enabled": enabled, "persisted_to": str(path)})
-        return {"enabled": enabled, "persisted_to": str(path)}
+    def set_auto_trigger(self, enabled: bool, *, actor: str = "console") -> dict[str, Any]:
+        """FR-7.6 auto-trigger toggle: live flag + config-file persistence.
 
-    def _persist_auto_trigger(self, enabled: bool) -> Path:
-        """Write ``[dream] auto_trigger`` back into the config TOML.
-
-        Line-oriented patch (not a full TOML round-trip) so comments and
-        unrelated keys survive untouched.
+        The persistence goes through the single config writer (FR-7.11): the
+        registry validates the boolean, the surgical TOML patch lands in
+        [dream], the versioned store records it, and the audit trail keeps the
+        console-level entry (the writer adds its own config.set entry).
         """
-        source = self._config.source
-        path = source if source is not None else Path.home() / ".mnemoseed" / "config.toml"
-        value = "true" if enabled else "false"
-        original = path.read_text(encoding="utf-8") if path.exists() else ""
-        lines = original.split("\n")
-        in_dream = False
-        dream_header: int | None = None
-        replaced = False
-        out: list[str] = []
-        for index, line in enumerate(lines):
-            stripped = line.strip()
-            is_header = stripped.startswith("[") and stripped.endswith("]")
-            if is_header:
-                name = stripped[1:-1].strip()
-                if name == "dream":
-                    in_dream = True
-                    dream_header = index
-                else:
-                    in_dream = False
-            if in_dream and not replaced:
-                match = _AUTO_TRIGGER_LINE.fullmatch(line)
-                if match is not None:
-                    out.append(f"{match.group(1)}auto_trigger = {value}{match.group(2)}")
-                    replaced = True
-                    continue
-            out.append(line)
-        if not replaced:
-            if dream_header is not None:
-                out.insert(dream_header + 1, f"auto_trigger = {value}")
-            else:
-                body = "\n".join(out).rstrip("\n")
-                tail = "[dream]\n" + f"auto_trigger = {value}\n"
-                out = [body, "", tail.rstrip("\n")] if body else [tail.rstrip("\n")]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(out).strip("\n") + "\n", encoding="utf-8")
-        # Keep the in-memory raw mirror consistent for subsequent reads.
-        dream_raw = self._config.raw.setdefault("dream", {})
-        dream_raw["auto_trigger"] = enabled
-        return path
+        self._trigger.set_auto_trigger(enabled)
+        result = self._configwrite.set("dream.auto_trigger", enabled, actor=actor)
+        path = Path(result["persisted_to"])
+        self._audit("console.auto_trigger", {"enabled": enabled, "persisted_to": str(path)}, actor=actor)
+        return {"enabled": enabled, "persisted_to": str(path)}
 
     # ------------------------------------------------------------ dream review (FR-7.6)
 
@@ -617,6 +690,7 @@ class ConsoleService:
         obj: str,
         route: str,
         verdict: str,
+        actor: str = "console",
     ) -> dict[str, Any]:
         """FR-7.6 review write: record one per-triple verdict, audit-logged and
         idempotent (re-submitting the same verdict does not duplicate the row)."""
@@ -637,7 +711,7 @@ class ConsoleService:
         at = time.time()
         self._stores.meta.audit_append(
             AuditEntry(
-                actor="console",
+                actor=actor,
                 action=_REVIEW_ACTION,
                 detail={
                     "run_id": run_id,
@@ -672,7 +746,7 @@ class ConsoleService:
         out: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         page = Page(limit=200)
         while True:
-            result = self._stores.meta.audit_query(AuditFilter(actor="console", action=_REVIEW_ACTION), page)
+            result = self._stores.meta.audit_query(AuditFilter(action=_REVIEW_ACTION), page)
             for entry in result.items:
                 detail = entry.detail
                 if str(detail.get("run_id", "")) != run_id:
@@ -755,6 +829,7 @@ class ConsoleService:
         branch: str,
         node_id: str | None = None,
         scope: str | None = None,
+        actor: str = "console",
     ) -> dict[str, Any]:
         """FR-7.7 resolution: one of the four Reconcile branches (design/01
         section 4a) on a conflict pair, written back to the version chain and
@@ -790,7 +865,9 @@ class ConsoleService:
             target = self._member_node(members, node_id, group_id)
             if target is None:
                 raise ConsoleNotFoundError(f"node {node_id!r} is not part of conflict group {group_id!r}")
-            self._stores.graph.append_version(self._reinforced_node(target, group_id, at), invalidate_at=at)
+            self._stores.graph.append_version(
+                self._reinforced_node(target, group_id, at, actor), invalidate_at=at
+            )
             written = [node.node_id for node in members]
             reinforced = [target.node_id]
         elif branch == "coexist":
@@ -798,7 +875,7 @@ class ConsoleService:
                 raise ConsoleNotFoundError("coexist resolution requires a scope annotation")
             for node in members:
                 self._stores.graph.append_version(
-                    self._scoped_node(node, scope.strip(), group_id, at), invalidate_at=at
+                    self._scoped_node(node, scope.strip(), group_id, at, actor), invalidate_at=at
                 )
                 written.append(node.node_id)
         elif branch == "invalidate":
@@ -822,6 +899,7 @@ class ConsoleService:
                 "reinforced": reinforced,
                 "invalidated": invalidated,
             },
+            actor=actor,
         )
         return {
             "group_id": group_id,
@@ -853,7 +931,7 @@ class ConsoleService:
                 return node
         return None
 
-    def _reinforced_node(self, node: GraphNode, group_id: str, at: float) -> GraphNode:
+    def _reinforced_node(self, node: GraphNode, group_id: str, at: float, actor: str) -> GraphNode:
         """Reinforce the kept side (design/01 4a): confidence up, decay_weight
         back to 1.0, last_reinforced/last_reinforce_count refreshed, and the
         resolution pinned into the provenance history (version chain payload)."""
@@ -862,7 +940,7 @@ class ConsoleService:
             ProvenanceEvent(
                 at=at,
                 action="conflict_reinforced",
-                actor="console",
+                actor=actor,
                 detail={"group_id": group_id, "branch": "reinforce"},
             )
         )
@@ -883,7 +961,7 @@ class ConsoleService:
             }
         )
 
-    def _scoped_node(self, node: GraphNode, scope: str, group_id: str, at: float) -> GraphNode:
+    def _scoped_node(self, node: GraphNode, scope: str, group_id: str, at: float, actor: str) -> GraphNode:
         """Coexist with scope (design/01 4a): both sides keep their statement,
         the shared scope annotation lands on each node's props and provenance."""
         props = dict(node.props)
@@ -893,7 +971,7 @@ class ConsoleService:
             ProvenanceEvent(
                 at=at,
                 action="scope_annotated",
-                actor="console",
+                actor=actor,
                 detail={"group_id": group_id, "scope": scope, "branch": "coexist"},
             )
         )
@@ -917,9 +995,7 @@ class ConsoleService:
         latest: dict[str, Any] | None = None
         page = Page(limit=200)
         while True:
-            result = self._stores.meta.audit_query(
-                AuditFilter(actor="console", action=_CONFLICT_RESOLVE_ACTION), page
-            )
+            result = self._stores.meta.audit_query(AuditFilter(action=_CONFLICT_RESOLVE_ACTION), page)
             for entry in result.items:
                 detail = entry.detail
                 if (
@@ -939,12 +1015,296 @@ class ConsoleService:
                 return latest
             page = Page(offset=consumed, limit=page.limit)
 
+    # ------------------------------------------------------------ memory writes (FR-7.9)
+
+    def forget(
+        self,
+        *,
+        profile_id: str,
+        chunk_id: str | None = None,
+        node_id: str | None = None,
+        entity: str | None = None,
+        actor: str = "console",
+    ) -> dict[str, Any]:
+        """FR-7.9 forget: mirrors the daemon's ``forget_this`` semantics
+        (design/03 storage-layer erasure) -- chunks are physically removed from
+        the verbatim channel, graph nodes are tombstoned (the version chain
+        survives for as_of replay). Exactly one target kind is required; every
+        removal is audit-logged."""
+        removed_chunks: list[str] = []
+        removed_nodes: list[str] = []
+        if chunk_id is not None:
+            chunk = self._stores.vector.get_chunk(chunk_id)
+            if chunk is None or chunk.profile_id != profile_id:
+                raise ConsoleNotFoundError(f"chunk {chunk_id!r} not found")
+            self._stores.vector.delete_chunk(chunk_id)
+            removed_chunks.append(chunk_id)
+        elif node_id is not None:
+            node = self._stores.graph.get_node(node_id)
+            if node is None or node.profile_id != profile_id:
+                raise ConsoleNotFoundError(f"node {node_id!r} not found")
+            self._stores.graph.tombstone(node_id)
+            removed_nodes.append(node_id)
+        elif entity is not None:
+            chunk_page = self._stores.vector.list_chunks(
+                ChunkFilter(profile_id=profile_id, entities=(entity,)), Page(limit=_SCAN_CAP)
+            )
+            for chunk in chunk_page.items:
+                self._stores.vector.delete_chunk(chunk.chunk_id)
+                removed_chunks.append(chunk.chunk_id)
+            for node in self._scan_nodes(NodeFilter(profile_id=profile_id, entities=(entity,))):
+                self._stores.graph.tombstone(node.node_id)
+                removed_nodes.append(node.node_id)
+        else:
+            raise ValueError("forget requires one of chunk_id, node_id, entity")
+        self._audit(
+            "forget_this",
+            {
+                "profile_id": profile_id,
+                "entity": entity,
+                "chunks": removed_chunks,
+                "nodes": removed_nodes,
+            },
+            actor=actor,
+        )
+        return {"removed": {"chunks": removed_chunks, "nodes": removed_nodes}}
+
+    def pin_node(
+        self, *, profile_id: str, node_id: str, pinned: bool, actor: str = "console"
+    ) -> dict[str, Any]:
+        """FR-7.9 manual pin: flips ``never_decay`` as a version-chain append
+        (never an in-place rewrite) and audit-logs the action. Idempotent when
+        the node already carries the requested state."""
+        node = self._stores.graph.get_node(node_id)
+        if node is None or node.profile_id != profile_id:
+            raise ConsoleNotFoundError(f"node {node_id!r} not found")
+        if node.never_decay is pinned:
+            return {
+                "node_id": node_id,
+                "profile_id": profile_id,
+                "never_decay": pinned,
+                "version": node.version,
+                "changed": False,
+            }
+        at = time.time()
+        history = list(node.provenance.history)
+        history.append(
+            ProvenanceEvent(
+                at=at,
+                action="pinned" if pinned else "unpinned",
+                actor=actor,
+                detail={"node_id": node_id, "profile_id": profile_id, "pinned": pinned},
+            )
+        )
+        provenance = node.provenance.model_copy(update={"history": history})
+        revised = node.model_copy(
+            update={
+                "version": node.version + 1,
+                "valid_from": at,
+                "never_decay": pinned,
+                "updated_at": at,
+                "provenance": provenance,
+            }
+        )
+        self._stores.graph.append_version(revised, invalidate_at=at)
+        self._audit(
+            "pin",
+            {
+                "node_id": node_id,
+                "profile_id": profile_id,
+                "pinned": pinned,
+                "version": revised.version,
+            },
+            actor=actor,
+        )
+        return {
+            "node_id": node_id,
+            "profile_id": profile_id,
+            "never_decay": pinned,
+            "version": revised.version,
+            "changed": True,
+        }
+
+    def adjust_weight(
+        self,
+        *,
+        profile_id: str,
+        kind: str,
+        target_id: str,
+        decay_weight: float,
+        actor: str = "console",
+    ) -> dict[str, Any]:
+        """FR-7.9 manual decay-weight adjustment for one node or chunk,
+        bounded to [0.0, 1.0] and audited with both the old and new values."""
+        if kind == "node":
+            node = self._stores.graph.get_node(target_id)
+            if node is None or node.profile_id != profile_id:
+                raise ConsoleNotFoundError(f"node {target_id!r} not found")
+            old = node.decay_weight
+            self._stores.graph.batch_update_weights(
+                [GraphWeightUpdate(node_id=target_id, decay_weight=decay_weight)]
+            )
+        elif kind == "chunk":
+            chunk = self._stores.vector.get_chunk(target_id)
+            if chunk is None or chunk.profile_id != profile_id:
+                raise ConsoleNotFoundError(f"chunk {target_id!r} not found")
+            old = chunk.decay_weight
+            self._stores.vector.update_weights([WeightUpdate(chunk_id=target_id, decay_weight=decay_weight)])
+        else:
+            raise ValueError(f"unknown weight target kind {kind!r}")
+        self._audit(
+            "weight_adjust",
+            {
+                "profile_id": profile_id,
+                "kind": kind,
+                "target_id": target_id,
+                "old_decay_weight": old,
+                "new_decay_weight": decay_weight,
+            },
+            actor=actor,
+        )
+        return {
+            "kind": kind,
+            "target_id": target_id,
+            "profile_id": profile_id,
+            "decay_weight": decay_weight,
+            "old_decay_weight": old,
+        }
+
+    # ------------------------------------------------------------ profiles (FR-7.3)
+
+    def create_profile(self, *, profile_id: str, display_name: str, actor: str = "console") -> dict[str, Any]:
+        """FR-7.3 console profile create (upsert into the meta port), audited."""
+        at = time.time()
+        self._stores.meta.upsert_profile(
+            StoredProfile(profile_id=profile_id, display_name=display_name, created_at=at)
+        )
+        self._audit("profile.create", {"profile_id": profile_id, "display_name": display_name}, actor=actor)
+        return {
+            "profile_id": profile_id,
+            "display_name": display_name,
+            "created_at": at,
+            "archived": False,
+        }
+
+    def rename_profile(self, *, profile_id: str, display_name: str, actor: str = "console") -> dict[str, Any]:
+        """FR-7.3 console profile rename: display_name-only upsert that never
+        touches created_at or the archived flag; audited with the old name."""
+        profile = self._stores.meta.get_profile(profile_id)
+        if profile is None:
+            raise ConsoleNotFoundError(f"profile {profile_id!r} not found")
+        old_name = profile.display_name
+        self._stores.meta.upsert_profile(
+            StoredProfile(
+                profile_id=profile_id,
+                display_name=display_name,
+                created_at=profile.created_at,
+                archived=profile.archived,
+            )
+        )
+        self._audit(
+            "profile.rename",
+            {
+                "profile_id": profile_id,
+                "display_name": old_name,
+                "new_display_name": display_name,
+            },
+            actor=actor,
+        )
+        return {
+            "profile_id": profile_id,
+            "display_name": display_name,
+            "created_at": profile.created_at,
+            "archived": profile.archived,
+        }
+
+    def archive_profile(self, *, profile_id: str, archived: bool, actor: str = "console") -> dict[str, Any]:
+        """FR-7.3 console profile archive flag (reversible), audited."""
+        profile = self._stores.meta.get_profile(profile_id)
+        if profile is None:
+            raise ConsoleNotFoundError(f"profile {profile_id!r} not found")
+        self._stores.meta.archive_profile(profile_id, archived)
+        self._audit(
+            "profile.archive",
+            {"profile_id": profile_id, "archived": archived, "display_name": profile.display_name},
+            actor=actor,
+        )
+        return {"profile_id": profile_id, "archived": archived}
+
+    def issue_token(
+        self,
+        *,
+        profile_id: str,
+        scopes: tuple[str, ...],
+        expires_at: float | None = None,
+        actor: str = "console",
+    ) -> dict[str, Any]:
+        """FR-7.3 console token issue. The bearer secret is returned exactly
+        once and never lands in the audit detail (only the token id + shape)."""
+        if self._stores.meta.get_profile(profile_id) is None:
+            raise ConsoleNotFoundError(f"profile {profile_id!r} not found")
+        token = self._stores.meta.issue_token(profile_id, scopes, expires_at)
+        self._audit(
+            "token.issue",
+            {
+                "token_id": token.token_id,
+                "profile_id": profile_id,
+                "scopes": list(token.scopes),
+                "expires_at": expires_at,
+            },
+            actor=actor,
+        )
+        return {
+            "token_id": token.token_id,
+            "profile_id": profile_id,
+            "scopes": list(token.scopes),
+            "issued_at": token.issued_at,
+            "expires_at": token.expires_at,
+            "token_secret": token.token_secret,
+        }
+
+    def revoke_token(self, *, token_id: str, actor: str = "console") -> dict[str, Any]:
+        """FR-7.3 console token revoke (idempotent), audited."""
+        self._stores.meta.revoke_token(token_id)
+        self._audit("token.revoke", {"token_id": token_id}, actor=actor)
+        return {"token_id": token_id, "revoked": True}
+
+    # ------------------------------------------------------------ audit (FR-7.9 / G-AC1)
+
+    def audit_log(
+        self,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """FR-7.9 audit view: paginated append-only trail with actor/action/
+        time filters, ascending (chronological, id-ordered)."""
+        page = self._stores.meta.audit_query(
+            AuditFilter(actor=actor, action=action, since=since, until=until),
+            Page(offset=offset, limit=limit),
+        )
+        return {
+            "items": [
+                {
+                    "id": entry.id,
+                    "actor": entry.actor,
+                    "action": entry.action,
+                    "detail": entry.detail,
+                    "at": entry.at,
+                }
+                for entry in page.items
+            ],
+            "paging": {"total": page.total, "offset": offset, "limit": limit},
+        }
+
     # ------------------------------------------------------------ plumbing
 
-    def _audit(self, action: str, detail: dict[str, Any]) -> None:
-        self._stores.meta.audit_append(
-            AuditEntry(actor="console", action=action, detail=detail, at=time.time())
-        )
+    def _audit(self, action: str, detail: dict[str, Any], *, actor: str = "console") -> None:
+        self._stores.meta.audit_append(AuditEntry(actor=actor, action=action, detail=detail, at=time.time()))
 
     # ------------------------------------------------------------ payloads
 
@@ -994,6 +1354,41 @@ class ConsoleService:
             "hit_count": node.hit_count,
             "version": node.version,
             "updated_at": node.updated_at,
+        }
+
+    @staticmethod
+    def _graph_edge_payload(edge: Any) -> dict[str, Any]:
+        """One Graph View edge: id / endpoints / kind / weight / timestamp."""
+        return {
+            "edge_id": edge.edge_id,
+            "src": edge.src,
+            "dst": edge.dst,
+            "kind": edge.kind.value,
+            "weight": edge.weight,
+            "created_at": edge.created_at,
+        }
+
+    @staticmethod
+    def _graph_node_payload(node: GraphNode) -> dict[str, Any]:
+        """One Graph View node: everything the renderer needs to encode
+        opacity=decay_weight, color=type, size=centrality and the filters."""
+        statement = node.props.get("statement")
+        if not isinstance(statement, str) or not statement:
+            fallback = node.props.get("object")
+            statement = fallback if isinstance(fallback, str) and fallback else node.node_id
+        return {
+            "node_id": node.node_id,
+            "node_type": node.node_type.value,
+            "statement": statement,
+            "entities": list(node.entities),
+            "decay_weight": node.decay_weight,
+            "confidence": node.confidence,
+            "cognitive_tier": int(node.cognitive_tier),
+            "created_at": node.created_at,
+            "updated_at": node.updated_at,
+            "never_decay": node.never_decay,
+            "conflict_flag": node.conflict_flag,
+            "conflict_group": node.conflict_group,
         }
 
     @staticmethod

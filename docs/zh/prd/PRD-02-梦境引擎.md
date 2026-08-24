@@ -5,7 +5,7 @@
 
 ## 1. 目标
 
-实现异步"做梦"巩固：积分池触发 → 只读快照 → 反思提炼 → 双轨分流写回 → 安全清空。全程用户 0 延迟、0 丢字；梦境模型默认走 OAuth / 自带 API key（零硬件门槛），全离线轨（Ollama）为高级可选项。
+实现异步"做梦"巩固：积分池触发 → 只读快照 → 反思提炼 → 双轨分流写回 → 安全清空。全程用户 0 延迟、0 丢字；梦境模型默认走 OAuth / 自带 API key（零硬件门槛）；完全离线运行通过两个角色都指向 Ollama 达成，非独立轨（质量警告保留）。
 
 ## 2. 范围
 
@@ -24,7 +24,7 @@
 | FR-2.5b | **月度 token 账本**：按 profile 累计当月梦境 token 消耗并折算美元，默认 $5/月额度（config/console 可调）；当月超额后降级为"仅捕获不巩固"模式，次月 1 号自动恢复；账本与预算取值经 memory.status/console 暴露 | P0 |
 | FR-2.5c | **保底清算**：积压持续 > 32k 时不放大单次预算，按固定节奏连续多次梦境排干（每次 ≤32k）；积压趋势进 console | P1 |
 | FR-2.6 | 降级矩阵：模型调用失败退避重试×3 → 快照落盘；配置的模型端点不可用（OAuth 过期 / API 欠费 / Ollama 离线）时进入"仅捕获"模式 | P1 |
-| FR-2.7 | 离线轨（高级可选）：Ollama + ≤14B 量化模型全流程离线跑通；首次设置明示"提炼质量低于云端大模型"警告；70B 级本地模型不作为默认假设 | P1 |
+| FR-2.7 | 全离线运行（**两个角色都指向 Ollama** 即达成，无独立第三轨）：Ollama + ≤14B 量化模型全流程离线跑通；首次设置明示"提炼质量低于云端大模型"警告；70B 级本地模型不作为默认假设 | P1 |
 | FR-2.8 | `mnemoseed dream --once` 手动巩固 CLI：M1 阶段先手动触发并人工审查提炼质量，达标后才开自动触发器（先手动再自动纪律） | P0 |
 | FR-2.9 | 情绪脱敏：EPISODE 巩固写回后，其分片 emotion 强度按加速 λ 衰减（gist 永存、电荷渐消；overnight therapy，design/02 §10） | P1 |
 | FR-2.10 | 图式加速同化：提炼物与既有图谱同构（实体存在+关系模式匹配）走快速固化通道；格格不入者需更多独立证据才放行（Tse 2007，兼作防噪闸门） | P1 |
@@ -32,7 +32,7 @@
 | FR-2.12 | 染层/偏好证据边界：更新只消费用户原始输入，永不采纳 agent 渲染输出（防慢漂移自锁，design/02 §5） | P0 |
 | FR-2.13 | De-biasing eval harness：染色样本剥除率指标进 CI，剥除率退化即构建失败（单点故障面防线，design/02 §5） | P1 |
 | FR-2.15 | **晋升质量门**（design/02 §11）：提炼物写回前过三道确定性检查（groundedness 实体-源文重叠 / 冲突 / 近重复强化），不过则置 `promotion_status=quarantined`（不进检索）；过闸后滚动统计 promotion precision（用户纠正为一等负反馈），跌出阈值自动收紧闸门（单向棘轮）；M1 手动期以"建议"形态运行，判定与人工一致率达标才允许自动晋升；撤销只做反向版本化 | P1 |
-| FR-2.14 | **LLM 端口与模型路由配置**：定义 `DreamLLM` Protocol（chat 完成 + 用量统计 + 连通性自检），驱动注册表与存储层同构——驱动：`oauth`（复用宿主已登录的订阅态：**Codex**（读 `~/.codex/auth.json` 的 `tokens.access_token`/`refresh_token`/`account_id`，OIDC 自动刷新）与 **Grok**（读 `~/.grok/auth.json` 按 issuer 分键的 `key`/`refresh_token`/`expires_at`）——两者服务条款允许第三方复用；**Anthropic 订阅明确不做**（条款不允许），`anthropic` 驱动仅支持自带 API key；MiniMax/Kimi 等中国 CLI 服务商可选，选择时明示数据出境提示）/ `openai_compatible`（Fireworks 等自带 key 端点）/ `anthropic`（仅 API key）/ `ollama`（高级离线轨，**非默认**）；默认推荐顺序 OAuth > API key > 离线；config.toml 按**角色**分别配置：`deep_reflection`（长背景深睡眠反思）/ `short_increment`（短增量，动态预算 ≤32k，FR-2.5）/ `local_track` 开关；默认路由按 design/02（深睡眠 → Kimi K3（Fireworks），短增量 → DeepSeek V4 Flash 0731（Fireworks），本地轨 → Ollama + ≤14B 量化模型（如 Llama 3.1 8B，与 FR-2.7 一致））；**密钥按角色分离**——各角色默认独立环境变量（`MNEMOSEED_DEEP_REFLECTION_API_KEY` / `MNEMOSEED_SHORT_INCREMENT_API_KEY`），未设置回退共享 `FIREWORKS_API_KEY`，允许两个角色挂不同服务商；每角色可独立切换驱动与模型名，改动写审计；连通性自检接口供 console 实测按钮（design/07 §8）调用 | P0 |
+| FR-2.14 | **LLM 端口与模型路由配置**：定义 `DreamLLM` Protocol（chat 完成 + 用量统计 + 连通性自检），驱动注册表与存储层同构——驱动：`oauth`（复用宿主已登录的订阅态：**Codex**（读 `~/.codex/auth.json` 的 `tokens.access_token`/`refresh_token`/`account_id`，OIDC 自动刷新）与 **Grok**（读 `~/.grok/auth.json` 按 issuer 分键的 `key`/`refresh_token`/`expires_at`）——两者服务条款允许第三方复用；**Anthropic 订阅明确不做**（条款不允许），`anthropic` 驱动仅支持自带 API key；MiniMax/Kimi 等中国 CLI 服务商可选，选择时明示数据出境提示）/ `openai_compatible`（Fireworks 等自带 key 端点）/ `anthropic`（仅 API key）/ `ollama`（本地模型，**非默认**）；默认推荐顺序 OAuth > API key > 离线；config.toml 按**角色**分别配置两个角色：`deep_reflection`（长背景深睡眠反思）/ `short_increment`（短增量，动态预算 ≤32k，FR-2.5）；`local_track` 配置键**已弃用**——接受但警告、忽略、无引擎消费者，后续版本移除；默认路由 = 两个角色各自的默认：深睡眠 → Kimi K3（Fireworks），短增量 → DeepSeek V4 Flash 0731（Fireworks），全离线由两个角色都指向 Ollama 达成（FR-2.7）；**密钥按角色分离**——各角色默认独立环境变量（`MNEMOSEED_DEEP_REFLECTION_API_KEY` / `MNEMOSEED_SHORT_INCREMENT_API_KEY`），未设置回退共享 `FIREWORKS_API_KEY`，允许两个角色挂不同服务商；每角色可独立切换驱动与模型名，改动写审计；连通性自检接口供 console 实测按钮（design/07 §8）调用 | P0 |
 
 ## 4. 非功能需求
 
@@ -41,7 +41,7 @@
 | NFR-2.1 | 中断响应延迟 = 0（架构保证，非调优目标） |
 | NFR-2.2 | 动态 Delta 预算：`clamp(待清算 token 量, 5k, 32k)`——典型会话增量 ≈ 2–2.5k（贴下限运行），云端计费 ≤ $0.001/次为**典型值**口径；单次硬上限 32k ≈ $0.0045（DeepSeek V4 Flash 0731 $0.14/M input）；**月度 token 账本默认 $5/月**兜底总成本，超额降级仅捕获（FR-2.5b）。预算取值与积压量全程可观测（memory.status/console） |
 | NFR-2.3 | 快照→写回全程幂等：进程崩溃后重启可从快照落盘恢复，不重复写入 |
-| NFR-2.4 | 离线轨（≤14B 量化模型、普通开发机）单次巩固 < 10 分钟 |
+| NFR-2.4 | 本机 Ollama（≤14B 量化模型、普通开发机）单次巩固 < 10 分钟 |
 
 ## 5. 验收标准
 

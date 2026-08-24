@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 import uuid
@@ -39,7 +40,9 @@ from typing import Any
 import pytest
 
 from mnemoseed.capture.pool import PoolEvent, PoolEventKind, ScorePool
+from mnemoseed.config import Config, DecayConfig
 from mnemoseed.daemon.app import _DreamRelay
+from mnemoseed.decay.sweeper import DecaySweeper
 from mnemoseed.dream import (
     DEFAULT_DELTA_BUDGET_TOKENS,
     DeltaPacker,
@@ -164,10 +167,13 @@ def _seed_chunk(
     profile: str = _PROFILE,
     tier: CognitiveTier = CognitiveTier.TIER_1,
     origin: str = "user",
+    ingested_at: float | None = None,
+    confidence: float | None = None,
 ) -> None:
     """Insert one verbatim chunk with a full stamp; ``origin``/``tier`` mirror
     the capture paths: a user turn is TIER_1 asserted by user (core graph), an
-    agent render is stamped with a persona (FR-2.12 origin) and can be tier-3."""
+    agent render is stamped with a persona (FR-2.12 origin) and can be tier-3.
+    ``ingested_at`` / ``confidence`` are deterministic test overrides."""
     asserted_by = "user" if origin == "user" else "anima-model"
     stamp = ChunkStamp(
         chunk_id=chunk_id,
@@ -177,9 +183,15 @@ def _seed_chunk(
         model_id="test-model" if origin == "user" else "anima-1",
         persona_id=None if origin == "user" else "anima-1",
         cues=Cues(entities=[]),
-        provenance=Provenance(asserted_by=asserted_by, session_id=session, source="manual"),
+        provenance=Provenance(
+            asserted_by=asserted_by,
+            session_id=session,
+            source="manual",
+            confidence=confidence if confidence is not None else 0.5,
+        ),
         turn_start=turn_start,
         turn_end=turn_end,
+        ingested_at=ingested_at if ingested_at is not None else time.time(),
     )
     vec = stack.embed.embed(text)
     stack.vector.upsert_chunk(stamp, vec.dense, vec.sparse)
@@ -425,7 +437,7 @@ def test_dual_driver_merge_boundary_crash_resumes_merge_never_reruns_reflect(
 ) -> None:
     """NFR-2.3 idempotent recovery at the merge boundary, over both drivers: a
     crash after reflect (REFLECT_DONE + journaled payload) must resume at merge
-    ONLY — the restart's LLM seam is never called — then commit, purge exactly
+    ONLY — the restart's LLM seam is never called — then commit, mark exactly
     once, and never re-recover or duplicate graph rows on a second boot."""
     dreams = tmp_path / "dreams"
     _seed_chunk(stack, chunk_id="c1", text="I prefer dark mode", turn_start=0, turn_end=1, session="s1")
@@ -446,7 +458,10 @@ def test_dual_driver_merge_boundary_crash_resumes_merge_never_reruns_reflect(
     nodes = _main_nodes(stack)
     assert len(nodes) == 1
     assert nodes[0].props["object"] == "dark mode"
-    assert stack.vector.get_chunk("c1") is None  # the consumed row was purged exactly once
+    consumed = stack.vector.get_chunk("c1")
+    assert consumed is not None  # the consumed row was marked, never deleted
+    assert consumed.consolidated is True
+    assert consumed.text == "I prefer dark mode"  # verbatim channel never lossy
     assert len(list(dreams.glob("*.json"))) == 1
 
     # a second boot finds the journal terminated: nothing recovers, graph stays one row
@@ -460,8 +475,9 @@ def test_dual_driver_merge_boundary_crash_resumes_merge_never_reruns_reflect(
 def test_never_drop_partial_overflow_preserves_overflow_commits_consumed(stack, tmp_path) -> None:
     """FR-2.5 never-drop invariant end-to-end, over both drivers: with the delta
     budget forcing a PARTIAL overflow AND triples produced, the committed merge
-    purges exactly the 9 packed rows and the 13 overflow rows survive in the
-    vector store for a later dream (consumed-ids-scoped safe-clear)."""
+    marks exactly the 9 packed rows consolidated and the 13 overflow rows stay
+    unmarked in the vector store for a later dream (consumed-ids-scoped
+    safe-clear-as-mark)."""
     dreams = tmp_path / "dreams"
     for index in range(22):
         _seed_chunk(
@@ -484,21 +500,24 @@ def test_never_drop_partial_overflow_preserves_overflow_commits_consumed(stack, 
     assert overflow  # the budget DID force a partial overflow
     assert consumed and not (consumed & overflow)
     assert consumed | overflow == {f"c{i}" for i in range(22)}
-    remaining = {c.chunk_id for c in stack.vector.snapshot_read(ChunkFilter(profile_id=_PROFILE))}
-    assert remaining == overflow  # every overflow row survives (never dropped)
-    assert not (remaining & consumed)  # every packed row was purged exactly once
+    remaining = {
+        c.chunk_id: c.consolidated for c in stack.vector.snapshot_read(ChunkFilter(profile_id=_PROFILE))
+    }
+    assert set(remaining) == {f"c{i}" for i in range(22)}  # every row retained (never dropped)
+    assert all(remaining[c] for c in consumed)  # every packed row marked consolidated
+    assert not any(remaining[c] for c in overflow)  # overflow rows stay unmarked
 
 
 # ---------------------------------------------------------------- A. interruption injection
 
 
-def test_interrupt_new_turns_mid_dream_keep_snapshot_scope_and_survive_purge(
+def test_interrupt_new_turns_mid_dream_keep_snapshot_scope_and_survive_clear(
     emb_stack: _DreamStack, tmp_path: Path
 ) -> None:
     """FR-2.4 / NFR-2.1: turns arriving mid-dream (notify_activity during
     DREAMING) interrupt the dream but the snapshot scope stays fixed at the
-    ORIGINAL range; the new chunk is NOT in the snapshot and survives the
-    consumed-ids-scoped safe-clear, ready for the next dream."""
+    ORIGINAL range; the new chunk is NOT in the snapshot and stays unmarked
+    after the consumed-ids-scoped clear-as-mark, ready for the next dream."""
     dreams = tmp_path / "dreams"
     _seed_chunk(
         emb_stack, chunk_id="c0", text="I always stretch after waking", turn_start=0, turn_end=1, session="s1"
@@ -516,10 +535,13 @@ def test_interrupt_new_turns_mid_dream_keep_snapshot_scope_and_survive_purge(
     _fire(pool, relay, TurnRange(0, 3))
 
     assert trigger.status(_PROFILE).state is DreamState.IDLE
-    # the ORIGINAL snapshot scope was consumed and purged; the mid-dream chunk survived
-    assert emb_stack.vector.get_chunk("c0") is None
-    assert emb_stack.vector.get_chunk("c1") is None
-    assert emb_stack.vector.get_chunk("c9") is not None
+    # the ORIGINAL snapshot scope was consumed and marked; the mid-dream chunk
+    # survives unmarked (it was never in the snapshot)
+    assert emb_stack.vector.get_chunk("c0").consolidated is True
+    assert emb_stack.vector.get_chunk("c1").consolidated is True
+    mid_dream = emb_stack.vector.get_chunk("c9")
+    assert mid_dream is not None
+    assert mid_dream.consolidated is False
     snap = snapshotter.active(_PROFILE)
     assert snap is not None
     assert {c.chunk_id for c in snap.chunks} == {"c0", "c1"}  # c9 never entered the snapshot
@@ -563,10 +585,11 @@ def test_interrupt_forced_event_mid_dream_queues_and_drains_to_new_range(
     assert ranges == [(0, 3), (7, 9)]
     assert all(SnapshotPhase.MERGE_DONE.value in s.phases for s in journals if s is not None)  # type: ignore[union-attr]
 
-    # both scopes committed and safe-cleared; c9 was consumed by the second dream
-    assert emb_stack.vector.get_chunk("c0") is None
-    assert emb_stack.vector.get_chunk("c1") is None
-    assert emb_stack.vector.get_chunk("c9") is None
+    # both scopes committed and cleared-as-mark; c9 was consumed by the second
+    # dream (marked consolidated), every chunk retained
+    assert emb_stack.vector.get_chunk("c0").consolidated is True
+    assert emb_stack.vector.get_chunk("c1").consolidated is True
+    assert emb_stack.vector.get_chunk("c9").consolidated is True
     assert {n.props.get("object") for n in _main_nodes(emb_stack)} == {
         "stretch after waking",
         "cold showers",
@@ -692,11 +715,15 @@ def test_pollution_never_drop_partial_overflow_preserves_over_commits_consumed_e
     _fire(pool, relay, TurnRange(0, 60))
 
     assert trigger.status(_PROFILE).state is DreamState.IDLE
-    assert {n.props["object"] for n in _main_nodes(emb_stack)} == {"dark mode"}
+    assert {n.props.get("object") for n in _main_nodes(emb_stack)} == {"dark mode"}
     consumed, overflow = _packed_split(snapshotter)
     assert overflow and consumed and not (consumed & overflow)
-    remaining = {c.chunk_id for c in emb_stack.vector.snapshot_read(ChunkFilter(profile_id=_PROFILE))}
-    assert remaining == overflow  # the overflow rows survive, the consumed rows are gone
+    remaining = {
+        c.chunk_id: c.consolidated for c in emb_stack.vector.snapshot_read(ChunkFilter(profile_id=_PROFILE))
+    }
+    assert set(remaining) == {f"c{i}" for i in range(22)}  # every row retained, never dropped
+    assert all(remaining[c] for c in consumed)  # the consumed rows are marked consolidated
+    assert not any(remaining[c] for c in overflow)  # the overflow rows stay unmarked
     assert len(list(dreams.glob("*.json"))) == 1
 
 
@@ -759,5 +786,87 @@ def test_pollution_evidence_boundary_agent_rendered_preference_never_reaches_gra
     assert "violet prose" not in isolated_objects
     # both source rows were consumed by the delta (the model saw them); only the
     # graph was kept clean — the verbatim channel stays neutral, never lossy.
-    assert emb_stack.vector.get_chunk("c1") is None
-    assert emb_stack.vector.get_chunk("c2") is None
+    assert emb_stack.vector.get_chunk("c1").consolidated is True
+    assert emb_stack.vector.get_chunk("c2").consolidated is True
+    assert emb_stack.vector.get_chunk("c1").text == "I prefer black coffee"
+
+
+class _SweepStores:
+    """Stores-shaped view over a _DreamStack for the D1 decay sweeper."""
+
+    def __init__(self, stack: _DreamStack) -> None:
+        self._stack = stack
+
+    @property
+    def vector(self):
+        return self._stack.vector
+
+    @property
+    def graph(self):
+        return self._stack.graph_main
+
+    @property
+    def meta(self):
+        return self._stack.meta
+
+
+# ---------------------------------------------------------------- defect 1 e2e proof
+
+
+def test_consolidated_chunks_survive_merge_marked_and_swept_at_triple_rate(
+    emb_stack: _DreamStack, tmp_path: Path
+) -> None:
+    """QA defect 1 e2e proof: ingest -> dream --once (stub) leaves the consumed
+    chunks RETAINED and marked consolidated=true (evidence scene, design/03
+    section 4), and the D1 sweeper's next pass decays them at 3x the chunk rate
+    while an unconsolidated control chunk keeps the base rate."""
+    dreams = tmp_path / "dreams"
+    days = 10.0
+    base_time = 1_800_000_000.0
+    old = base_time - days * 86400.0
+    _seed_chunk(
+        emb_stack,
+        chunk_id="c1",
+        text="I prefer dark mode",
+        turn_start=0,
+        turn_end=1,
+        session="s1",
+        ingested_at=old,
+        confidence=1.0,
+    )
+    snapshotter, trigger, _, pool, relay = _wire_daemon(emb_stack, dreams)
+    _fire(pool, relay, TurnRange(0, 20))
+    assert trigger.status(_PROFILE).state is DreamState.IDLE
+    assert snapshotter.recover() == []  # the journal terminated
+
+    # the consumed source chunk survived the dream: retained + consolidated
+    merged = emb_stack.vector.get_chunk("c1")
+    assert merged is not None
+    assert merged.consolidated is True
+    assert merged.text == "I prefer dark mode"  # verbatim channel never lossy
+
+    # a fresh unconsolidated control chunk for the same profile (same baseline)
+    _seed_chunk(
+        emb_stack,
+        chunk_id="c2",
+        text="I prefer cold showers",
+        turn_start=30,
+        turn_end=31,
+        session="s2",
+        ingested_at=old,
+        confidence=1.0,
+    )
+
+    config = Config(decay=DecayConfig(sweep_interval_s=1.0, min_apply_delta=0.0))
+    clock = [base_time]
+    sweeper = DecaySweeper(_SweepStores(emb_stack), config, clock=lambda: clock[0])
+    stats = sweeper.run_once()
+
+    assert len(stats) == 1
+    assert stats[0].chunks_scanned == 2
+    assert stats[0].chunks_updated == 2
+    control = emb_stack.vector.get_chunk("c2")
+    merged = emb_stack.vector.get_chunk("c1")
+    assert control.decay_weight == pytest.approx(math.exp(-0.03 * days), abs=1e-6)
+    assert merged.decay_weight == pytest.approx(math.exp(-0.03 * 3.0 * days), abs=1e-6)
+    assert merged.consolidated is True  # the marker survived the sweep

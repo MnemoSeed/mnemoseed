@@ -53,13 +53,14 @@ def test_registered_in_shared_registry():
     assert GRAPH_DRIVERS.contains("pg_graph")
 
 
-def test_capabilities_declared_exactly_three():
+def test_capabilities_declared_exactly_four():
     caps = PgGraphDriver.info.capabilities
     assert caps == frozenset(
         {
             Capability.GRAPH_TRAVERSE_2HOP,
             Capability.GRAPH_VERSION_CHAIN,
             Capability.GRAPH_COOCCURRENCE_EDGES,
+            Capability.GRAPH_EDGE_LIST,
         }
     )
 
