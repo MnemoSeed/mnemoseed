@@ -128,15 +128,15 @@ def test_editor_role_named_key_paste_affordance(app_js: str) -> None:
     endpoint is the only transport, and the oauth token docs link rides along
     inside the same module (verified: developers.openai.com/codex/auth)."""
     for string in (
-        "Paste the API key for ${esc(plainName)}",
-        "API key for ${esc(plainName)}",
+        "Paste the API key for ${escapeHtml(plainName)}",
+        "API key for ${escapeHtml(plainName)}",
         "never shown again (masked tail ****1234 only)",
         "the careful model",  # role plain-name (§4), the paste target
         "the quick model",
         'data-act="llm-key-paste"',
         "/api/v1/llm/key",
         "developers.openai.com/codex/auth",
-        "official docs for ${esc(cap(provider))} tokens",
+        "official docs for ${escapeHtml(cap(provider))} tokens",
     ):
         assert string in app_js
 
@@ -216,7 +216,7 @@ def test_anthropic_paste_docs_link_to_claude_platform(app_js: str) -> None:
     anthropic = re.search(r'\{\s*id: "anthropic",(.*?)\n\s*\},', block, re.DOTALL)
     assert anthropic is not None, "anthropic card definition missing"
     assert 'keyUrl: "https://platform.claude.com/settings/keys"' in anthropic.group(1)
-    assert "platform.claude.com" in app_js
+    assert "https://platform.claude.com/" in app_js
 
 
 def test_no_codex_api_in_non_host_login_paste_path(app_js: str) -> None:
@@ -287,7 +287,7 @@ def test_custom_provider_editor_has_role_bound_key_paste(app_js: str) -> None:
     the ``secrets:mnemoseed/dream/<role>`` reference into the key field so the
     probe authenticates with the stored key."""
     for string in (
-        "Paste the API key for ${esc(plainName)}",
+        "Paste the API key for ${escapeHtml(plainName)}",
         'data-act="llm-key-paste"',
         "JSON.stringify({ role, key: token })",
         "`secrets:mnemoseed/dream/${role}`",

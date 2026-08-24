@@ -32,7 +32,7 @@ const store = {
 };
 
 // ---------------------------------------------------------------- pure helpers
-const esc = (value) =>
+const escapeHtml = (value) =>
   String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -97,7 +97,7 @@ function decayMeter(weight) {
   const raw = Number(weight);
   const w = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
   const cls = w >= 0.66 ? "meter-strong" : w >= 0.33 ? "" : "meter-weak";
-  return `<span class="meter ${cls}" title="decay_weight ${w.toFixed(3)}"><span style="width:${(w * 100).toFixed(1)}%"></span></span> ${esc(w.toFixed(3))}`;
+  return `<span class="meter ${cls}" title="decay_weight ${w.toFixed(3)}"><span style="width:${(w * 100).toFixed(1)}%"></span></span> ${escapeHtml(w.toFixed(3))}`;
 }
 
 function flagValue(value) {
@@ -107,44 +107,44 @@ function flagValue(value) {
 }
 
 function flagBadge(label, on, cls) {
-  return on ? `<span class="badge badge-${cls}">${esc(label)}</span>` : "";
+  return on ? `<span class="badge badge-${cls}">${escapeHtml(label)}</span>` : "";
 }
 
 function tile(value, label, cls) {
-  return `<div class="tile"><div class="tile-value ${cls ? ` ${cls}` : ""}">${value}</div><div class="tile-label">${esc(label)}</div></div>`;
+  return `<div class="tile"><div class="tile-value ${cls ? ` ${cls}` : ""}">${value}</div><div class="tile-label">${escapeHtml(label)}</div></div>`;
 }
 
 function kvList(pairs) {
   return pairs
     .map(
       ([label, valueHtml]) =>
-        `<div class="kv"><span class="kv-label">${esc(label)}</span><span class="kv-value">${valueHtml}</span></div>`,
+        `<div class="kv"><span class="kv-label">${escapeHtml(label)}</span><span class="kv-value">${valueHtml}</span></div>`,
     )
     .join("");
 }
 
 function badgeList(values) {
   return (values || []).length
-    ? values.map((v) => `<span class="badge">${esc(v)}</span>`).join(" ")
+    ? values.map((v) => `<span class="badge">${escapeHtml(v)}</span>`).join(" ")
     : '<span class="dim">—</span>';
 }
 
 function errorInline(message) {
-  return `<p class="error-inline">${esc(message)}</p>`;
+  return `<p class="error-inline">${escapeHtml(message)}</p>`;
 }
 
 function errorPanel(message) {
-  return `<div class="error-panel"><p><strong>Something went wrong</strong></p><p class="error-detail">${esc(message)}</p><button class="btn" data-act="retry">Retry</button></div>`;
+  return `<div class="error-panel"><p><strong>Something went wrong</strong></p><p class="error-detail">${escapeHtml(message)}</p><button class="btn" data-act="retry">Retry</button></div>`;
 }
 
 function emptyPanel(message) {
-  return `<div class="empty-panel">${esc(message)}</div>`;
+  return `<div class="empty-panel">${escapeHtml(message)}</div>`;
 }
 
 function detailCell(detail) {
   if (detail === null || detail === undefined || detail === "") return '<span class="dim">—</span>';
-  if (typeof detail === "object") return `<code class="mono">${esc(JSON.stringify(detail))}</code>`;
-  return esc(detail);
+  if (typeof detail === "object") return `<code class="mono">${escapeHtml(JSON.stringify(detail))}</code>`;
+  return escapeHtml(detail);
 }
 
 // Minimal LCS word diff for adjacent version statements (M1 reduction of the
@@ -152,7 +152,7 @@ function detailCell(detail) {
 function diffWords(before, after) {
   const a = String(before ?? "").split(/\s+/).filter(Boolean);
   const b = String(after ?? "").split(/\s+/).filter(Boolean);
-  if (a.join(" ") === b.join(" ")) return esc(b.join(" "));
+  if (a.join(" ") === b.join(" ")) return escapeHtml(b.join(" "));
   const n = a.length;
   const m = b.length;
   const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
@@ -166,23 +166,23 @@ function diffWords(before, after) {
   let j = 0;
   while (i < n && j < m) {
     if (a[i] === b[j]) {
-      out.push(esc(a[i]));
+      out.push(escapeHtml(a[i]));
       i += 1;
       j += 1;
     } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      out.push(`<del>${esc(a[i])}</del>`);
+      out.push(`<del>${escapeHtml(a[i])}</del>`);
       i += 1;
     } else {
-      out.push(`<ins>${esc(b[j])}</ins>`);
+      out.push(`<ins>${escapeHtml(b[j])}</ins>`);
       j += 1;
     }
   }
   while (i < n) {
-    out.push(`<del>${esc(a[i])}</del>`);
+    out.push(`<del>${escapeHtml(a[i])}</del>`);
     i += 1;
   }
   while (j < m) {
-    out.push(`<ins>${esc(b[j])}</ins>`);
+    out.push(`<ins>${escapeHtml(b[j])}</ins>`);
     j += 1;
   }
   return out.join(" ");
@@ -351,7 +351,7 @@ function showLogin(message) {
   view.innerHTML = `<div class="auth-panel card">
     <h2>sign in</h2>
     <p class="toolbar-note">Setup is complete. The console is owner-only — sign in with the owner password to obtain a profile token.</p>
-    ${message ? `<p class="error-inline">${esc(message)}</p>` : ""}
+    ${message ? `<p class="error-inline">${escapeHtml(message)}</p>` : ""}
     <form data-auth-form="login">
       <div class="filter-grid">
         <div class="field"><label for="login-username">username</label><input type="text" id="login-username" name="username" required autocomplete="username" /></div>
@@ -370,7 +370,7 @@ function showSetup(message) {
   view.innerHTML = `<div class="auth-panel card">
     <h2>first-run setup</h2>
     <p class="toolbar-note">No owner account exists yet. Create the single owner to finish setup — the only account this local daemon will ever have. The password is stored as an argon2 hash, never as plaintext.</p>
-    ${message ? `<p class="error-inline">${esc(message)}</p>` : ""}
+    ${message ? `<p class="error-inline">${escapeHtml(message)}</p>` : ""}
     <form data-auth-form="setup">
       <div class="filter-grid">
         <div class="field"><label for="setup-username">username</label><input type="text" id="setup-username" name="username" required autocomplete="username" /></div>
@@ -805,7 +805,7 @@ function wizardOAuthRows(oauth) {
       return `<div class="resolve-row">
         ${mark}
         <span class="spacer"></span>
-        <button class="btn btn-primary" data-act="wz-oauth" data-provider="${esc(entry.provider)}" ${live ? "" : "disabled"}>Use ${providerName} login</button>
+        <button class="btn btn-primary" data-act="wz-oauth" data-provider="${escapeHtml(entry.provider)}" ${live ? "" : "disabled"}>Use ${providerName} login</button>
       </div>`;
     })
     .join("");
@@ -819,9 +819,9 @@ function wizardOAuthRows(oauth) {
 function wizardProviderCard(provider, wizard) {
   const active = wizard.providerId === provider.id;
   return `<label class="wizard-provider-card ${active ? "selected" : ""}">
-    <input type="radio" name="wizard-provider" value="${esc(provider.id)}" ${active ? "checked" : ""} />
-    <span class="wizard-provider-title">${esc(provider.label)}</span>
-    <span class="toolbar-note">${esc(provider.note)}</span>
+    <input type="radio" name="wizard-provider" value="${escapeHtml(provider.id)}" ${active ? "checked" : ""} />
+    <span class="wizard-provider-title">${escapeHtml(provider.label)}</span>
+    <span class="toolbar-note">${escapeHtml(provider.note)}</span>
   </label>`;
 }
 
@@ -864,10 +864,10 @@ function wizardKeyField(provider, wizard) {
   const value = wizard.keyEnv || provider.keyEnv || "";
   const placeholder = provider.keyEnv || roleEnv;
   return `<div class="field"><label for="wz-keyenv">api key env var</label>
-    <input type="text" id="wz-keyenv" name="api_key_env" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off" />
+    <input type="text" id="wz-keyenv" name="api_key_env" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" />
     <details class="key-teaching">
       <summary>Your key lives in an environment variable. MnemoSeed reads it from there — you never paste the key here and it is never stored.</summary>
-      <p class="toolbar-note">${esc(wizardKeyHint(provider))}</p>
+      <p class="toolbar-note">${escapeHtml(wizardKeyHint(provider))}</p>
     </details>
   </div>`;
 }
@@ -875,13 +875,13 @@ function wizardKeyField(provider, wizard) {
 function wizardEndpointField(provider, wizard) {
   if (provider.id === "other") {
     return `<div class="field"><label for="wz-base-url">endpoint</label>
-      <input type="text" id="wz-base-url" name="base_url" value="${esc(wizard.baseUrl || "")}" placeholder="https://…/v1" required autocomplete="off" />
+      <input type="text" id="wz-base-url" name="base_url" value="${escapeHtml(wizard.baseUrl || "")}" placeholder="https://…/v1" required autocomplete="off" />
     </div>`;
   }
   return `<details class="key-teaching">
     <summary>Advanced: endpoint</summary>
     <div class="field"><label for="wz-base-url">endpoint</label>
-      <input type="text" id="wz-base-url" name="base_url" value="${esc(wizard.baseUrl || provider.baseUrl)}" autocomplete="off" />
+      <input type="text" id="wz-base-url" name="base_url" value="${escapeHtml(wizard.baseUrl || provider.baseUrl)}" autocomplete="off" />
       <button class="btn" type="button" data-act="wz-endpoint-reset">${provider.id === "fireworks" ? "reset to Fireworks default" : "reset to default"}</button>
     </div>
   </details>`;
@@ -892,7 +892,7 @@ function wizardModelOptions(provider, wizard) {
   const catalog = (wizard.models || []).filter((model) => !curated.includes(model));
   return curated
     .concat(catalog)
-    .map((model) => `<option value="${esc(model)}"></option>`)
+    .map((model) => `<option value="${escapeHtml(model)}"></option>`)
     .join("");
 }
 
@@ -910,7 +910,7 @@ function wizardStep2Html(wizard) {
       ${oauthMode ? "" : provider ? wizardEndpointField(provider, wizard) : ""}
       ${wizardQualityHint(wizard)}
       <div class="field"><label for="wz-model">model</label>
-        <input type="text" id="wz-model" name="model" list="wz-models" value="${esc(wizard.model || llmRoleDefaultModel(provider, "deep_reflection"))}" placeholder="type or pick a model" required autocomplete="off" />
+        <input type="text" id="wz-model" name="model" list="wz-models" value="${escapeHtml(wizard.model || llmRoleDefaultModel(provider, "deep_reflection"))}" placeholder="type or pick a model" required autocomplete="off" />
         <datalist id="wz-models">${provider ? wizardModelOptions(provider, wizard) : ""}</datalist>
         ${provider && provider.id === "ollama" ? '<span class="toolbar-note">If the model is missing, pull it first: ollama pull llama3.1:8b</span>' : ""}
         ${provider && !oauthMode && !llmCuratedModels(provider).length ? '<span class="toolbar-note">No models listed — pick a suggestion or type the exact model id.</span>' : ""}
@@ -930,12 +930,12 @@ function wizardStep3Html(wizard) {
   const oauthMode = wizard.oauthProvider !== null;
   const summary = oauthMode
     ? `<span class="badge badge-ok">${cap(wizard.oauthProvider)} login on this machine</span>`
-    : `<span class="badge">${esc(provider ? provider.label : "")}</span>`;
+    : `<span class="badge">${escapeHtml(provider ? provider.label : "")}</span>`;
   return `<div class="auth-panel card" data-wizard-panel>
     <h2>dream model</h2>
     <p class="toolbar-note">Pick the model that distills your sessions into long-term memory. One model gets you started — you can change any role later in Models.</p>
     ${wizardStepBar(3)}
-    <p>${summary} · <span class="mono">${esc(wizard.model)}</span></p>
+    <p>${summary} · <span class="mono">${escapeHtml(wizard.model)}</span></p>
     ${wizardQualityHint(wizard)}
     <form data-llm-wizard-form>
       <label class="wizard-share">
@@ -992,7 +992,7 @@ async function wizardTest(form) {
   const payload = wizardPayload(wizard);
   const provider = llmProviderById(wizard.providerId);
   const probeLabel = provider ? provider.label.replace(" (recommended)", "") : "the endpoint";
-  if (feedback) feedback.innerHTML = `<span class="dim">Testing connection to ${esc(probeLabel)}…</span>`;
+  if (feedback) feedback.innerHTML = `<span class="dim">Testing connection to ${escapeHtml(probeLabel)}…</span>`;
   try {
     const probe = await api("/api/v1/llm/test", {
       method: "POST",
@@ -1008,8 +1008,8 @@ async function wizardTest(form) {
     }
     if (feedback) {
       feedback.innerHTML = probe.ok
-        ? `<span class="ok-inline">${esc(message)}</span>`
-        : errorInline(esc(message));
+        ? `<span class="ok-inline">${escapeHtml(message)}</span>`
+        : errorInline(escapeHtml(message));
     }
   } catch (error) {
     wizard.probeOk = false;
@@ -1260,7 +1260,7 @@ function renderProfilePicker() {
   }
   select.disabled = false;
   select.innerHTML = ids
-    .map((id) => `<option value="${esc(id)}" ${id === state.profileId ? "selected" : ""}>${esc(id)}</option>`)
+    .map((id) => `<option value="${escapeHtml(id)}" ${id === state.profileId ? "selected" : ""}>${escapeHtml(id)}</option>`)
     .join("");
 }
 
@@ -1295,7 +1295,7 @@ async function loadDashboard() {
       // First-run dream model result: one banner on the freshly loaded dashboard.
       view.insertAdjacentHTML(
         "afterbegin",
-        `<div class="card"><h2>dream model</h2><span class="ok-inline">${esc(state.llm.message)}</span></div>`,
+        `<div class="card"><h2>dream model</h2><span class="ok-inline">${escapeHtml(state.llm.message)}</span></div>`,
       );
       state.llm.message = null;
     }
@@ -1327,14 +1327,14 @@ function daemonCard(daemon) {
   const gateOk = daemon.gate && daemon.gate.ok === true;
   const drivers = daemon.drivers || {};
   const chips = ["vector", "graph", "meta", "embed"]
-    .map((kind) => `<span class="badge" title="${esc(kind)} driver">${esc(drivers[kind] || "?")}</span>`)
+    .map((kind) => `<span class="badge" title="${escapeHtml(kind)} driver">${escapeHtml(drivers[kind] || "?")}</span>`)
     .join(" ");
   return `<div class="card">
     <h2>daemon health</h2>
     <div class="tiles">
-      ${tile(esc(daemon.version || "—"), "version")}
+      ${tile(escapeHtml(daemon.version || "—"), "version")}
       ${tile(gateOk ? "ok" : "degraded", "capability gate", gateOk ? "ok" : "err")}
-      ${tile(esc(daemon.preset || "—"), "preset")}
+      ${tile(escapeHtml(daemon.preset || "—"), "preset")}
       <div class="tile"><div class="tile-value"><span class="badges">${chips}</span></div><div class="tile-label">storage drivers</div></div>
     </div>
   </div>`;
@@ -1350,9 +1350,9 @@ function profileCard(row, active) {
   const pending = counts.pending_consolidation || 0;
   const activeMark = active ? ' style="border-color:rgba(79,140,255,0.5)"' : "";
   return `<div class="card"${activeMark}>
-    <h2>${esc(row.profile_id)} ${active ? '<span class="badge badge-accent">active</span>' : ""}</h2>
+    <h2>${escapeHtml(row.profile_id)} ${active ? '<span class="badge badge-accent">active</span>' : ""}</h2>
     <div class="tiles">
-      ${tile(esc(dream.state || "—"), "dream state", dream.state === "dreaming" ? "warn" : "")}
+      ${tile(escapeHtml(dream.state || "—"), "dream state", dream.state === "dreaming" ? "warn" : "")}
       ${tile(fmtNum(pool.balance), "pool balance")}
       ${tile(pool.watermark ? fmtRange(pool.watermark) : "—", "pool watermark")}
       ${tile(fmtNum(counts.chunks), "chunks")}
@@ -1361,13 +1361,13 @@ function profileCard(row, active) {
       ${tile(fmtNum(pending), "pending consolidation", pending > 0 ? "warn" : "")}
       ${tile(fmtNum(tokens.today), "dream tokens today")}
       ${tile(fmtNum(tokens.this_week), "dream tokens this week")}
-      ${tile(fmtNum(ledger.used_tokens), `schedule tokens ${esc(ledger.year_month || "")}`)}
+      ${tile(fmtNum(ledger.used_tokens), `schedule tokens ${escapeHtml(ledger.year_month || "")}`)}
     </div>
     <h3>monthly ledger</h3>
     ${kvList([
-      ["budget", esc(fmtMoney(ledger.budget_usd))],
-      ["used", esc(fmtMoney(ledger.used_usd))],
-      ["remaining", esc(fmtMoney(ledger.remaining_usd))],
+      ["budget", escapeHtml(fmtMoney(ledger.budget_usd))],
+      ["used", escapeHtml(fmtMoney(ledger.used_usd))],
+      ["remaining", escapeHtml(fmtMoney(ledger.remaining_usd))],
     ])}
   </div>`;
 }
@@ -1385,7 +1385,7 @@ function dreamPanel(statusRow, dream, runs) {
   return `<div class="card">
     <h2>dream engine</h2>
     <div class="tiles">
-      ${tile(esc(stateStr), "state machine", stateStr === "dreaming" ? "warn" : "")}
+      ${tile(escapeHtml(stateStr), "state machine", stateStr === "dreaming" ? "warn" : "")}
       ${tile(fmtNum(pool.balance), "pool balance")}
       ${tile(fmtNum(queue), "pending queue", queue > 0 ? "warn" : "")}
     </div>
@@ -1410,9 +1410,9 @@ function lastEventHtml(dream) {
     return `${head}<div class="kv"><span class="kv-label">event</span><span class="kv-value"><span class="dim">none yet</span></span></div>`;
   }
   return `${head}${kvList([
-    ["kind", `<span class="mono">${esc(last.kind)}</span>`],
-    ["fired at", esc(fmtEpoch(last.fired_at))],
-    ["turn range", esc(fmtRange(last.turn_range))],
+    ["kind", `<span class="mono">${escapeHtml(last.kind)}</span>`],
+    ["fired at", escapeHtml(fmtEpoch(last.fired_at))],
+    ["turn range", escapeHtml(fmtRange(last.turn_range))],
   ])}`;
 }
 
@@ -1424,13 +1424,13 @@ function runsTable(runs) {
       (run) => `<tr>
         <td>${fmtEpoch(run.started_at)}</td>
         <td>${fmtDuration(run.duration_seconds)}</td>
-        <td class="mono">${esc(run.model_id || "—")}</td>
-        <td class="mono">${esc((run.run_id || "").slice(0, 8) || "—")}</td>
+        <td class="mono">${escapeHtml(run.model_id || "—")}</td>
+        <td class="mono">${escapeHtml((run.run_id || "").slice(0, 8) || "—")}</td>
         <td>${fmtNum(run.tokens)}</td>
         <td>${fmtMoney(run.cost)}</td>
         <td>${run.interrupted ? '<span class="badge badge-warn">interrupted</span>' : '<span class="badge badge-ok">done</span>'}</td>
         <td>${fmtNum(run.dropped_count)}</td>
-        <td>${esc(fmtRange(run.turn_range))}</td>
+        <td>${escapeHtml(fmtRange(run.turn_range))}</td>
       </tr>`,
     )
     .join("");
@@ -1469,22 +1469,22 @@ function filterFieldsHtml(tab, filters) {
 
 function fieldSelect(field, values, labels, value) {
   const opts = values
-    .map((v, i) => `<option value="${esc(v)}" ${String(value ?? "") === String(v) ? "selected" : ""}>${esc(labels[i])}</option>`)
+    .map((v, i) => `<option value="${escapeHtml(v)}" ${String(value ?? "") === String(v) ? "selected" : ""}>${escapeHtml(labels[i])}</option>`)
     .join("");
-  return `<div class="field"><label for="f-${field.name}">${esc(field.label)}</label><select id="f-${field.name}" name="${field.name}">${opts}</select></div>`;
+  return `<div class="field"><label for="f-${field.name}">${escapeHtml(field.label)}</label><select id="f-${field.name}" name="${field.name}">${opts}</select></div>`;
 }
 
 function fieldHtml(field, value) {
   const id = `f-${field.name}`;
   switch (field.kind) {
     case "datetime":
-      return `<div class="field"><label for="${id}">${esc(field.label)}</label><input type="datetime-local" id="${id}" name="${field.name}" value="${esc(value ?? "")}" /></div>`;
+      return `<div class="field"><label for="${id}">${escapeHtml(field.label)}</label><input type="datetime-local" id="${id}" name="${field.name}" value="${escapeHtml(value ?? "")}" /></div>`;
     case "text":
-      return `<div class="field"><label for="${id}">${esc(field.label)}</label><input type="text" id="${id}" name="${field.name}" value="${esc(value ?? "")}" /></div>`;
+      return `<div class="field"><label for="${id}">${escapeHtml(field.label)}</label><input type="text" id="${id}" name="${field.name}" value="${escapeHtml(value ?? "")}" /></div>`;
     case "tier":
       return fieldSelect(field, ["", "1", "2", "3"], ["any", "Tier 1", "Tier 2", "Tier 3"], value);
     case "decay":
-      return `<div class="field"><label for="${id}">${esc(field.label)} (0–1)</label><input type="number" id="${id}" name="${field.name}" min="0" max="1" step="0.01" value="${esc(value ?? "")}" /></div>`;
+      return `<div class="field"><label for="${id}">${escapeHtml(field.label)} (0–1)</label><input type="number" id="${id}" name="${field.name}" min="0" max="1" step="0.01" value="${escapeHtml(value ?? "")}" /></div>`;
     case "node-type":
       return fieldSelect(
         field,
@@ -1493,7 +1493,7 @@ function fieldHtml(field, value) {
         value,
       );
     case "check":
-      return `<div class="field"><label>&nbsp;</label><label class="check-row"><input type="checkbox" id="${id}" name="${field.name}" ${value ? "checked" : ""} /> ${esc(field.label)}</label></div>`;
+      return `<div class="field"><label>&nbsp;</label><label class="check-row"><input type="checkbox" id="${id}" name="${field.name}" ${value ? "checked" : ""} /> ${escapeHtml(field.label)}</label></div>`;
     default:
       return "";
   }
@@ -1568,7 +1568,7 @@ function switchTab(tab) {
 async function loadBrowse() {
   const results = document.getElementById("browse-results");
   if (!results) return;
-  results.innerHTML = `<p class="loading">Loading ${esc(state.browse.tab)}…</p>`;
+  results.innerHTML = `<p class="loading">Loading ${escapeHtml(state.browse.tab)}…</p>`;
   try {
     await ensureProfile();
   } catch (_err) {
@@ -1598,7 +1598,7 @@ function browseResultsHtml(body) {
     ? items.map((item) => (state.browse.tab === "chunks" ? chunkRowHtml(item) : nodeRowHtml(item))).join("")
     : emptyPanel("No memories match this profile and filter set.");
   const flash = state.browseFlash
-    ? `<div class="card"><span class="ok-inline">${esc(state.browseFlash)}</span></div>`
+    ? `<div class="card"><span class="ok-inline">${escapeHtml(state.browseFlash)}</span></div>`
     : "";
   state.browseFlash = null;
   return `${flash}${list}${paginationBar(paging, items.length)}`;
@@ -1614,14 +1614,14 @@ function chunkRowHtml(chunk) {
   ]
     .filter(Boolean)
     .join(" · ");
-  return `<button class="row-item" data-act="open-detail" data-type="chunk" data-id="${esc(chunk.chunk_id)}">
-    <div class="row-title">${esc(truncate(chunk.text, 160))}</div>
+  return `<button class="row-item" data-act="open-detail" data-type="chunk" data-id="${escapeHtml(chunk.chunk_id)}">
+    <div class="row-title">${escapeHtml(truncate(chunk.text, 160))}</div>
     <div class="row-meta">
       <span>${decayMeter(chunk.decay_weight)}</span>
       ${flagBadge("consolidated", chunk.consolidated === true, "accent")}
       ${badgeList(cues.entities)}
     </div>
-    <div class="row-meta">${esc(metaBits)}</div>
+    <div class="row-meta">${escapeHtml(metaBits)}</div>
   </button>`;
 }
 
@@ -1635,8 +1635,8 @@ function nodeRowHtml(node) {
   ]
     .filter(Boolean)
     .join(" · ");
-  return `<button class="row-item" data-act="open-detail" data-type="node" data-id="${esc(node.node_id)}">
-    <div class="row-title">${esc(truncate(node.statement, 160))}</div>
+  return `<button class="row-item" data-act="open-detail" data-type="node" data-id="${escapeHtml(node.node_id)}">
+    <div class="row-title">${escapeHtml(truncate(node.statement, 160))}</div>
     <div class="row-meta">
       <span>${decayMeter(node.decay_weight)}</span>
       ${flagBadge("conflict", node.conflict_flag === true, "err")}
@@ -1644,7 +1644,7 @@ function nodeRowHtml(node) {
       ${flagBadge("pending", node.pending_consolidation === true, "warn")}
       ${badgeList(node.entities)}
     </div>
-    <div class="row-meta">${esc(metaBits)}</div>
+    <div class="row-meta">${escapeHtml(metaBits)}</div>
   </button>`;
 }
 
@@ -1683,7 +1683,7 @@ async function loadDetail(type, id) {
   const url = `/api/v1/${kind}/${encodeURIComponent(id)}?profile_id=${encodeURIComponent(state.profileId)}`;
   try {
     const dossier = await api(url);
-    const flash = state.detailFlash ? `<div class="card"><span class="ok-inline">${esc(state.detailFlash)}</span></div>` : "";
+    const flash = state.detailFlash ? `<div class="card"><span class="ok-inline">${escapeHtml(state.detailFlash)}</span></div>` : "";
     state.detailFlash = null;
     view.innerHTML = flash + detailHtml(dossier);
     document.title = `MnemoSeed console — ${type} ${id}`;
@@ -1703,8 +1703,8 @@ function detailHtml(dossier) {
   const id = isNode ? dossier.node_id : dossier.chunk_id;
   const head = `<div class="detail-head">
     <button class="btn" data-act="go-browse">← browse</button>
-    <h1 class="mono">${esc(id)}</h1>
-    ${isNode ? `<span class="badge badge-accent">${esc(niceLabel(dossier.node_type))}</span>` : `<span class="badge">chunk · tier ${esc(String((dossier.metadata || {}).cognitive_tier ?? "—"))}</span>`}
+    <h1 class="mono">${escapeHtml(id)}</h1>
+    ${isNode ? `<span class="badge badge-accent">${escapeHtml(niceLabel(dossier.node_type))}</span>` : `<span class="badge">chunk · tier ${escapeHtml(String((dossier.metadata || {}).cognitive_tier ?? "—"))}</span>`}
   </div>`;
   const content = isNode ? nodeContentCard(dossier) : chunkContentCard(dossier);
   const states = isNode ? nodeStatesCard(dossier) : chunkStatesCard(dossier);
@@ -1721,22 +1721,22 @@ function actionsCard(dossier) {
   const id = isNode ? dossier.node_id : dossier.chunk_id;
   const neverDecay = isNode && dossier.weights && dossier.weights.never_decay === true;
   const pinBtn = isNode
-    ? `<button class="btn" data-act="detail-pin" data-id="${esc(id)}" data-pinned="${neverDecay ? "false" : "true"}" title="${neverDecay ? "unpin — resume decay" : "pin — never decay"}">${neverDecay ? "unpin" : "pin"}</button>`
+    ? `<button class="btn" data-act="detail-pin" data-id="${escapeHtml(id)}" data-pinned="${neverDecay ? "false" : "true"}" title="${neverDecay ? "unpin — resume decay" : "pin — never decay"}">${neverDecay ? "unpin" : "pin"}</button>`
     : "";
   const current = dossier.weights && dossier.weights.decay_weight;
   return `<div class="card">
     <h2>actions</h2>
     <div class="toolbar">
       ${pinBtn}
-      <button class="btn btn-danger" data-act="detail-forget" data-type="${isNode ? "node" : "chunk"}" data-id="${esc(id)}" title="forget this memory (audited)">forget</button>
+      <button class="btn btn-danger" data-act="detail-forget" data-type="${isNode ? "node" : "chunk"}" data-id="${escapeHtml(id)}" title="forget this memory (audited)">forget</button>
     </div>
     <h3>manual decay adjustment</h3>
-    <form data-weight-form data-kind="${isNode ? "node" : "chunk"}" data-id="${esc(id)}">
+    <form data-weight-form data-kind="${isNode ? "node" : "chunk"}" data-id="${escapeHtml(id)}">
       <div class="filter-grid">
-        <div class="field"><label for="weight-${esc(id)}">decay weight (0–1)</label><input type="number" id="weight-${esc(id)}" name="decay_weight" min="0" max="1" step="0.05" value="${esc(String(current ?? ""))}" required /></div>
+        <div class="field"><label for="weight-${escapeHtml(id)}">decay weight (0–1)</label><input type="number" id="weight-${escapeHtml(id)}" name="decay_weight" min="0" max="1" step="0.05" value="${escapeHtml(String(current ?? ""))}" required /></div>
       </div>
       <div class="toolbar">
-        <span class="toolbar-note">current ${esc(String(current ?? "—"))} → new; the audit records both values</span>
+        <span class="toolbar-note">current ${escapeHtml(String(current ?? "—"))} → new; the audit records both values</span>
         <span class="spacer"></span>
         <button class="btn btn-primary" type="submit">apply weight</button>
       </div>
@@ -1750,7 +1750,7 @@ function chunkContentCard(dossier) {
   const cues = dossier.cues || {};
   return `<div class="card">
     <h2>verbatim channel</h2>
-    <pre class="mono" style="white-space:pre-wrap;font-size:0.9rem">${esc(content.verbatim || "")}</pre>
+    <pre class="mono" style="white-space:pre-wrap;font-size:0.9rem">${escapeHtml(content.verbatim || "")}</pre>
     ${kvList(cueKvs(cues))}
   </div>`;
 }
@@ -1758,17 +1758,17 @@ function chunkContentCard(dossier) {
 function cueKvs(cues) {
   const emotion = cues.emotion;
   const pairs = [
-    ["project", esc(cues.project || "—")],
-    ["host", esc(cues.host || "—")],
-    ["task", esc(cues.task || "—")],
-    ["tools used", esc((cues.tools_used || []).join(", ") || "—")],
-    ["time bucket", esc(cues.time_bucket || "—")],
+    ["project", escapeHtml(cues.project || "—")],
+    ["host", escapeHtml(cues.host || "—")],
+    ["task", escapeHtml(cues.task || "—")],
+    ["tools used", escapeHtml((cues.tools_used || []).join(", ") || "—")],
+    ["time bucket", escapeHtml(cues.time_bucket || "—")],
     ["entities", badgeList(cues.entities)],
   ];
   if (emotion) {
-    pairs.push(["emotion valence", esc(String(emotion.valence ?? "—"))]);
-    pairs.push(["emotion arousal", esc(String(emotion.arousal ?? "—"))]);
-    pairs.push(["peripheral gaps", esc(String(emotion.peripheral_gaps ?? "—"))]);
+    pairs.push(["emotion valence", escapeHtml(String(emotion.valence ?? "—"))]);
+    pairs.push(["emotion arousal", escapeHtml(String(emotion.arousal ?? "—"))]);
+    pairs.push(["peripheral gaps", escapeHtml(String(emotion.peripheral_gaps ?? "—"))]);
   } else {
     pairs.push(["emotion", '<span class="dim">none</span>']);
   }
@@ -1784,10 +1784,10 @@ function chunkStatesCard(dossier) {
     <h2>weights</h2>
     ${kvList([
       ["decay weight", decayMeter(weights.decay_weight)],
-      ["score", esc(fmtNum(weights.score))],
-      ["confidence", esc(String(weights.confidence ?? "—"))],
-      ["last reinforced", esc(fmtEpoch(weights.last_reinforced))],
-      ["reinforce count", esc(fmtNum(weights.reinforce_count))],
+      ["score", escapeHtml(fmtNum(weights.score))],
+      ["confidence", escapeHtml(String(weights.confidence ?? "—"))],
+      ["last reinforced", escapeHtml(fmtEpoch(weights.last_reinforced))],
+      ["reinforce count", escapeHtml(fmtNum(weights.reinforce_count))],
     ])}
     <h3>flags</h3>
     ${kvList([
@@ -1799,16 +1799,16 @@ function chunkStatesCard(dossier) {
     ])}
     <h3>usage</h3>
     ${kvList([
-      ["hit count", esc(fmtNum(usage.hit_count))],
-      ["last hit at", esc(fmtEpoch(usage.last_hit_at))],
+      ["hit count", escapeHtml(fmtNum(usage.hit_count))],
+      ["last hit at", escapeHtml(fmtEpoch(usage.last_hit_at))],
     ])}
     <h3>metadata</h3>
     ${kvList([
-      ["cognitive tier", esc(String(meta.cognitive_tier ?? "—"))],
-      ["model id", esc(meta.model_id || "—")],
-      ["persona id", esc(meta.persona_id || "—")],
-      ["ingested at", esc(fmtEpoch(meta.ingested_at))],
-      ["turn range", esc(fmtRange(meta.turn_start != null ? { start: meta.turn_start, end: meta.turn_end } : null))],
+      ["cognitive tier", escapeHtml(String(meta.cognitive_tier ?? "—"))],
+      ["model id", escapeHtml(meta.model_id || "—")],
+      ["persona id", escapeHtml(meta.persona_id || "—")],
+      ["ingested at", escapeHtml(fmtEpoch(meta.ingested_at))],
+      ["turn range", escapeHtml(fmtRange(meta.turn_start != null ? { start: meta.turn_start, end: meta.turn_end } : null))],
     ])}
   </div>`;
 }
@@ -1819,12 +1819,12 @@ function nodeContentCard(dossier) {
     (v) => v !== null && v !== undefined && v !== "",
   );
   const triple = hasTriple
-    ? `<div class="kv"><span class="kv-label">triple</span><span class="kv-value"><span class="triple-term s">${esc(String(content.subject ?? "?"))}</span> → <span class="triple-term p">${esc(String(content.predicate ?? "?"))}</span> → <span class="triple-term o">${esc(String(content.object ?? "?"))}</span></span></div>`
+    ? `<div class="kv"><span class="kv-label">triple</span><span class="kv-value"><span class="triple-term s">${escapeHtml(String(content.subject ?? "?"))}</span> → <span class="triple-term p">${escapeHtml(String(content.predicate ?? "?"))}</span> → <span class="triple-term o">${escapeHtml(String(content.object ?? "?"))}</span></span></div>`
     : `<div class="kv"><span class="kv-label">triple</span><span class="kv-value"><span class="dim">no structured triple for this node type</span></span></div>`;
   return `<div class="card">
     <h2>triple channel</h2>
     ${kvList([
-      ["statement", `<span class="mono">${esc(content.statement || "—")}</span>`],
+      ["statement", `<span class="mono">${escapeHtml(content.statement || "—")}</span>`],
       ["entities", badgeList(dossier.entities)],
     ])}
     ${triple}
@@ -1840,39 +1840,39 @@ function nodeStatesCard(dossier) {
     <h2>weights</h2>
     ${kvList([
       ["decay weight", decayMeter(weights.decay_weight)],
-      ["confidence", esc(String(weights.confidence ?? "—"))],
-      ["reinforce count", esc(fmtNum(weights.reinforce_count))],
-      ["last reinforced", esc(fmtEpoch(weights.last_reinforced))],
+      ["confidence", escapeHtml(String(weights.confidence ?? "—"))],
+      ["reinforce count", escapeHtml(fmtNum(weights.reinforce_count))],
+      ["last reinforced", escapeHtml(fmtEpoch(weights.last_reinforced))],
       ["never decay", flagValue(weights.never_decay)],
     ])}
     <h3>flags</h3>
     ${kvList([
       ["conflict", flagValue(flags.conflict_flag)],
-      ["conflict group", esc(flags.conflict_group || "—")],
+      ["conflict group", escapeHtml(flags.conflict_group || "—")],
       ["needs reconcile", flagValue(flags.needs_reconcile)],
       ["pending consolidation", flagValue(flags.pending_consolidation)],
       ["peripheral gaps", flagValue(flags.peripheral_gaps)],
     ])}
     <h3>usage</h3>
     ${kvList([
-      ["hit count", esc(fmtNum(usage.hit_count))],
-      ["last hit at", esc(fmtEpoch(usage.last_hit_at))],
+      ["hit count", escapeHtml(fmtNum(usage.hit_count))],
+      ["last hit at", escapeHtml(fmtEpoch(usage.last_hit_at))],
     ])}
     <h3>promotion</h3>
-    ${kvList([["status", esc(dossier.promotion_status || "—")]])}
+    ${kvList([["status", escapeHtml(dossier.promotion_status || "—")]])}
     <h3>version</h3>
     ${kvList([
-      ["number", esc(String(version.number ?? "—")) + (version.current ? ' <span class="badge badge-ok">current</span>' : "")],
-      ["prev version", version.prev_version_id ? `<span class="mono">${esc(version.prev_version_id.slice(0, 12))}</span>` : '<span class="dim">—</span>'],
-      ["valid from", esc(fmtEpoch(version.valid_from))],
-      ["valid to", version.valid_to ? esc(fmtEpoch(version.valid_to)) : '<span class="badge badge-ok">now</span>'],
+      ["number", escapeHtml(String(version.number ?? "—")) + (version.current ? ' <span class="badge badge-ok">current</span>' : "")],
+      ["prev version", version.prev_version_id ? `<span class="mono">${escapeHtml(version.prev_version_id.slice(0, 12))}</span>` : '<span class="dim">—</span>'],
+      ["valid from", escapeHtml(fmtEpoch(version.valid_from))],
+      ["valid to", version.valid_to ? escapeHtml(fmtEpoch(version.valid_to)) : '<span class="badge badge-ok">now</span>'],
     ])}
     <h3>version chain</h3>
     ${versionChainHtml(dossier.version_chain)}
     ${dossier.timeline && dossier.timeline.length ? `<h3>timeline</h3>${timelineHtml(dossier.timeline)}` : ""}
     ${kvList([
-      ["created at", esc(fmtEpoch(dossier.created_at))],
-      ["updated at", esc(fmtEpoch(dossier.updated_at))],
+      ["created at", escapeHtml(fmtEpoch(dossier.created_at))],
+      ["updated at", escapeHtml(fmtEpoch(dossier.updated_at))],
     ])}
   </div>`;
 }
@@ -1886,8 +1886,8 @@ function versionChainHtml(chain) {
     .map((version) => {
       const stmt = version.props && version.props.statement;
       return `<div class="kv">
-        <span class="kv-label">v${esc(String(version.version))}${version.valid_to == null ? ' <span class="badge badge-ok">current</span>' : ""}</span>
-        <span class="kv-value">${esc(stmt || JSON.stringify(version.props || {}))}</span>
+        <span class="kv-label">v${escapeHtml(String(version.version))}${version.valid_to == null ? ' <span class="badge badge-ok">current</span>' : ""}</span>
+        <span class="kv-value">${escapeHtml(stmt || JSON.stringify(version.props || {}))}</span>
       </div>`;
     })
     .join("");
@@ -1912,8 +1912,8 @@ function timelineHtml(events) {
     .map(
       (event) => `<tr>
         <td>${fmtEpoch(event.when)}</td>
-        <td class="mono">${esc(String(event.version ?? ""))}</td>
-        <td>${esc(event.summary ?? "")}</td>
+        <td class="mono">${escapeHtml(String(event.version ?? ""))}</td>
+        <td>${escapeHtml(event.summary ?? "")}</td>
       </tr>`,
     )
     .join("");
@@ -1927,12 +1927,12 @@ function provenanceCard(provenance) {
   return `<div class="card">
     <h2>provenance</h2>
     ${kvList([
-      ["asserted by", esc(provenanceInfo.asserted_by || "—")],
-      ["agent id", esc(provenanceInfo.agent_id || "—")],
-      ["session id", esc(provenanceInfo.session_id || "—")],
-      ["source", esc(provenanceInfo.source || "—")],
-      ["confidence", esc(String(provenanceInfo.confidence ?? "—"))],
-      ["asserted at", esc(fmtEpoch(provenanceInfo.asserted_at))],
+      ["asserted by", escapeHtml(provenanceInfo.asserted_by || "—")],
+      ["agent id", escapeHtml(provenanceInfo.agent_id || "—")],
+      ["session id", escapeHtml(provenanceInfo.session_id || "—")],
+      ["source", escapeHtml(provenanceInfo.source || "—")],
+      ["confidence", escapeHtml(String(provenanceInfo.confidence ?? "—"))],
+      ["asserted at", escapeHtml(fmtEpoch(provenanceInfo.asserted_at))],
     ])}
     <h3>history timeline</h3>
     ${provenanceHistoryHtml(provenanceInfo.history)}
@@ -1945,8 +1945,8 @@ function provenanceHistoryHtml(events) {
     .map(
       (event) => `<tr>
         <td>${fmtEpoch(event.at)}</td>
-        <td><span class="badge badge-accent">${esc(event.action)}</span></td>
-        <td>${esc(event.actor || "—")}</td>
+        <td><span class="badge badge-accent">${escapeHtml(event.action)}</span></td>
+        <td>${escapeHtml(event.actor || "—")}</td>
         <td>${detailCell(event.detail)}</td>
       </tr>`,
     )
@@ -2078,17 +2078,17 @@ function profileAdminCard(row) {
     ? issuedTokens
         .map(
           (token) => `<div class="resolve-row">
-            <span class="mono">${esc(token.token_id.slice(0, 8))}…</span>
-            <span class="badge badge-accent">${esc((token.scopes || []).join(", ") || "all")}</span>
-            <span class="dim">${token.expires_at ? `expires ${esc(fmtEpoch(token.expires_at))}` : "no expiry"}</span>
+            <span class="mono">${escapeHtml(token.token_id.slice(0, 8))}…</span>
+            <span class="badge badge-accent">${escapeHtml((token.scopes || []).join(", ") || "all")}</span>
+            <span class="dim">${token.expires_at ? `expires ${escapeHtml(fmtEpoch(token.expires_at))}` : "no expiry"}</span>
             <span class="spacer"></span>
-            <button class="btn" data-act="token-revoke" data-token-id="${esc(token.token_id)}">revoke</button>
+            <button class="btn" data-act="token-revoke" data-token-id="${escapeHtml(token.token_id)}">revoke</button>
           </div>`,
         )
         .join("")
     : '<p class="dim">No tokens issued this session — issue one below (the bearer secret shows once).</p>';
   return `<div class="card">
-    <h2>${esc(row.profile_id)} ${esc(row.display_name || "")} ${archived ? '<span class="badge badge-warn">archived</span>' : ""}</h2>
+    <h2>${escapeHtml(row.profile_id)} ${escapeHtml(row.display_name || "")} ${archived ? '<span class="badge badge-warn">archived</span>' : ""}</h2>
     <div class="tiles">
       ${tile(fmtNum(counts.chunks), "chunks")}
       ${tile(fmtNum(counts.nodes), "nodes")}
@@ -2097,15 +2097,15 @@ function profileAdminCard(row) {
     </div>
     <h3>manage</h3>
     <div class="toolbar">
-      <form data-profile-rename-form data-profile-id="${esc(row.profile_id)}">
-        <input type="text" name="display_name" value="${esc(row.display_name || "")}" placeholder="display name" autocomplete="off" />
+      <form data-profile-rename-form data-profile-id="${escapeHtml(row.profile_id)}">
+        <input type="text" name="display_name" value="${escapeHtml(row.display_name || "")}" placeholder="display name" autocomplete="off" />
         <button class="btn" type="submit">rename</button>
       </form>
       <span class="spacer"></span>
-      <button class="btn" data-act="profile-archive" data-profile-id="${esc(row.profile_id)}" data-archived="${archived ? "false" : "true"}">${archived ? "unarchive" : "archive"}</button>
-      <button class="btn btn-primary" data-act="token-issue" data-profile-id="${esc(row.profile_id)}">issue token</button>
+      <button class="btn" data-act="profile-archive" data-profile-id="${escapeHtml(row.profile_id)}" data-archived="${archived ? "false" : "true"}">${archived ? "unarchive" : "archive"}</button>
+      <button class="btn btn-primary" data-act="token-issue" data-profile-id="${escapeHtml(row.profile_id)}">issue token</button>
     </div>
-    <output class="feedback" data-token-issue data-profile-id="${esc(row.profile_id)}"></output>
+    <output class="feedback" data-token-issue data-profile-id="${escapeHtml(row.profile_id)}"></output>
     <h3>session tokens</h3>
     ${tokenRows}
   </div>`;
@@ -2183,8 +2183,8 @@ async function issueToken(profile_id) {
     };
     if (output) {
       output.innerHTML = `<div class="ok-inline"><strong>token issued — copy it now, it will never be shown again:</strong>
-        <div class="mono" style="overflow-wrap:anywhere">${esc(result.token_secret)}</div>
-        <button class="btn" data-act="token-copy" data-secret="${esc(result.token_secret)}">copy</button></div>`;
+        <div class="mono" style="overflow-wrap:anywhere">${escapeHtml(result.token_secret)}</div>
+        <button class="btn" data-act="token-copy" data-secret="${escapeHtml(result.token_secret)}">copy</button></div>`;
     }
   } catch (error) {
     if (output) output.innerHTML = errorInline(`token issue failed: ${error.message}`);
@@ -2253,13 +2253,13 @@ function restartRequiredBadge(config) {
   const rr = config && config.restart_required;
   const names = Object.keys(rr || {}).filter((key) => rr[key] === true);
   if (!names.length) return "";
-  return `<span class="badge badge-warn" title="${esc(names.join(", "))}">restart required</span>`;
+  return `<span class="badge badge-warn" title="${escapeHtml(names.join(", "))}">restart required</span>`;
 }
 
 function settingsHtml() {
   const config = state.settings.config || {};
   const banner = state.settings.message
-    ? `<div class="card"><span class="ok-inline">${esc(state.settings.message)}</span></div>`
+    ? `<div class="card"><span class="ok-inline">${escapeHtml(state.settings.message)}</span></div>`
     : "";
   state.settings.message = null;
   const toolbar = `<div class="toolbar">
@@ -2281,7 +2281,7 @@ function settingsHtml() {
       </div>
       <div class="field">
         <label for="settings-budget">token budget (USD per month)</label>
-        <input type="number" id="settings-budget" name="dream.token_budget_usd" min="0" step="0.01" value="${esc(budget === null || budget === undefined ? "" : String(budget))}" placeholder="blank = no cap" autocomplete="off" />
+        <input type="number" id="settings-budget" name="dream.token_budget_usd" min="0" step="0.01" value="${escapeHtml(budget === null || budget === undefined ? "" : String(budget))}" placeholder="blank = no cap" autocomplete="off" />
       </div>
     </div>
     <div class="toolbar">
@@ -2314,12 +2314,12 @@ function versionsTable(versions) {
   const rows = versions
     .map(
       (version) => `<tr>
-        <td><span class="mono">${esc(version.version_id)}</span></td>
-        <td><span class="mono">${esc(version.key)}</span></td>
-        <td>v${esc(version.version)}</td>
+        <td><span class="mono">${escapeHtml(version.version_id)}</span></td>
+        <td><span class="mono">${escapeHtml(version.key)}</span></td>
+        <td>v${escapeHtml(version.version)}</td>
         <td>${fmtEpoch(version.updated_at)}</td>
         <td>${detailCell(version.value)}</td>
-        <td><button class="btn" data-act="config-rollback" data-version-id="${esc(version.version_id)}" title="restore this version's config (audited)">rollback</button></td>
+        <td><button class="btn" data-act="config-rollback" data-version-id="${escapeHtml(version.version_id)}" title="restore this version's config (audited)">rollback</button></td>
       </tr>`,
     )
     .join("");
@@ -2423,9 +2423,9 @@ function auditHtml(result) {
   const filterForm = `<form class="card" data-audit-form>
     <h2>filters</h2>
     <div class="filter-grid">
-      <div class="field"><label for="audit-actor">actor</label><input type="text" id="audit-actor" name="actor" value="${esc(state.audit.filters.actor || "")}" placeholder="console | cli | daemon" autocomplete="off" /></div>
-      <div class="field"><label for="audit-action">action</label><input type="text" id="audit-action" name="action" value="${esc(state.audit.filters.action || "")}" placeholder="e.g. capture" autocomplete="off" /></div>
-      <div class="field"><label for="audit-since">since</label><input type="datetime-local" id="audit-since" name="since" value="${esc(auditSinceInput())}" /></div>
+      <div class="field"><label for="audit-actor">actor</label><input type="text" id="audit-actor" name="actor" value="${escapeHtml(state.audit.filters.actor || "")}" placeholder="console | cli | daemon" autocomplete="off" /></div>
+      <div class="field"><label for="audit-action">action</label><input type="text" id="audit-action" name="action" value="${escapeHtml(state.audit.filters.action || "")}" placeholder="e.g. capture" autocomplete="off" /></div>
+      <div class="field"><label for="audit-since">since</label><input type="datetime-local" id="audit-since" name="since" value="${escapeHtml(auditSinceInput())}" /></div>
     </div>
     <div class="toolbar"><button class="btn btn-primary" type="submit">apply filters</button></div>
     <output class="feedback" data-audit-feedback></output>
@@ -2437,8 +2437,8 @@ function auditHtml(result) {
           .map(
             (entry) => `<tr>
               <td>${fmtEpoch(entry.at)}</td>
-              <td>${esc(entry.actor || "—")}</td>
-              <td><span class="badge badge-accent">${esc(entry.action)}</span></td>
+              <td>${escapeHtml(entry.actor || "—")}</td>
+              <td><span class="badge badge-accent">${escapeHtml(entry.action)}</span></td>
               <td>${detailCell(entry.detail)}</td>
             </tr>`,
           )
@@ -2570,10 +2570,10 @@ function reviewShellHtml(run, review) {
   const head = `<div class="card">
     <h2>dream quality review</h2>
     ${kvList([
-      ["run", `<span class="mono">${esc(run.run_id)}</span>`],
-      ["turn range", esc(fmtRange(run.turn_range))],
-      ["started", esc(fmtEpoch(run.started_at))],
-      ["model", esc(run.model_id || "—")],
+      ["run", `<span class="mono">${escapeHtml(run.run_id)}</span>`],
+      ["turn range", escapeHtml(fmtRange(run.turn_range))],
+      ["started", escapeHtml(fmtEpoch(run.started_at))],
+      ["model", escapeHtml(run.model_id || "—")],
     ])}
   </div>`;
   if (!review || review.reflected !== true) {
@@ -2586,18 +2586,18 @@ function reviewShellHtml(run, review) {
 
 function tripleReviewCard(triple, index) {
   const chunks = (triple.chunks || []).map(
-    (chunk) => `<div class="source-chunk"><div class="row-title">${esc(chunk.text)}</div><div class="chunk-id mono">${esc(chunk.chunk_id)}</div></div>`,
+    (chunk) => `<div class="source-chunk"><div class="row-title">${escapeHtml(chunk.text)}</div><div class="chunk-id mono">${escapeHtml(chunk.chunk_id)}</div></div>`,
   ).join("");
   const verdict = triple.verdict;
   const controls = verdict
-    ? `${VERDICT_BADGE[verdict.action] || esc(verdict.action)} <span class="dim">recorded · ${esc(fmtEpoch(verdict.at))}</span>`
+    ? `${VERDICT_BADGE[verdict.action] || escapeHtml(verdict.action)} <span class="dim">recorded · ${escapeHtml(fmtEpoch(verdict.at))}</span>`
     : REVIEW_VERDICTS.map(
         (v) =>
-          `<button class="btn btn-primary" data-act="review-verdict" data-index="${index}" data-verdict="${v.value}" title="record ${esc(v.value)} verdict">${esc(v.label)}</button>`,
+          `<button class="btn btn-primary" data-act="review-verdict" data-index="${index}" data-verdict="${v.value}" title="record ${escapeHtml(v.value)} verdict">${escapeHtml(v.label)}</button>`,
       ).join("");
   return `<div class="triple-review">
-    <div class="trip-line"><span class="triple-term s">${esc(triple.subject)}</span> → <span class="triple-term p">${esc(triple.predicate)}</span> → <span class="triple-term o">${esc(triple.object)}</span></div>
-    <div class="row-meta">route ${esc(triple.route)} · confidence ${fmtNum(triple.confidence)} · preference ${triple.preference ? "yes" : "no"} · polarity ${esc(triple.polarity)}</div>
+    <div class="trip-line"><span class="triple-term s">${escapeHtml(triple.subject)}</span> → <span class="triple-term p">${escapeHtml(triple.predicate)}</span> → <span class="triple-term o">${escapeHtml(triple.object)}</span></div>
+    <div class="row-meta">route ${escapeHtml(triple.route)} · confidence ${fmtNum(triple.confidence)} · preference ${triple.preference ? "yes" : "no"} · polarity ${escapeHtml(triple.polarity)}</div>
     ${chunks}
     <div class="verdict-row">${controls}</div>
   </div>`;
@@ -2669,10 +2669,10 @@ function conflictsShellHtml(body) {
 function conflictGroupCard(group, index) {
   const sides = (group.sides || []).map((side) => conflictSideCard(side, index)).join("");
   const branches = CONFLICT_BRANCHES.map(
-    (branch) => `<option value="${branch.value}">${esc(branch.label)}</option>`,
+    (branch) => `<option value="${branch.value}">${escapeHtml(branch.label)}</option>`,
   ).join("");
   return `<div class="conflict-group">
-    <h3>conflict group <span class="mono">${esc(group.group_id)}</span></h3>
+    <h3>conflict group <span class="mono">${escapeHtml(group.group_id)}</span></h3>
     <div class="conflict-sides">${sides}</div>
     <h4>resolve</h4>
     <div class="resolve-row">
@@ -2687,15 +2687,15 @@ function conflictGroupCard(group, index) {
 function conflictSideCard(side, index) {
   const provenance = side.provenance || {};
   return `<div class="conflict-side">
-    <label class="check-row side-pick"><input type="radio" name="conflict-side-${index}" value="${esc(side.node_id)}" /> <span><strong>${esc(side.statement)}</strong></span></label>
+    <label class="check-row side-pick"><input type="radio" name="conflict-side-${index}" value="${escapeHtml(side.node_id)}" /> <span><strong>${escapeHtml(side.statement)}</strong></span></label>
     <div class="row-meta">${decayMeter(side.decay_weight)} · confidence ${fmtNum(side.confidence)} · ${fmtNum(side.reinforce_count)} reinforcement${side.reinforce_count === 1 ? "" : "s"} · v${fmtNum(side.version)}</div>
     ${kvList([
-      ["domain", esc(side.domain || "—")],
-      ["scope", esc(side.scope || "—")],
+      ["domain", escapeHtml(side.domain || "—")],
+      ["scope", escapeHtml(side.scope || "—")],
       ["entities", badgeList(side.entities)],
-      ["asserted by", esc(provenance.asserted_by || "—")],
-      ["source", esc(provenance.source || "—")],
-      ["asserted at", esc(fmtEpoch(provenance.asserted_at))],
+      ["asserted by", escapeHtml(provenance.asserted_by || "—")],
+      ["source", escapeHtml(provenance.source || "—")],
+      ["asserted at", escapeHtml(fmtEpoch(provenance.asserted_at))],
     ])}
   </div>`;
 }
@@ -2730,16 +2730,16 @@ async function resolveConflict(index) {
     await loadConflicts();
     const live = document.getElementById("view");
     if (live) {
-      const outcome = result.already_resolved ? "already resolved earlier" : `resolved · ${esc(result.branch)}`;
+      const outcome = result.already_resolved ? "already resolved earlier" : `resolved · ${escapeHtml(result.branch)}`;
       const written = Array.isArray(result.written) && result.written.length
-        ? `<span class="mono">${esc(result.written.join(", "))}</span>`
+        ? `<span class="mono">${escapeHtml(result.written.join(", "))}</span>`
         : '<span class="dim">none</span>';
       live.insertAdjacentHTML(
         "afterbegin",
         `<div class="card"><h2>resolution</h2>${kvList([
-          ["group", `<span class="mono">${esc(group.group_id)}</span>`],
-          ["branch", esc(result.branch)],
-          ["outcome", esc(outcome)],
+          ["group", `<span class="mono">${escapeHtml(group.group_id)}</span>`],
+          ["branch", escapeHtml(result.branch)],
+          ["outcome", escapeHtml(outcome)],
           ["written", written],
         ])}</div>`,
       );
@@ -2776,7 +2776,7 @@ async function loadLLM() {
 
 function llmShellHtml(routes, oauth, message) {
   const banner = message
-    ? `<div class="card"><h2>models &amp; routing</h2><span class="ok-inline">${esc(message)}</span></div>`
+    ? `<div class="card"><h2>models &amp; routing</h2><span class="ok-inline">${escapeHtml(message)}</span></div>`
     : "";
   const drivers = routes.drivers || [];
   const roles = routes.roles || [];
@@ -2794,7 +2794,7 @@ function llmShellHtml(routes, oauth, message) {
       <p class="toolbar-note">Model routing is system-scoped — set by the owner/admin and applies to every user.</p>
       ${oauthHintsHtml(oauth)}
       <h3>drivers</h3>
-      <p class="badges">${drivers.length ? drivers.map((d) => `<span class="badge" title="${esc(d.description || "")}">${esc(d.name)}</span>`).join(" ") : '<span class="dim">none registered</span>'}</p>
+      <p class="badges">${drivers.length ? drivers.map((d) => `<span class="badge" title="${escapeHtml(d.description || "")}">${escapeHtml(d.name)}</span>`).join(" ") : '<span class="dim">none registered</span>'}</p>
     </div>
     ${roles.length ? roles.map((role) => llmRoleCard(role, drivers)).join("") : emptyPanel("No dream roles configured on this daemon.")}`;
 }
@@ -2806,15 +2806,15 @@ function oauthHintsHtml(oauth) {
     .map((entry) => {
       const live = entry.present === true && entry.expired !== true;
       const state = live ? "logged in" : entry.present === true ? "expired" : "not detected";
-      return `${esc(entry.provider)} — ${state}`;
+      return `${escapeHtml(entry.provider)} — ${state}`;
     })
     .join(" · ");
   return `<p class="toolbar-note">host logins: ${bits}</p>`;
 }
 
 function llmDriverLabel(role) {
-  if (role.driver === "oauth") return `oauth · ${esc(role.provider || "")}`;
-  return esc(role.driver || "—");
+  if (role.driver === "oauth") return `oauth · ${escapeHtml(role.provider || "")}`;
+  return escapeHtml(role.driver || "—");
 }
 
 function llmRoleCard(role, drivers) {
@@ -2835,24 +2835,24 @@ function llmRoleCard(role, drivers) {
       ? String(state.llm.editModel[role.role])
       : role.model || "—";
   return `<div class="card">
-    <h2>${esc(role.role)} ${!role.explicit ? '<span class="badge">defaults</span>' : ""}</h2>
-    ${subtitle ? `<p class="toolbar-note">${esc(subtitle)}</p>` : ""}
+    <h2>${escapeHtml(role.role)} ${!role.explicit ? '<span class="badge">defaults</span>' : ""}</h2>
+    ${subtitle ? `<p class="toolbar-note">${escapeHtml(subtitle)}</p>` : ""}
     ${role.driver === "ollama" ? '<p class="toolbar-note">lower synthesis quality than cloud models — you accept this for privacy or cost.</p>' : ""}
     <div class="tiles">
       ${tile(`<span class="mono">${llmDriverLabel(role)}</span>`, "driver")}
-      <div class="tile"><div class="tile-value" data-model-tile data-role="${esc(role.role)}"><span class="mono">${esc(modelShown)}</span></div><div class="tile-label">model</div></div>
-      ${tile(esc(baseUrl || "default"), "endpoint")}
-      ${tile(esc(keyLine), "api key env")}
-      ${tile(esc(fmtNum(configRoleMaxTokens(role.role))), "max tokens")}
+      <div class="tile"><div class="tile-value" data-model-tile data-role="${escapeHtml(role.role)}"><span class="mono">${escapeHtml(modelShown)}</span></div><div class="tile-label">model</div></div>
+      ${tile(escapeHtml(baseUrl || "default"), "endpoint")}
+      ${tile(escapeHtml(keyLine), "api key env")}
+      ${tile(escapeHtml(fmtNum(configRoleMaxTokens(role.role))), "max tokens")}
     </div>
     <div class="toolbar">
       <span>${probe}</span>
-      <span class="dim">checked ${esc(fmtEpoch(conn.checked_at))}</span>
+      <span class="dim">checked ${escapeHtml(fmtEpoch(conn.checked_at))}</span>
       <span class="spacer"></span>
-      <button class="btn" data-act="llm-test" data-role="${esc(role.role)}" title="probe this saved route now">Test connection</button>
-      <button class="btn" data-act="llm-edit" data-role="${esc(role.role)}" title="edit this route's config row">${editing ? "Cancel edit" : "Edit route"}</button>
+      <button class="btn" data-act="llm-test" data-role="${escapeHtml(role.role)}" title="probe this saved route now">Test connection</button>
+      <button class="btn" data-act="llm-edit" data-role="${escapeHtml(role.role)}" title="edit this route's config row">${editing ? "Cancel edit" : "Edit route"}</button>
     </div>
-    <output class="feedback" data-llm-feedback data-feedback-role="${esc(role.role)}"></output>
+    <output class="feedback" data-llm-feedback data-feedback-role="${escapeHtml(role.role)}"></output>
     ${editing ? llmEditFormHtml(role, drivers) : ""}
   </div>`;
 }
@@ -2868,16 +2868,16 @@ function llmEditorModelOptions(provider) {
   const extra = catalog.filter((model) => typeof model === "string" && !seen.has(model));
   return curated
     .concat(extra)
-    .map((model) => `<option value="${esc(model)}"></option>`)
+    .map((model) => `<option value="${escapeHtml(model)}"></option>`)
     .join("");
 }
 
 function llmEditorProviderCard(role, provider, activeProvider) {
   const selected = activeProvider && activeProvider.id === provider.id;
   return `<label class="wizard-provider-card ${selected ? "selected" : ""}">
-    <input type="radio" name="llm-provider" value="${esc(provider.id)}" ${selected ? "checked" : ""} />
-    <span class="wizard-provider-title">${esc(provider.label)}</span>
-    <span class="toolbar-note">${esc(provider.note)}</span>
+    <input type="radio" name="llm-provider" value="${escapeHtml(provider.id)}" ${selected ? "checked" : ""} />
+    <span class="wizard-provider-title">${escapeHtml(provider.label)}</span>
+    <span class="toolbar-note">${escapeHtml(provider.note)}</span>
   </label>`;
 }
 
@@ -2901,9 +2901,9 @@ function llmEditorOAuthCards(oauth, activeId) {
           ? `login expired — run ${cmd} first`
           : `no local ${providerName} CLI login detected — log in first (${cmd})`;
       return `<label class="wizard-provider-card ${selected ? "selected" : ""} ${live ? "" : "muted"}">
-        <input type="radio" name="llm-provider" value="${esc(cardId)}" ${selected ? "checked" : ""} ${live ? "" : "disabled"} />
+        <input type="radio" name="llm-provider" value="${escapeHtml(cardId)}" ${selected ? "checked" : ""} ${live ? "" : "disabled"} />
         <span class="wizard-provider-title">Reuse ${providerName} login</span>
-        <span class="toolbar-note">${esc(note)}</span>
+        <span class="toolbar-note">${escapeHtml(note)}</span>
       </label>`;
     })
     .join("");
@@ -2921,10 +2921,10 @@ function llmEditorOAuthCards(oauth, activeId) {
 function llmRolePasteHtml(role) {
   const plainName = LLM_ROLE_PLAIN_NAMES[role] || role;
   return `<details class="key-teaching" data-role-paste>
-    <summary>Paste the API key for ${esc(plainName)} — once, stored locally, never shown again (masked tail ****1234 only).</summary>
+    <summary>Paste the API key for ${escapeHtml(plainName)} — once, stored locally, never shown again (masked tail ****1234 only).</summary>
     <div class="field">
-      <label for="llm-paste-key-${esc(role)}">API key for ${esc(plainName)}</label>
-      <input type="password" id="llm-paste-key-${esc(role)}" name="paste_key" placeholder="paste the API key for ${esc(plainName)}" autocomplete="off" />
+      <label for="llm-paste-key-${escapeHtml(role)}">API key for ${escapeHtml(plainName)}</label>
+      <input type="password" id="llm-paste-key-${escapeHtml(role)}" name="paste_key" placeholder="paste the API key for ${escapeHtml(plainName)}" autocomplete="off" />
     </div>
     <p class="toolbar-note" data-role-paste-note>The key goes straight to the daemon — never into browser storage. Storing it pins the secrets: reference so the next probe and save authenticate with the stored key. <span data-paste-docs></span></p>
     <div class="toolbar">
@@ -2943,12 +2943,12 @@ function llmRolePasteDocs(activeId) {
     const provider = String(activeId).replace(/^oauth:/, "");
     const docs = LLM_OAUTH_TOKEN_DOCS[provider];
     return docs
-      ? `Paste the ${esc(cap(provider))} token instead of the CLI login — <a href="${esc(docs)}" target="_blank" rel="noopener noreferrer">official docs for ${esc(cap(provider))} tokens</a>`
-      : `Paste the ${esc(cap(provider))} token instead of the CLI login.`;
+      ? `Paste the ${escapeHtml(cap(provider))} token instead of the CLI login — <a href="${escapeHtml(docs)}" target="_blank" rel="noopener noreferrer">official docs for ${escapeHtml(cap(provider))} tokens</a>`
+      : `Paste the ${escapeHtml(cap(provider))} token instead of the CLI login.`;
   }
   const provider = llmProviderById(activeId);
   if (!provider || !provider.keyUrl) return "";
-  return `Create the key at <a href="${esc(provider.keyUrl)}" target="_blank" rel="noopener noreferrer">${esc(provider.label.replace(" (recommended)", ""))}</a>, then paste it here once.`;
+  return `Create the key at <a href="${escapeHtml(provider.keyUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(provider.label.replace(" (recommended)", ""))}</a>, then paste it here once.`;
 }
 
 // Keep the role paste module's provider context in lockstep with the picked
@@ -3023,7 +3023,7 @@ async function llmKeyPaste(form, provider) {
     if (envField) envField.value = `secrets:mnemoseed/dream/${role}`;
     const tail = body && body.masked_tail ? String(body.masked_tail) : "";
     if (output) {
-      output.innerHTML = `<span class="badge badge-ok">key stored — ****${esc(tail)}</span> <span class="dim">never shown again — only this masked tail. Deletable any time.</span>`;
+      output.innerHTML = `<span class="badge badge-ok">key stored — ****${escapeHtml(tail)}</span> <span class="dim">never shown again — only this masked tail. Deletable any time.</span>`;
     }
     const delBtn = block.querySelector('[data-act="llm-key-delete"]');
     if (delBtn) delBtn.hidden = false;
@@ -3159,10 +3159,10 @@ function llmKeyTeachingHtml(provider, role) {
   const keyEnv = provider.keyEnv || LLM_ROLE_KEY_ENV[role] || "";
   if (!keyEnv) return "";
   const where = provider.keyUrl ? `Create the key at ${provider.keyUrl}, then ` : "";
-  const keyNote = provider.keyNote ? `<p class="toolbar-note">${esc(provider.keyNote)}</p>` : "";
+  const keyNote = provider.keyNote ? `<p class="toolbar-note">${escapeHtml(provider.keyNote)}</p>` : "";
   return `<details class="key-teaching" data-key-teaching>
     <summary>Your key lives in an environment variable. MnemoSeed reads it from there — you never paste the key here and it is never stored.</summary>
-    <p class="toolbar-note">${esc(where)}set ${esc(keyEnv)} — on macOS/Linux: export ${esc(keyEnv)}=…; on Windows: setx ${esc(keyEnv)} …. Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.</p>
+    <p class="toolbar-note">${escapeHtml(where)}set ${escapeHtml(keyEnv)} — on macOS/Linux: export ${escapeHtml(keyEnv)}=…; on Windows: setx ${escapeHtml(keyEnv)} …. Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.</p>
     ${keyNote}
   </details>`;
 }
@@ -3181,32 +3181,32 @@ function llmEditFormHtml(role, drivers) {
     llmEditorOAuthCards(state.llm.oauth, activeId);
   const modelValue =
     state.llm.editModel[role.role] != null ? String(state.llm.editModel[role.role]) : role.model || "";
-  return `<form class="card" data-llm-route-form data-role="${esc(role.role)}">
-    <h3>Edit route — ${esc(role.role)}</h3>
-    ${isOAuth ? `<p class="toolbar-note">This route uses the ${esc(role.provider || "host")} login on this machine — no key needed. Pick a provider below to change it.</p>` : ""}
-    <input type="hidden" name="driver" value="${isOAuth ? "" : esc(role.driver)}" />
+  return `<form class="card" data-llm-route-form data-role="${escapeHtml(role.role)}">
+    <h3>Edit route — ${escapeHtml(role.role)}</h3>
+    ${isOAuth ? `<p class="toolbar-note">This route uses the ${escapeHtml(role.provider || "host")} login on this machine — no key needed. Pick a provider below to change it.</p>` : ""}
+    <input type="hidden" name="driver" value="${isOAuth ? "" : escapeHtml(role.driver)}" />
     <h4>Which provider?</h4>
     <div class="filter-grid">${cards}</div>
     ${llmRolePasteHtml(role.role)}
     <div class="filter-grid">
-      <div class="field"><label for="llm-model-${esc(role.role)}">model</label>
-        <input type="text" id="llm-model-${esc(role.role)}" name="model" list="llm-models-${esc(role.role)}" value="${esc(modelValue)}" placeholder="type or pick a model" required autocomplete="off" />
-        <datalist id="llm-models-${esc(role.role)}">${llmEditorModelOptions(activeProvider)}</datalist>
+      <div class="field"><label for="llm-model-${escapeHtml(role.role)}">model</label>
+        <input type="text" id="llm-model-${escapeHtml(role.role)}" name="model" list="llm-models-${escapeHtml(role.role)}" value="${escapeHtml(modelValue)}" placeholder="type or pick a model" required autocomplete="off" />
+        <datalist id="llm-models-${escapeHtml(role.role)}">${llmEditorModelOptions(activeProvider)}</datalist>
         <div class="toolbar">
-          <button class="btn" type="button" data-act="llm-load-models" data-role="${esc(role.role)}">Load model list</button>
+          <button class="btn" type="button" data-act="llm-load-models" data-role="${escapeHtml(role.role)}">Load model list</button>
           <span class="toolbar-note">Runs a connection probe to fetch the provider's model catalog.</span>
         </div>
       </div>
-      <div class="field" data-endpoint-field><label for="llm-url-${esc(role.role)}">endpoint</label><input type="text" id="llm-url-${esc(role.role)}" name="base_url" value="${esc(baseUrl)}" placeholder="blank = provider default" autocomplete="off" /></div>
-      <div class="field" data-key-field><label for="llm-env-${esc(role.role)}">api key env var</label><input type="text" id="llm-env-${esc(role.role)}" name="api_key_env" value="${esc(keyEnv)}" placeholder="${esc(roleFallback || "MY_API_KEY")}" autocomplete="off" />${keyProvider ? llmKeyTeachingHtml(keyProvider, role.role) : ""}</div>
-      <div class="field" data-tokens-field><label for="llm-tokens-${esc(role.role)}">max tokens</label><input type="number" id="llm-tokens-${esc(role.role)}" name="max_tokens" value="${esc(maxTokens === null ? "" : String(maxTokens))}" min="1" placeholder="blank = role default" autocomplete="off" /></div>
+      <div class="field" data-endpoint-field><label for="llm-url-${escapeHtml(role.role)}">endpoint</label><input type="text" id="llm-url-${escapeHtml(role.role)}" name="base_url" value="${escapeHtml(baseUrl)}" placeholder="blank = provider default" autocomplete="off" /></div>
+      <div class="field" data-key-field><label for="llm-env-${escapeHtml(role.role)}">api key env var</label><input type="text" id="llm-env-${escapeHtml(role.role)}" name="api_key_env" value="${escapeHtml(keyEnv)}" placeholder="${escapeHtml(roleFallback || "MY_API_KEY")}" autocomplete="off" />${keyProvider ? llmKeyTeachingHtml(keyProvider, role.role) : ""}</div>
+      <div class="field" data-tokens-field><label for="llm-tokens-${escapeHtml(role.role)}">max tokens</label><input type="number" id="llm-tokens-${escapeHtml(role.role)}" name="max_tokens" value="${escapeHtml(maxTokens === null ? "" : String(maxTokens))}" min="1" placeholder="blank = role default" autocomplete="off" /></div>
     </div>
     <p class="toolbar-note" data-residency-note hidden>Your memories leave this machine to the provider's servers.</p>
     <p class="toolbar-note" data-llm-gate-note hidden></p>
     <div class="toolbar">
       <span class="toolbar-note">Remember: the daemon reads env vars from its own startup environment. If you set a new one, restart MnemoSeed.</span>
       <span class="spacer"></span>
-      <button class="btn" type="button" data-act="llm-test-edit" data-role="${esc(role.role)}">Test connection</button>
+      <button class="btn" type="button" data-act="llm-test-edit" data-role="${escapeHtml(role.role)}">Test connection</button>
       <button class="btn btn-primary" type="submit">Save route</button>
     </div>
     <output class="feedback" data-llm-feedback></output>
@@ -3274,7 +3274,7 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
   const providerMeta = llmProviderFor(driver, provider);
   const probeLabel = providerMeta ? providerMeta.label.replace(" (recommended)", "") : driver;
   if (feedbackEl) {
-    feedbackEl.innerHTML = `<span class="dim">Testing connection to ${esc(probeLabel)}…</span>`;
+    feedbackEl.innerHTML = `<span class="dim">Testing connection to ${escapeHtml(probeLabel)}…</span>`;
   }
   try {
     const result = await api("/api/v1/llm/test", {
@@ -3298,7 +3298,7 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
       if (models && models.length) {
         const datalist = document.querySelector(`datalist[id="llm-models-${role}"]`);
         if (datalist) {
-          datalist.innerHTML = models.map((candidate) => `<option value="${esc(candidate)}"></option>`).join("");
+          datalist.innerHTML = models.map((candidate) => `<option value="${escapeHtml(candidate)}"></option>`).join("");
         }
       }
     } else {
@@ -3310,7 +3310,7 @@ async function testRoute(role, driver, model, baseUrl, apiKeyEnv, provider, feed
     if (feedbackEl) {
       feedbackEl.innerHTML = result.ok
         ? '<span class="badge badge-ok">connected</span>'
-        : errorInline(esc(llmProbeMessage(result, payload, providerMeta)));
+        : errorInline(escapeHtml(llmProbeMessage(result, payload, providerMeta)));
     }
   } catch (error) {
     delete state.llm.probeOk[role];
@@ -3950,7 +3950,7 @@ async function loadGraph() {
 
 function graphShellHtml(meta) {
   const typeOptions = ["", ...meta.types].map(
-    (t) => `<option value="${esc(t)}" ${t === GRAPH_STATE.typeFilter ? "selected" : ""}>${t ? esc(t) : "all types"}</option>`
+    (t) => `<option value="${escapeHtml(t)}" ${t === GRAPH_STATE.typeFilter ? "selected" : ""}>${t ? escapeHtml(t) : "all types"}</option>`
   ).join("");
   const tierOptions = ["", "1", "2", "3"].map(
     (t) => `<option value="${t}" ${t === GRAPH_STATE.tierFilter ? "selected" : ""}>${t ? `Tier ${t}` : "all tiers"}</option>`
@@ -4067,7 +4067,7 @@ function renderGraphLegend(view) {
     .map(([type, count]) => {
       const rgb = GRAPH_TYPE_RGB[type] || [0x88, 0x88, 0x88];
       const hex = `#${rgb.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
-      return `<span class="legend-chip"><span class="legend-dot" style="background:${hex}"></span>${esc(type)} (${fmtNum(count)})</span>`;
+      return `<span class="legend-chip"><span class="legend-dot" style="background:${hex}"></span>${escapeHtml(type)} (${fmtNum(count)})</span>`;
     })
     .join("");
 }
@@ -4413,10 +4413,10 @@ function graphOpenDetail(view, nodeId) {
     .then((dossier) => {
       panel.innerHTML = `
         <h3>memory detail</h3>
-        <p class="graph-detail-statement">${esc(dossier.content.statement || dossier.node_id)}</p>
+        <p class="graph-detail-statement">${escapeHtml(dossier.content.statement || dossier.node_id)}</p>
         <dl class="kv">
           ${kvList([
-            ["type", esc(dossier.node_type)],
+            ["type", escapeHtml(dossier.node_type)],
             ["decay weight", decayMeter(dossier.weights.decay_weight)],
             ["confidence", fmtNum(dossier.weights.confidence)],
             ["tier", String(dossier.metadata ? dossier.metadata.cognitive_tier : "—")],
