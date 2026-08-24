@@ -17,6 +17,7 @@ English never does, so the tests drive entity filters with backticked terms.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -209,6 +210,7 @@ def _recall(client: TestClient, query: str, **over: Any) -> dict[str, Any]:
     body.update(over)
     response = client.post("/memory/recall", json=body)
     assert response.status_code == 200, response.text
+    client.app.state.memory.drain_usage_events()
     return response.json()
 
 
@@ -320,6 +322,33 @@ def test_recall_reinforces_hit_graph_node_fr_4_2(tmp_path, monkeypatch) -> None:
         assert stored.decay_weight == pytest.approx(0.8)
         assert stored.last_reinforced is not None
         assert stored.hit_count == 1
+
+
+def test_recall_returns_before_usage_event_write_lands(tmp_path, monkeypatch) -> None:
+    """FR-4.2 fire-and-forget contract: the reinforcement write rides a single
+    background usage-event worker, so a slow store write must never delay the
+    recall response (dual-surface load regression guard — the synchronous
+    variant serialized every recall behind LanceDB commits under load)."""
+    with _client(tmp_path, monkeypatch) as client:
+        service = client.app.state.memory
+        _write_chunk(client, chunk_id="c-async", text=_CONSTRAINT_TEXT, entities=("Mnx",), decay=0.7)
+
+        release = threading.Event()
+        inner = service._reinforcer.record_hits
+
+        def gated_record_hits(chunk_ids: Any, node_ids: Any) -> None:
+            release.wait(timeout=10)
+            inner(chunk_ids, node_ids)
+
+        monkeypatch.setattr(service._reinforcer, "record_hits", gated_record_hits)
+
+        started = time.perf_counter()
+        response = client.post("/memory/recall", json={"profile_id": _PROFILE, "query": _CONSTRAINT_TEXT})
+        elapsed = time.perf_counter() - started
+        assert response.status_code == 200, response.text
+        assert elapsed < 5.0, f"recall blocked {elapsed:.1f}s on the usage-event write"
+        release.set()
+        service.drain_usage_events()
 
 
 def test_recall_as_of_replays_old_version_fact(tmp_path, monkeypatch) -> None:

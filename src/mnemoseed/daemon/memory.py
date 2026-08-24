@@ -41,6 +41,7 @@ import logging
 import time
 import uuid
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Annotated, Any, Self, cast
 
@@ -266,7 +267,12 @@ class MemoryService:
         self._assembler = Assembler()
         # FR-4.2 event side: retrieval usage becomes a reinforcement event
         # (baseline refresh + bounded rebound), the counterpart of the sweep.
+        # Events land on a single background worker so the recall response
+        # never waits on store writes — the fire-and-forget contract below is
+        # load-bearing for dual-surface concurrency, where synchronous LanceDB
+        # reinforcement commits serialized every recall behind the write lock.
         self._reinforcer = Reinforcer(stores)
+        self._usage_events = ThreadPoolExecutor(max_workers=1, thread_name_prefix="usage-events")
 
     @property
     def retriever(self) -> HybridRetriever:
@@ -275,8 +281,17 @@ class MemoryService:
     def close(self) -> None:
         """Release the retrieval engine (T4 lifecycle fix): the daemon owns the
         HybridRetriever and shuts its track executor down on teardown so worker
-        threads never outlive the process."""
+        threads never outlive the process. The usage-event worker drains first
+        so queued reinforcements land before the stores close."""
         self._retriever.close()
+        self._usage_events.shutdown(wait=True)
+
+    def drain_usage_events(self) -> None:
+        """Block until every queued usage-event write has landed.
+
+        Test/teardown seam: assertions that read decay_weight / hit_count after
+        a recall need the background worker flushed first."""
+        self._usage_events.submit(lambda: None).result()
 
     # ------------------------------------------------------------ recall
 
@@ -336,15 +351,23 @@ class MemoryService:
         hit means the recalled memory). The raw store write is best-effort by
         design; the Reinforcer additionally refreshes ``last_reinforced`` and
         rebounds ``decay_weight`` (bounded at 1.0) for every above-floor hit.
-        """
+        The write itself runs on the single usage-event worker so a slow LanceDB
+        commit under load delays accounting, never the response."""
         chunk_ids = [entry.id for entry in context.entries if entry.kind == "chunk"]
         node_ids = [entry.id for entry in context.entries if entry.kind == "graph"]
         if not chunk_ids and not node_ids:
             return
+
+        def _write_usage_event() -> None:
+            try:
+                self._reinforcer.record_hits(chunk_ids, node_ids)
+            except Exception:  # pragma: no cover - usage accounting must not fail recall
+                logger.warning("usage-event write failed; recall proceeds", exc_info=True)
+
         try:
-            self._reinforcer.record_hits(chunk_ids, node_ids)
-        except Exception:  # pragma: no cover - usage accounting must not fail recall
-            logger.warning("usage-event write failed; recall proceeds", exc_info=True)
+            self._usage_events.submit(_write_usage_event)
+        except RuntimeError:  # pragma: no cover - daemon already shutting down
+            logger.warning("usage-event worker shut down; dropping events", exc_info=True)
 
     def _memory_payload(self, context: AssembledContext) -> dict[str, Any]:
         coverage = context.coverage
