@@ -216,7 +216,6 @@ def test_anthropic_paste_docs_link_to_claude_platform(app_js: str) -> None:
     anthropic = re.search(r'\{\s*id: "anthropic",(.*?)\n\s*\},', block, re.DOTALL)
     assert anthropic is not None, "anthropic card definition missing"
     assert 'keyUrl: "https://platform.claude.com/settings/keys"' in anthropic.group(1)
-    assert "https://platform.claude.com/" in app_js
 
 
 def test_no_codex_api_in_non_host_login_paste_path(app_js: str) -> None:

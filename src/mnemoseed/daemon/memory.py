@@ -38,11 +38,12 @@ usage-event `last_hit_at`); no randomness; no network.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from queue import Full, Queue
 from typing import Annotated, Any, Self, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -271,8 +272,28 @@ class MemoryService:
         # never waits on store writes — the fire-and-forget contract below is
         # load-bearing for dual-surface concurrency, where synchronous LanceDB
         # reinforcement commits serialized every recall behind the write lock.
+        # The queue is bounded and overflows are dropped: usage accounting is
+        # best-effort by design, and an unbounded backlog would only move the
+        # stall from recall to teardown, where close() drains before the
+        # stores shut down.
         self._reinforcer = Reinforcer(stores)
-        self._usage_events = ThreadPoolExecutor(max_workers=1, thread_name_prefix="usage-events")
+        self._usage_events: Queue[tuple[list[str], list[str]] | None] = Queue(maxsize=128)
+        self._usage_worker = threading.Thread(target=self._usage_event_loop, name="usage-events", daemon=True)
+        self._usage_worker.start()
+
+    def _usage_event_loop(self) -> None:
+        while True:
+            item = self._usage_events.get()
+            try:
+                if item is None:
+                    return
+                chunk_ids, node_ids = item
+                try:
+                    self._reinforcer.record_hits(chunk_ids, node_ids)
+                except Exception:  # pragma: no cover - usage accounting must not fail recall
+                    logger.warning("usage-event write failed; recall proceeds", exc_info=True)
+            finally:
+                self._usage_events.task_done()
 
     @property
     def retriever(self) -> HybridRetriever:
@@ -281,17 +302,19 @@ class MemoryService:
     def close(self) -> None:
         """Release the retrieval engine (T4 lifecycle fix): the daemon owns the
         HybridRetriever and shuts its track executor down on teardown so worker
-        threads never outlive the process. The usage-event worker drains first
-        so queued reinforcements land before the stores close."""
+        threads never outlive the process. The usage-event worker drains the
+        (bounded) backlog first so queued reinforcements land before the
+        stores close."""
         self._retriever.close()
-        self._usage_events.shutdown(wait=True)
+        self._usage_events.put(None)
+        self._usage_worker.join()
 
     def drain_usage_events(self) -> None:
         """Block until every queued usage-event write has landed.
 
         Test/teardown seam: assertions that read decay_weight / hit_count after
         a recall need the background worker flushed first."""
-        self._usage_events.submit(lambda: None).result()
+        self._usage_events.join()
 
     # ------------------------------------------------------------ recall
 
@@ -357,17 +380,13 @@ class MemoryService:
         node_ids = [entry.id for entry in context.entries if entry.kind == "graph"]
         if not chunk_ids and not node_ids:
             return
-
-        def _write_usage_event() -> None:
-            try:
-                self._reinforcer.record_hits(chunk_ids, node_ids)
-            except Exception:  # pragma: no cover - usage accounting must not fail recall
-                logger.warning("usage-event write failed; recall proceeds", exc_info=True)
-
         try:
-            self._usage_events.submit(_write_usage_event)
-        except RuntimeError:  # pragma: no cover - daemon already shutting down
-            logger.warning("usage-event worker shut down; dropping events", exc_info=True)
+            self._usage_events.put_nowait((chunk_ids, node_ids))
+        except Full:
+            # Best-effort by design (FR-3.7): under sustained load the newest
+            # usage events are the cheapest to drop — decay sweeps recompute
+            # trends anyway, and a dropped rebound only costs one 0.1 step.
+            logger.debug("usage-event queue full; dropping usage events")
 
     def _memory_payload(self, context: AssembledContext) -> dict[str, Any]:
         coverage = context.coverage
