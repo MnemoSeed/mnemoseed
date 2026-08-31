@@ -43,6 +43,34 @@ Design docs live in `docs/design/` (English) and `docs/zh/` (中文工作稿).
 
 Test-driven, with an adversarial verifier on every task: failing tests first, mutation spot-checks before any merge. Gates: `uv run pytest -q`, `ruff check`, `ruff format --check`, `mypy src`.
 
+## Sponsor MnemoSeed
+
+**One memory under all your coding agents — local-first, cloud-optional, E2EE+TEE ready.**  
+MnemoSeed is a dual-licensed (AGPL/Commercial) memory layer that runs the theory-driven pipeline: capture → dream → decay → retrieve. Every prompt and response is stored verbatim, scored for importance, distilled by an offline dream pass, and forgotten on an Ebbinghaus curve — so the next session starts with what matters, not a blank slate.
+
+Your sponsorship keeps the dream model running (Opus-class inference), covers domain/infra for cloud TEE validation, and funds the daily burn of building in public.
+
+### Tiers
+
+| Tier | Monthly | What you get |
+|------|---------|--------------|
+| **Supporter** | $5 | Name in README Contributors |
+| **Backer** | $25 | Priority issue response + monthly dream-cost/eval brief (real numbers) |
+| **Sponsor** | $100 | README logo + quarterly roadmap sync (no feature promises) |
+| **Enterprise** | $500 | Direct support channel + private deployment consult (pre-warms Cloud) |
+
+One-time tips also welcome via Polar (below) or Buy Me a Coffee.
+
+### Channels
+
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-%23EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/MnemoSeed)
+[![Polar](https://img.shields.io/badge/Donate-Polar-%230066FF?logo=polar&logoColor=white)](https://buy.polar.sh/polar_cl_KoNqAsMI8IQGy5RRE8MLbX7I5TBGUMh9Kn8CC35YfP7)
+[![Buy Me a Coffee](https://img.shields.io/badge/Tip-Buy%20Me%20a%20Coffee-%23FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mnemoseed)
+
+> **Transparency promise**: monthly dream-cost figures, evaluation data, and sponsor counts/amounts are published in the Backer brief and quarterly sync. No feature gating, no license upsell, no roadmap over-promising.
+
+[![Thanks.dev](https://img.shields.io/badge/Support-Thanks.dev-%23FF6B35)](https://thanks.dev/github/MnemoSeed/mnemoseed)
+
 ## License
 
 Dual-licensed: **AGPL-3.0** (free, including commercial use, as long as derivatives stay open) or a **commercial license** for proprietary/closed-source integration. Contact `license@mnemoseed.com`.
