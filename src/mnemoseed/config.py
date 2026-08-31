@@ -9,11 +9,17 @@ offending config key.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from mnemoseed.schema.graph import NodeType
+from mnemoseed.secrets.refs import SECRETS_REF_RE, is_secrets_ref
+
+logger = logging.getLogger("mnemoseed.config")
 
 CONFIG_DIR = Path(os.environ.get("MNEMOSEED_HOME", Path.home() / ".mnemoseed"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -101,11 +107,75 @@ class DreamConfig:
     token_budget_usd: float = DEFAULT_DREAM_TOKEN_BUDGET_USD
 
 
-# T6 (FR-2.14): the three dream LLM roles. All are cloud/network-backed except
-# local_track, which is the offline role (FR-2.7). Deep_reflection runs the slow
-# full digests; short_increment runs the cheap per-increment passes; local_track
-# runs the privacy/cost-hard-line track offline.
-LLM_ROLES: tuple[str, ...] = ("deep_reflection", "short_increment", "local_track")
+#: Decay sweep cadence (NFR-4.1: the batch runs once daily).
+DEFAULT_SWEEP_INTERVAL_S: float = 86400.0
+
+#: Weight-change floor under which a sweep write is skipped ("dumb write").
+DEFAULT_MIN_APPLY_DELTA: float = 0.01
+
+#: Per-type exponential decay rates (PRD-04 FR-4.1, design/01 §5):
+#: fact 0.01 (half-life ≈ 69 days), preference 0.005 (≈ 139 days),
+#: episode 0.03 (≈ 23 days). The ``"chunk"`` pseudo-type covers the verbatim
+#: vector channel, which carries no node_type.
+DEFAULT_LAMBDA_PER_TYPE: dict[str, float] = {
+    # fact-class (λ_fact = 0.01, half-life ≈ 69 days)
+    "USER": 0.01,
+    "HABIT": 0.01,
+    "DECISION": 0.01,
+    "PROJECT": 0.01,
+    "TOOL": 0.01,
+    "SKILL_SEQUENCE": 0.01,
+    "CONSTRAINT": 0.01,
+    # preference-class (λ_preference = 0.005, half-life ≈ 139 days)
+    "PREFERENCE": 0.005,
+    "ANIMA": 0.005,
+    # episode-class (λ_episode = 0.03, half-life ≈ 23 days)
+    "EPISODE": 0.03,
+    "INTENTION": 0.03,
+    # the verbatim channel has no node_type; chunks decay like episodes
+    "chunk": 0.03,
+}
+
+#: The writable λ-map keys: every frozen node type plus the chunk pseudo-type.
+LAMBDA_TARGETS: frozenset[str] = frozenset(NodeType.frozen_set()) | {"chunk"}
+
+
+@dataclass(frozen=True)
+class DecayConfig:
+    """Decay-engine runtime flags (PRD-04 FR-4.1 / FR-4.4, design/01 stage ⑤).
+
+    ``enabled`` gates the daemon's sweep task at boot. ``sweep_interval_s`` is
+    the sweep cadence (NFR-4.1: once daily by default); ``min_apply_delta`` is
+    the write floor that skips sub-threshold drops. ``lambda_per_type`` maps a
+    node type (or the ``"chunk"`` pseudo-type for the verbatim channel) to its
+    exponential rate; the map is carried verbatim from the file — entries the
+    user omitted resolve to the per-type design default at sweep time
+    (``decay.model.lambda_for``), keeping the file and the settings DB always
+    in agreement.
+    """
+
+    enabled: bool = True
+    sweep_interval_s: float = DEFAULT_SWEEP_INTERVAL_S
+    min_apply_delta: float = DEFAULT_MIN_APPLY_DELTA
+    lambda_per_type: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_LAMBDA_PER_TYPE))
+
+
+# T6 (FR-2.14): the dream LLM roles, both cloud/network-backed. Deep_reflection
+# runs the slow full digests; short_increment runs the cheap per-increment
+# passes. The offline "local_track" role was deprecated and removed (E1-1): any
+# legacy [dream.llm.local_track] table is tolerated on load and ignored with a
+# warning, never applied.
+LLM_ROLES: tuple[str, ...] = ("deep_reflection", "short_increment")
+
+#: The removed offline role name (E1-1): recognized for deprecation tolerance.
+LEGACY_LOCAL_TRACK_ROLE = "local_track"
+
+#: Wording shared by the loader warning, the admin surface, and the wire: a
+#: legacy table or a write targeting the removed role answers the same message.
+LOCAL_TRACK_DEPRECATION = (
+    "[dream.llm.local_track] was deprecated and removed; the offline track was "
+    "merged into deep_reflection and short_increment"
+)
 
 
 @dataclass(frozen=True)
@@ -113,9 +183,9 @@ class RoleLLMConfig:
     """One role's resolved LLM route: driver + model + params.
 
     Keys are config attestations, never values: an API key is referenced by
-    env-var NAME in ``params["api_key_env"]`` and resolved at materialization
-    time by the RoleRouter (mnemoseed.llm.routing) — a literal key in config is
-    an error.
+    env-var NAME or a ``secrets:mnemoseed/dream/<role>`` reference in
+    ``params["api_key_env"]`` and resolved at materialization time by the
+    RoleRouter (mnemoseed.llm.routing) — a literal key in config is an error.
     """
 
     role: str
@@ -126,7 +196,7 @@ class RoleLLMConfig:
 
 # Route defaults per design/02 section 6 (PRD FR-2.14): deep_reflection ->
 # Kimi K3 via Fireworks (OpenAI-compatible); short_increment -> DeepSeek V4
-# Flash (0731) via Fireworks; local_track -> a local Ollama model. NOTE:
+# Flash (0731) via Fireworks. NOTE:
 # design/02 §6 + FR-2.7 pin the offline default to a <=14B quantized model
 # ("70B is not a default assumption"), which conflicts with PRD FR-2.14's
 # Llama-3.3-70B line; the <=14B default wins here (flagged in the T6 report).
@@ -155,12 +225,6 @@ DEFAULT_LLM_ROUTES: dict[str, RoleLLMConfig] = {
             "api_key_env": "MNEMOSEED_SHORT_INCREMENT_API_KEY,FIREWORKS_API_KEY",
         },
     ),
-    "local_track": RoleLLMConfig(
-        role="local_track",
-        driver="ollama",
-        model="llama3.1:8b",
-        params={"base_url": "http://localhost:11434"},
-    ),
 }
 
 
@@ -172,6 +236,7 @@ class Config:
     baseurl: str = "http://localhost:7788"
     storage: dict[str, LayerSpec] = field(default_factory=dict)
     dream: DreamConfig = field(default_factory=DreamConfig)
+    decay: DecayConfig = field(default_factory=DecayConfig)
     llm: dict[str, RoleLLMConfig] = field(default_factory=lambda: dict(DEFAULT_LLM_ROUTES))
     source: Path | None = None
     raw: dict[str, Any] = field(default_factory=dict)
@@ -221,6 +286,39 @@ def _require_table(value: Any, key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError(key, "must be a table")
     return value
+
+
+def _is_positive_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _is_non_negative_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_api_key_ref(role: str, value: Any) -> None:
+    """Shape-check an ``api_key_env`` param (T2-2).
+
+    A ``secrets:`` reference must be well-formed and name a live dream role;
+    a malformed reference can never resolve, so it is a load error naming the
+    key. Anything else (env-var NAME lists, and hand-edited literal keys)
+    passes through unchanged — literal keys stay the pre-existing
+    tolerated-then-redacted contract.
+    """
+    if not isinstance(value, str) or not is_secrets_ref(value):
+        return
+    key = f"dream.llm.{role}.api_key_env"
+    match = SECRETS_REF_RE.fullmatch(value)
+    if match is None:
+        raise ConfigError(
+            key,
+            "a secrets: reference must look like 'secrets:mnemoseed/dream/<role>'",
+        )
+    if match.group(1) not in LLM_ROLES:
+        raise ConfigError(
+            key,
+            f"a secrets: reference must name a live dream role (one of {', '.join(LLM_ROLES)})",
+        )
 
 
 def _optional_driver(value: Any, key: str) -> str | None:
@@ -317,24 +415,72 @@ def load_config(path: Path | None = None) -> Config:
                 model = _optional_driver(entry_table.get("model"), f"{role_path}.model")
                 base = DEFAULT_LLM_ROUTES[role]
                 params = {k: v for k, v in entry_table.items() if k not in ("driver", "model")}
+                if "api_key_env" in params:
+                    _validate_api_key_ref(role, params["api_key_env"])
                 llm_routes[role] = RoleLLMConfig(
                     role=role,
                     driver=driver if driver is not None else base.driver,
                     model=model if model is not None else base.model,
                     params={**base.params, **params},
                 )
-            unknown = [str(role) for role in llm_table if str(role) not in LLM_ROLES]
+            unknown = [
+                str(role)
+                for role in llm_table
+                if str(role) not in LLM_ROLES and str(role) != LEGACY_LOCAL_TRACK_ROLE
+            ]
             if unknown:
                 raise ConfigError(
                     f"dream.llm.{unknown[0]}",
                     f"unknown llm role (expected one of {', '.join(LLM_ROLES)})",
                 )
+            if LEGACY_LOCAL_TRACK_ROLE in llm_table:
+                logger.warning(LOCAL_TRACK_DEPRECATION)
+
+    # [decay] table (PRD-04): sweep cadence, write floor, enabled flag and the
+    # per-type λ map. The λ map is carried verbatim (replace semantics: the
+    # map IS what the file says) — omitted types resolve to their design
+    # default at sweep time via decay.model.lambda_for, so the live config
+    # always equals the file (and the DB-primary settings mirror never sees a
+    # phantom drift).
+    decay = DecayConfig()
+    decay_raw = raw.get("decay")
+    if decay_raw is not None:
+        decay_table = _require_table(decay_raw, "decay")
+        enabled_raw = decay_table.get("enabled", True)
+        if not isinstance(enabled_raw, bool):
+            raise ConfigError("decay.enabled", "must be a boolean")
+        interval_raw = decay_table.get("sweep_interval_s", DEFAULT_SWEEP_INTERVAL_S)
+        if not _is_positive_number(interval_raw):
+            raise ConfigError("decay.sweep_interval_s", "must be a positive number")
+        delta_raw = decay_table.get("min_apply_delta", DEFAULT_MIN_APPLY_DELTA)
+        if not _is_non_negative_number(delta_raw):
+            raise ConfigError("decay.min_apply_delta", "must be a non-negative number")
+        lambda_map = dict(DEFAULT_LAMBDA_PER_TYPE)
+        lambda_raw = decay_table.get("lambda_per_type")
+        if lambda_raw is not None:
+            lambda_table = _require_table(lambda_raw, "decay.lambda_per_type")
+            parsed: dict[str, float] = {}
+            for key, rate in lambda_table.items():
+                key = str(key)
+                if key not in LAMBDA_TARGETS:
+                    raise ConfigError(f"decay.lambda_per_type.{key}", "unknown memory type")
+                if not _is_positive_number(rate):
+                    raise ConfigError(f"decay.lambda_per_type.{key}", "must be a positive number")
+                parsed[key] = float(rate)
+            lambda_map = parsed
+        decay = DecayConfig(
+            enabled=enabled_raw,
+            sweep_interval_s=float(interval_raw),
+            min_apply_delta=float(delta_raw),
+            lambda_per_type=lambda_map,
+        )
 
     return Config(
         preset=preset_raw,
         baseurl=baseurl_raw,
         storage=storage,
         dream=dream,
+        decay=decay,
         llm=llm_routes,
         source=path,
         raw=raw,
@@ -367,16 +513,30 @@ baseurl = "http://localhost:7788"
 # path = "~/.mnemoseed/isolated.db"
 
 # Dream LLM role routing (T6 / FR-2.14): pick the driver + model per role.
-# API keys are referenced by ENV-VAR NAME only — never a literal key here;
-# the router reads them from the process environment at materialization time.
+# API keys are referenced by ENV-VAR NAME or a secrets:mnemoseed/dream/<role>
+# reference — never a literal key here; the router resolves the value from the
+# process environment / the local secret store at materialization time.
 # Other params (base_url, max_tokens, ...) override the per-role defaults.
 # [dream.llm.deep_reflection]
 # driver = "anthropic"
 # model = "claude-sonnet-5"
 # api_key_env = "ANTHROPIC_API_KEY"
-#
-# [dream.llm.local_track]
-# driver = "ollama"
-# model = "llama3.1:8b"
-# base_url = "http://localhost:11434"
+
+# The offline local_track role was deprecated and removed: any legacy
+# [dream.llm.local_track] table is tolerated on load and ignored with a warning.
+# [dream.llm.short_increment]
+# driver = "openai_compatible"
+# model = "accounts/fireworks/models/deepseek-v4-flash-0731"
+
+# Decay engine (PRD-04 FR-4.1 / design/01 stage ⑤): unreinforced memories fade
+# through w = confidence × exp(-λ × days). λ is layered per node type
+# (fact 0.01 / preference 0.005 / episode 0.03) plus the "chunk" pseudo-type
+# for the verbatim channel; the sweep runs once daily (NFR-4.1) and skips
+# writes whose weight change is below min_apply_delta. The map is replace
+# semantics: keys you omit fall back to their per-type default.
+# [decay]
+# enabled = true
+# sweep_interval_s = 86400.0
+# min_apply_delta = 0.01
+# lambda_per_type = {"PREFERENCE": 0.005, "EPISODE": 0.03, "chunk": 0.03}
 """

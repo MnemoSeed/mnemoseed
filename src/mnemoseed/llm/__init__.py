@@ -9,9 +9,10 @@ usable where T3 types strictly against str-returning chat. Importing this
 package registers the built-in drivers (import side effect), as the storage
 package does.
 
-FR-2.14 route defaults follow design/02 §6: deep_reflection -> Claude Sonnet
-(anthropic), short_increment -> an OpenAI-compatible chat class, local_track ->
-a local Ollama model. See mnemoseed.config.DEFAULT_LLM_ROUTES.
+FR-2.14 route defaults follow design/02 §6: deep_reflection -> Kimi K3 via
+Fireworks, short_increment -> DeepSeek V4 Flash via Fireworks. The offline
+local_track role was deprecated and removed; a legacy table is tolerated and
+ignored with a warning. See mnemoseed.config.DEFAULT_LLM_ROUTES.
 """
 
 from __future__ import annotations

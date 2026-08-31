@@ -145,7 +145,7 @@ def build_server() -> MCPServer:
         name="memory.forget_this",
         description=(
             "Permanently forget memory: delete a chunk, tombstone a node, or "
-            "sweep by entity (GDPR, design/03 2.4)."
+            "sweep by entity (GDPR, design/03 storage-layer erasure)."
         ),
     )
     async def memory_forget_this(

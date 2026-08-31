@@ -341,9 +341,16 @@ class Assembler:
         vector_store: VectorStore,
         config: AssembleConfig,
     ) -> tuple[dict[str, tuple[str, ...]], set[str]]:
-        """Probe the vector store for unconsolidated fragments whose entities
+        """Probe the vector store for UNCONSOLIDATED fragments whose entities
         overlap the selected graph candidates. Returns per-candidate truncated
-        evidence and the (deduplicated) fresh fragment ids observed."""
+        evidence and the (deduplicated) fresh fragment ids observed.
+
+        The probe is scoped to ``consolidated=False`` (design/03 §4): chunks
+        the dream merge already marked consolidated are the fact's retained
+        evidence scene, never "fresh unconsolidated evidence" — a merged chunk
+        must not re-arm pending_consolidation or ride back in as recent
+        evidence.
+        """
         if watermark is None:
             return {}, set()
         entities: list[str] = []
@@ -360,6 +367,7 @@ class Assembler:
                 profile_id=profile_id,
                 turn_start=watermark.end + 1,
                 entities=tuple(entities),
+                consolidated=False,
             )
         )
         marks: dict[str, tuple[str, ...]] = {}

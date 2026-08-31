@@ -100,6 +100,50 @@ class NodeFilter:
     min_decay: float = 0.0
 
 
+class EdgeKind(StrEnum):
+    """Bulk edge-list kind vocabulary (prd-08 appendix B.2 v1.1)."""
+
+    RELATION = "relation"
+    COOCCURRENCE = "cooccurrence"
+
+
+@dataclass(frozen=True)
+class EdgeEntry:
+    """One bulk edge-list item (prd-08 appendix B.2 ``list_edges``).
+
+    ``kind`` collapses the rel vocabulary to the two document values:
+    ``co_occurred`` is COOCCURRENCE, every other rel is RELATION.
+    """
+
+    edge_id: str
+    src: str
+    dst: str
+    kind: EdgeKind
+    weight: float
+    created_at: float
+
+
+@dataclass(frozen=True)
+class EdgeFilter:
+    """Filter for bulk edge reads (prd-08 appendix B.2 v1.1).
+
+    profile_id is always explicit (D5 isolation). ``node_types`` / ``tier``
+    restrict the edge's endpoints: both ends must be current nodes
+    (valid_to IS NULL) whose type / cognitive_tier matches, so hiding a node
+    type also hides every edge touching it. The current-revision endpoint
+    restriction is ALWAYS applied — even with no type/tier filter, an edge
+    whose endpoint is tombstoned or superseded never leaks. The time window
+    and min_weight apply to the edge row itself (created_at / weight).
+    """
+
+    profile_id: str
+    node_types: tuple[NodeType, ...] = ()
+    created_after: float | None = None
+    created_before: float | None = None
+    tier: int | None = None
+    min_weight: float = 0.0
+
+
 @dataclass(frozen=True)
 class GraphWeightUpdate:
     """One entry in a batch decay recompute."""
@@ -140,6 +184,7 @@ class StoredProfile:
     profile_id: str
     display_name: str = ""
     created_at: float = 0.0
+    archived: bool = False
 
 
 @dataclass(frozen=True)
@@ -259,6 +304,7 @@ class Capability(StrEnum):
     GRAPH_TRAVERSE_2HOP = "graph.traverse_2hop"
     GRAPH_VERSION_CHAIN = "graph.version_chain"
     GRAPH_COOCCURRENCE_EDGES = "graph.cooccurrence_edges"
+    GRAPH_EDGE_LIST = "graph.edge_list"
     META_TRANSACTION = "meta.transaction"
     META_CONCURRENT_READERS = "meta.concurrent_readers"
     EMBED_LOCAL_INFERENCE = "embed.local_inference"
@@ -359,6 +405,15 @@ DEGRADATION_TABLE: tuple[CapabilityPolicy, ...] = (
         severity=ValidationSeverity.DEGRADE,
         feature="rerank co-occurrence term",
         behavior="rerank drops the epsilon co-occurrence term, retrieval quality warning",
+    ),
+    CapabilityPolicy(
+        capability=Capability.GRAPH_EDGE_LIST,
+        severity=ValidationSeverity.DEGRADE,
+        feature="console Graph View bulk edge list",
+        behavior=(
+            "console graph degrades to per-node edge fetching via traverse(), "
+            "console-graph performance warning"
+        ),
     ),
     CapabilityPolicy(
         capability=Capability.META_CONCURRENT_READERS,
@@ -535,7 +590,7 @@ class GraphStore(Protocol):
         raise NotImplementedError
 
     def tombstone(self, node_id: str, deleted_at: float | None = None) -> bool:
-        """Delete a node for good (GDPR right-to-erasure, design/03 2.4).
+        """Delete a node for good (GDPR right-to-erasure, design/03 storage-layer erasure).
 
         The current revision is closed at ``deleted_at`` and a ``deleted``
         provenance event is appended to that revision's version-chain payload;
@@ -565,6 +620,16 @@ class GraphStore(Protocol):
         raise NotImplementedError
 
     def query_intentions(self, status: IntentionStatus, due_before: float) -> list[GraphNode]:
+        raise NotImplementedError
+
+    def list_edges(self, filter: EdgeFilter, page: Page) -> PageResult[EdgeEntry]:
+        """Bulk edge listing backing the console Graph View (v1.1 amendment).
+
+        Filter fields: profile_id / endpoint node types / created time window /
+        cognitive tier / min edge weight; paginated with a stable order
+        (created_at desc, edge id asc). Each item returns edge id, endpoints,
+        kind (relation | cooccurrence), weight, timestamps.
+        """
         raise NotImplementedError
 
 
@@ -607,6 +672,14 @@ class MetaStore(Protocol):
         raise NotImplementedError
 
     def list_profiles(self) -> list[StoredProfile]:
+        raise NotImplementedError
+
+    def archive_profile(self, profile_id: str, archived: bool) -> None:
+        """Set the profile's archived flag (console FR-7.3 profile archive).
+
+        Rename never touches the flag (upsert updates display_name only); the
+        flag is an explicit archive/unarchive action.
+        """
         raise NotImplementedError
 
     def issue_token(
@@ -678,6 +751,16 @@ class MetaStore(Protocol):
         raise NotImplementedError
 
     def list_dream_runs(self, filter: DreamRunFilter, page: Page) -> PageResult[DreamRun]:
+        raise NotImplementedError
+
+    def update_dream_run_model(self, run_id: str, model_id: str) -> None:
+        """F2: record the model pinned at reflect run start on an existing run.
+
+        A dream run is registered at snapshot capture, before the route is
+        resolved; the reflect boundary pins the model at run start and writes
+        it back here. Unknown run ids are a silent no-op (the run is always
+        registered first).
+        """
         raise NotImplementedError
 
     def add_token_usage(self, profile_id: str, year_month: str, tokens: int) -> None:

@@ -66,7 +66,12 @@ FULL_VECTOR = frozenset(
     {Capability.VECTOR_HYBRID_SEARCH, Capability.VECTOR_METADATA_FILTER, Capability.VECTOR_SNAPSHOT}
 )
 FULL_GRAPH = frozenset(
-    {Capability.GRAPH_VERSION_CHAIN, Capability.GRAPH_COOCCURRENCE_EDGES, Capability.GRAPH_TRAVERSE_2HOP}
+    {
+        Capability.GRAPH_VERSION_CHAIN,
+        Capability.GRAPH_COOCCURRENCE_EDGES,
+        Capability.GRAPH_TRAVERSE_2HOP,
+        Capability.GRAPH_EDGE_LIST,
+    }
 )
 FULL_META = frozenset({Capability.META_TRANSACTION, Capability.META_CONCURRENT_READERS})
 FULL_EMBED = frozenset(

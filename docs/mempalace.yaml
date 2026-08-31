@@ -1,0 +1,20 @@
+wing: docs
+rooms:
+- name: bench
+  description: Files from bench/
+  keywords:
+  - bench
+  - bench
+- name: design
+  description: Files from design/
+  keywords:
+  - design
+  - design
+- name: prd
+  description: Files from prd/
+  keywords:
+  - prd
+  - prd
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

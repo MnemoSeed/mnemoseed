@@ -236,6 +236,10 @@ def test_meta_schema_freeze_walk() -> None:
     assert {"user_id", "username", "password_hash", "role", "created_at"} <= user_names
     assert "token_hash" in added_meta_columns
     assert "token_hash" not in {column.name for column in tokens.columns}
+    # v8 (E1-4): the reserved config.scope column lands as a migration delta,
+    # never a v1 base column — the D1 "settings DB primary" reservation.
+    assert "scope" in added_meta_columns
+    assert "scope" not in {column.name for column in tables["config"].columns}
 
 
 # ------------------------------------------------------- D6 named graph instances

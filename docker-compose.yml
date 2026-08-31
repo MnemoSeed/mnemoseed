@@ -1,24 +1,26 @@
-# MnemoSeed docker preset (prd-08 FR-8.8): core + vector + pg + embed.
+# MnemoSeed docker preset (issue #5): the default compose stack targets END
+# USERS -- one service running the embedded daemon, with zero UX difference
+# from `mnemoseed up` locally. The developer/enterprise Postgres family moves
+# behind the `pg` profile, and the cloud/VPS deployment lives in
+# docker-compose.cloud.yml (design/10).
 #
-# Four services, each with a /healthz liveness check:
-#   core    - the daemon (FastAPI). Real HTTP /healthz reporting store assembly
-#             status and capability-gate findings. Migrations run at boot.
-#   vector  - pgvector/pgvector:pg16, hosts the hippocampus chunks table. The
-#             pgvector driver creates the `vector` extension and its tables.
-#   pg      - postgres:16, hosts the cortex graph + meta on two databases
-#             (mnemoseed_graph / mnemoseed_meta, created by ./docker/pg-init).
-#             FR-8.8 keeps `vector` and `pg` as separate service entries even
-#             though the pgvector image could host both.
-#   embed   - the daemon image running the dev OpenAI-compatible embeddings
-#             stub (mnemoseed embed-sidecar). Deterministic synthetic dense
-#             vectors so the stack boots with no external account or model
-#             download. Swap in a real endpoint by overriding
-#             STORAGE.EMBED.base_url and dropping this service.
-#   ollama  - optional offline dream-model profile (profiles: ["ollama"]), not
-#             started by default; docker compose up --profile ollama.
+#   docker compose up                  -> core only (embedded single-process daemon)
+#   docker compose --profile pg up     -> core + vector + pg + embed (Postgres family)
+#   docker compose --profile ollama up -> core + ollama (offline dream model)
+#   docker compose -f docker-compose.cloud.yml up -d  (VPS: daemon + reverse-proxy TLS)
 #
-# Compose-only facts: vector publishes host 55433, pg 55434 (55432 is reserved
-# for the long-running T5 `mnemoseed-pg-it` container; keep it alive).
+# The core service always runs the embedded daemon (its config home is the
+# writable /data volume, so an empty volume resolves the embedded preset by
+# default). To point the daemon at the `pg` backplane instead, activate the
+# profile AND give it the image-baked docker preset config:
+#
+#   MNEMOSEED_HOME=/etc/mnemoseed docker compose --profile pg up
+#
+# (the baked /etc/mnemoseed/config.toml resolves the pg drivers against the
+# compose hostnames vector/pg/embed; core retries until they are healthy via
+# restart: unless-stopped). One Project = one daemon service -- compose cannot
+# vary a service's configuration per profile, so the daemon is configured by
+# its config home rather than by a second service literal.
 
 name: mnemoseed
 
@@ -32,14 +34,9 @@ services:
     ports:
       - "7788:7788"
     environment:
-      MNEMOSEED_HOME: /etc/mnemoseed
-    depends_on:
-      vector:
-        condition: service_healthy
-      pg:
-        condition: service_healthy
-      embed:
-        condition: service_healthy
+      MNEMOSEED_HOME: /data
+    volumes:
+      - mnemoseed-data:/data
     healthcheck:
       test:
         [
@@ -52,8 +49,26 @@ services:
       timeout: 3s
       retries: 30
       start_period: 20s
+    restart: unless-stopped
 
+  # ---- developer/enterprise Postgres family (opt-in: --profile pg) ----
+  # vector  - pgvector/pgvector:pg16, hosts the hippocampus chunks table. The
+  #           pgvector driver creates the `vector` extension and its tables.
+  # pg      - postgres:16, hosts the cortex graph + meta on two databases
+  #           (mnemoseed_graph / mnemoseed_meta, created by ./docker/pg-init).
+  #           vector and pg are separate service entries even though the
+  #           pgvector image could host both.
+  # embed   - the daemon image running the dev OpenAI-compatible embeddings
+  #           stub (mnemoseed embed-sidecar). Deterministic synthetic dense
+  #           vectors so the stack boots with no external account or model
+  #           download. Swap in a real endpoint by overriding
+  #           STORAGE.EMBED.base_url and dropping this service.
+  #
+  # Compose-only facts: vector publishes host 55433, pg 55434 (55432 is
+  # reserved for the long-running T5 `mnemoseed-pg-it` container; keep it
+  # alive).
   vector:
+    profiles: ["pg"]
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: mnemoseed
@@ -71,6 +86,7 @@ services:
       start_period: 10s
 
   pg:
+    profiles: ["pg"]
     image: postgres:16
     environment:
       POSTGRES_USER: mnemoseed
@@ -89,6 +105,7 @@ services:
       start_period: 10s
 
   embed:
+    profiles: ["pg"]
     image: mnemoseed-core
     command: ["mnemoseed", "embed-sidecar", "--host", "0.0.0.0", "--port", "7789"]
     ports:
@@ -106,6 +123,8 @@ services:
       retries: 20
       start_period: 10s
 
+  # optional offline dream-model profile (profiles: ["ollama"]), not started
+  # by default; docker compose up --profile ollama
   ollama:
     profiles: ["ollama"]
     image: ollama/ollama:latest
@@ -121,6 +140,7 @@ services:
       start_period: 30s
 
 volumes:
+  mnemoseed-data:
   vector-data:
   pg-data:
   ollama-data:

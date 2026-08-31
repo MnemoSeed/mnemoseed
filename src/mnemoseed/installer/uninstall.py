@@ -184,6 +184,54 @@ def _stop_daemon(data_dir: Path) -> str:
     return "failed"
 
 
+def deregister(home: Path | None = None, data_dir: Path | None = None) -> list[HostRollback]:
+    """FR-6.1c unlink: unbind the mnemoseed entry from every detected host.
+
+    Each host config is restored from its install-time backup when present,
+    otherwise the mnemoseed entry is surgically removed. The daemon is never
+    stopped and data is never purged (unlike :func:`uninstall`); only the host
+    registrations are rolled back. No-op hosts are filtered out of the result.
+    """
+    home = resolve_home(home)
+    data_dir = resolve_data_dir(data_dir)
+    state = load_state(data_dir)
+    rolls: list[HostRollback] = []
+
+    for spec in host_specs(home):
+        state_record = state.registrations.get(spec.name)
+        config: Path = Path(state_record.config) if state_record and state_record.config else spec.config
+        if state_record is not None and state_record.backup:
+            backup = Path(state_record.backup)
+            if backup.exists():
+                config.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, config)
+                rolls.append(
+                    HostRollback(
+                        host=spec.name,
+                        outcome="restored",
+                        config=str(config.resolve()),
+                        detail=f"restored from backup {backup}",
+                    )
+                )
+                state.remove(spec.name)
+                continue
+        rollback = _remove_mnemoseed_entry(spec, config)
+        if rollback is not None:
+            rolls.append(rollback)
+            state.remove(spec.name)
+        else:
+            rolls.append(
+                HostRollback(
+                    host=spec.name,
+                    outcome="no-op",
+                    config=str(config.resolve()),
+                    detail="not registered",
+                )
+            )
+    save_state(data_dir, state)
+    return [roll for roll in rolls if roll.outcome != "no-op"]
+
+
 def uninstall(
     home: Path | None = None,
     data_dir: Path | None = None,

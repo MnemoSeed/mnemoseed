@@ -591,6 +591,25 @@ _V6_TOKEN_HASH_INDEX = CreateIndex(
     columns=("token_hash",),
 )
 
+# v7 (PRD-07 FR-7.3 console profile archive): the archived flag on profiles.
+# No data rewrite: NOT NULL DEFAULT 0 back-fills every existing row as active;
+# the console surface reads/writes it through the meta port.
+_V7_ADD_PROFILE_ARCHIVED = AddColumn(
+    store="meta",
+    table="profiles",
+    column=Column("archived", "INTEGER", not_null=True, default=0),
+)
+
+# v8 (E1-4 / D1 "settings DB primary"): reserved nullable ``scope`` column on
+# the versioned config table. Phase 0 reserves the column only — rows written
+# today carry NULL scope (settings are system-wide until per-scope settings
+# land); nullable + no default so every existing row back-fills NULL.
+_V8_ADD_CONFIG_SCOPE = AddColumn(
+    store="meta",
+    table="config",
+    column=Column("scope", "TEXT"),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -658,6 +677,19 @@ MIGRATIONS: tuple[Migration, ...] = (
             "nullable tokens.token_hash digest column + lookup index"
         ),
         ops=(_USERS_TABLE, _V6_ADD_TOKEN_HASH, _V6_TOKEN_HASH_INDEX),
+    ),
+    Migration(
+        version=7,
+        description=("console profile archive: NOT NULL DEFAULT 0 archived flag on profiles (PRD-07 FR-7.3)"),
+        ops=(_V7_ADD_PROFILE_ARCHIVED,),
+    ),
+    Migration(
+        version=8,
+        description=(
+            "settings DB primary (E1-4): reserved nullable scope column on config "
+            "(NULL today, system-wide until per-scope settings land)"
+        ),
+        ops=(_V8_ADD_CONFIG_SCOPE,),
     ),
 )
 

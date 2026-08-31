@@ -2,6 +2,8 @@
 
 > 对应设计文档：[01-记忆管线 Stage④⑤ⓟ](../design/01-记忆管线五阶段.md)
 > 里程碑：M2 · 预估 14 天 —— **差异化核心，记忆质量的护城河**
+>
+> D1 已交付（2026-08-15）：衰减引擎已上线（`mnemoseed/decay`——曲线模型、清扫器、强化器；FR-4.1/4.2/4.4 事件+趋势两侧，design/01 stage ⑤）。按类型 λ 默认值：fact 0.01（半衰期 ≈ 69 天）、preference 0.005（≈ 139 天）、episode + chunk 0.03（≈ 23 天）；注册表键 `decay.enabled` / `decay.sweep_interval_s` / `decay.min_apply_delta` / `decay.lambda_per_type` 热生效到下一次清扫（daemon 每个 tick 重读 live config）。清扫按 profile 维护续跑游标（崩溃安全追补），每个 profile 每次清扫写且仅写一条 `decay_sweep` 审计。检索命中强化已交付：命中即刷新 `last_reinforced` 并按钉死步长 0.1 回弹（`min(1.0, w + 0.1)`，与捕获侧一致）；低于候选池下限的命中只计数、永不回弹。consolidated 分片（design/03 §4）按 λ × 3 衰减。FR-4.1 干扰项 `λ_eff` **延后**：依赖存储层尚不暴露的相似邻居读端口，当前 `λ_eff` = `λ_base`（consolidated 乘数是唯一修饰项）。FR-4.2 的间隔效应冷却刻意不实现——文档未钉死机制，两个事件侧采用同一平坦步长语义。
 
 ## 1. 目标
 
@@ -16,8 +18,8 @@
 
 | ID | 需求 | 优先级 |
 |---|---|---|
-| FR-4.1 | 衰减计算：`w = base_confidence × exp(-λ_eff × days)`，`λ_eff = λ_base × (1 + κ × interference_load)`——相似邻居越多衰减越快（干扰理论 Wixted 2004，独特记忆天然抗衰）；λ_base 按记忆类型分层（fact 0.01 / preference 0.005 / episode 0.03） | P0 |
-| FR-4.2 | 强化回弹：检索使用事件触发 `last_reinforced=now`、`w` 回弹；**间隔效应冷却**——短时间窗内重复召回收益递减（Cepeda 2006），防集中刷权重 | P0 |
+| FR-4.1 | 衰减计算：`w = base_confidence × exp(-λ_eff × days)`，`λ_eff = λ_base × (1 + κ × interference_load)`——相似邻居越多衰减越快（干扰理论 Wixted 2004，独特记忆天然抗衰）；λ_base 按记忆类型分层（fact 0.01 / preference 0.005 / episode 0.03）——**D1 已交付**：κ 干扰项**延后**（当前 `λ_eff` = `λ_base`；依赖相似邻居读端口） | P0 |
+| FR-4.2 | 强化回弹：检索使用事件触发 `last_reinforced=now`、`w` 回弹；**间隔效应冷却**——短时间窗内重复召回收益递减（Cepeda 2006），防集中刷权重——**D1 已交付**：事件侧已上线——命中刷新 `last_reinforced` 并按钉死步长 0.1 回弹（与捕获侧一致）；低于候选池下限的命中只计数、永不回弹；间隔效应冷却未实现（无钉死机制） | P0 |
 | FR-4.3 | 软衰落阶梯：w<0.4 沉底（不进 top-k）→ w<0.1 冻结（不检索）→ w<0.05 且 90 天无访问归档（移出索引）；显式查询可复活（w→0.5） | P0 |
 | FR-4.4 | 永不衰减白名单：provenance、用户 pin、compliance/safety 约束 | P0 |
 | FR-4.5 | 写入侧冲突检测：同主同谓比对 → 相同强化 / **cues 可划界则情境作用域共存** / 可裁决则 invalidate 接管 / 不可裁决 flag_conflict（四分支，情境共存优先于裁决） | P0 |

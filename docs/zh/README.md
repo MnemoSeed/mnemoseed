@@ -31,8 +31,8 @@
 | [PRD-03 检索与 MCP 网关](prd/PRD-03-检索与MCP网关.md) | 混合检索 API、MCP 工具定义、上下文装配 |
 | [PRD-04 衰减调和与溯源](prd/PRD-04-衰减调和与溯源.md) | Decay 权重、Reconcile 冲突协议、Provenance schema |
 | [PRD-05 云端同步与 TEE](prd/PRD-05-云端同步与TEE.md) | E2EE 同步、Nitro Enclaves、计费套利网关 |
-| [PRD-06 宿主接入与安装](prd/PRD-06-宿主接入与安装.md) | daemon embedded 模式、installer、login/link 身份绑定、Claude Code plugin（hooks）、MCP 降级模式、uninstall |
-| [PRD-07 管理控制台](prd/PRD-07-管理控制台.md) | Console SPA：Dashboard/Profiles/记忆浏览/梦境审查/冲突收件箱（M1 只读核心，M2 补全） |
+| [PRD-06 宿主接入与安装](prd/PRD-06-宿主接入与安装.md) | daemon embedded 模式、installer、login/link 身份绑定、Claude Code plugin（hooks）、MCP 降级模式、uninstall、`mnemoseed onboard` 引导向导 |
+| [PRD-07 管理控制台](prd/PRD-07-管理控制台.md) | Console SPA：Dashboard/Profiles/记忆浏览/梦境审查/冲突 + 写操作/Settings/模型/Audit/Graph View（console-COMPLETE = 营销演示前置闸门） |
 | [PRD-08 M0 地基](prd/PRD-08-M0地基.md) | repo 骨架 + CI、四存储接口双驱动、capability 校验、schema 冻结 + 纯前向迁移（阻塞全部后续 PRD） |
 
 ## 理论文献备案

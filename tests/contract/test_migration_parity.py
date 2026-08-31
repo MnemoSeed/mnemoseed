@@ -130,13 +130,34 @@ def _expected_pg_kind(kind: str) -> str:
 
 
 def test_version_sequences_identical_on_both_dialects() -> None:
-    """The dialect-agnostic sequence IS the parity baseline (graph 1,2,5; meta 1,3,4,6)."""
-    assert latest_version() == 6
+    """The dialect-agnostic sequence IS the parity baseline (graph 1,2,5; meta 1,3,4,6,7,8)."""
+    assert latest_version() == 8
     graph_versions = sorted(m.version for m in MIGRATIONS if m.applies_to("graph"))
     meta_versions = sorted(m.version for m in MIGRATIONS if m.applies_to("meta"))
     assert graph_versions == [1, 2, 5]
-    assert meta_versions == [1, 3, 4, 6]
+    assert meta_versions == [1, 3, 4, 6, 7, 8]
     assert len(MIGRATIONS) == latest_version()
+
+
+def test_v8_config_scope_column_is_nullable_reserved_on_both_dialects() -> None:
+    """E1-4: migration v8 reserves a nullable ``scope`` column on the versioned
+    config table on both dialects (D1 "settings DB primary" decision); the
+    column carries no default so existing rows back-fill NULL."""
+    scope_ops = [op for m in MIGRATIONS if m.version == 8 for op in m.ops if isinstance(op, AddColumn)]
+    assert len(scope_ops) == 1
+    op = scope_ops[0]
+    assert op.store == "meta"
+    assert op.table == "config"
+    assert op.column.name == "scope"
+    assert op.column.kind == "TEXT"
+    assert op.column.not_null is False  # reserved: rows today carry NULL
+    assert op.column.default is None
+    sqlite_sql = render_sqlite(op)
+    pg_sql = render_postgres(op)
+    assert "ADD COLUMN scope TEXT" in sqlite_sql
+    assert "ADD COLUMN IF NOT EXISTS scope TEXT" in pg_sql
+    assert "NOT NULL" not in sqlite_sql
+    assert "NOT NULL" not in pg_sql
 
 
 def test_create_tables_render_zero_diff_from_shared_ops() -> None:
@@ -407,12 +428,13 @@ def test_sqlite_v1_to_head_forward_migration_preserves_data() -> None:
     assert current_schema_version(graph, "graph") == 1
     assert current_schema_version(meta, "meta") == 1
 
-    # forward migration: graph advances to 5, meta to 6 (v2/v5 are graph-only,
-    # v6 is meta-only: identity users table + hashed token column)
+    # forward migration: graph advances to 5, meta to 8 (v2/v5 are graph-only,
+    # v6 is meta-only: identity users table + hashed token column; v7 is the
+    # profile archive flag; v8 is the reserved nullable config.scope column)
     assert apply_migrations(graph, "graph") == 5
-    assert apply_migrations(meta, "meta") == 6
+    assert apply_migrations(meta, "meta") == 8
     assert current_schema_version(graph, "graph") == 5
-    assert current_schema_version(meta, "meta") == 6
+    assert current_schema_version(meta, "meta") == 8
 
     assert "pinned" in _column_names(graph, "nodes")
     assert "promotion_status" in _column_names(graph, "nodes")
@@ -429,12 +451,25 @@ def test_sqlite_v1_to_head_forward_migration_preserves_data() -> None:
     for table in ("node_versions", "edges"):
         assert graph_after[table] == graph_before[table], f"row drift in {table} across v1->v3"
     for table in _META_TABLES:
-        # v6 adds the nullable token_hash column; the legacy v1 token row is
-        # preserved byte-for-byte, projected without the new (empty) column.
+        # v6 adds the nullable token_hash column, v7 the profiles.archived
+        # flag and v8 the reserved nullable config.scope column; legacy rows
+        # are preserved byte-for-byte, projected without the new (empty/NULL)
+        # columns.
         rows = [r for r in meta_after[table]]
         if table == "tokens":
             rows = [{k: v for k, v in r.items() if k != "token_hash"} for r in rows]
+        if table == "profiles":
+            rows = [{k: v for k, v in r.items() if k != "archived"} for r in rows]
+        if table == "config":
+            rows = [{k: v for k, v in r.items() if k != "scope"} for r in rows]
         assert rows == meta_before[table], f"row drift in {table} across v1->head"
+
+    # v8: the reserved scope column exists on config and back-fills NULL on the
+    # legacy row (no default, never a value).
+    config_columns = _column_names(meta, "config")
+    assert "scope" in config_columns
+    legacy_config = dict(meta.execute("SELECT key, value, scope FROM config WHERE key = 'theme'").fetchone())
+    assert legacy_config["scope"] is None
 
     # v3 supersedes the legacy score_pool: the new per-profile table exists,
     # empty (no data migration), and the old singleton row is untouched.
@@ -465,11 +500,11 @@ def test_sqlite_v1_to_head_forward_migration_preserves_data() -> None:
     user_row = dict(meta.execute("SELECT token_hash FROM tokens WHERE token_id = 'tok-1'").fetchone())
     assert user_row["token_hash"] is None  # pre-v6 tokens hold no hash (blessed empty)
 
-    # tracker advanced one step per graph/meta delta (v2/v5 graph, v4/v6 meta)
+    # tracker advanced one step per graph/meta delta (v2/v5 graph, v4/v6/v8 meta)
     graph_versions = [int(r[0]) for r in graph.execute(f"SELECT version FROM {SCHEMA_VERSION_TABLE}")]
     meta_versions = [int(r[0]) for r in meta.execute(f"SELECT version FROM {SCHEMA_VERSION_TABLE}")]
     assert sorted(graph_versions) == [1, 2, 5]
-    assert sorted(meta_versions) == [1, 3, 4, 6]
+    assert sorted(meta_versions) == [1, 3, 4, 6, 7, 8]
 
 
 def _project_without_deltas(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -532,9 +567,9 @@ def test_postgres_v1_to_head_forward_migration_preserves_data() -> None:
         before_nodes = _pg_snapshot(conn, graph_schema, "nodes")
 
         assert apply_postgres_migrations(conn, "graph", schema=graph_schema) == 5
-        assert apply_postgres_migrations(conn, "meta", schema=meta_schema) == 6
+        assert apply_postgres_migrations(conn, "meta", schema=meta_schema) == 8
         assert current_postgres_schema_version(conn, "graph", schema=graph_schema) == 5
-        assert current_postgres_schema_version(conn, "meta", schema=meta_schema) == 6
+        assert current_postgres_schema_version(conn, "meta", schema=meta_schema) == 8
         pool_columns = [c["column_name"] for c in _pg_columns(conn, meta_schema, "profile_score_pool")]
         assert pool_columns == [
             "profile_id",
@@ -552,6 +587,12 @@ def test_postgres_v1_to_head_forward_migration_preserves_data() -> None:
         assert user_columns == ["user_id", "username", "password_hash", "role", "created_at"]
         token_hash_columns = [c["column_name"] for c in _pg_columns(conn, meta_schema, "tokens")]
         assert "token_hash" in token_hash_columns
+        profile_columns = [c["column_name"] for c in _pg_columns(conn, meta_schema, "profiles")]
+        assert "archived" in profile_columns
+        config_columns = [c["column_name"] for c in _pg_columns(conn, meta_schema, "config")]
+        assert "scope" in config_columns  # v8: reserved nullable scope column
+        scope_col = next(c for c in _pg_columns(conn, meta_schema, "config") if c["column_name"] == "scope")
+        assert scope_col["is_nullable"] == "YES"
 
         columns = [c["column_name"] for c in _pg_columns(conn, graph_schema, "nodes")]
         assert "pinned" in columns

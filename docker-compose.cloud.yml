@@ -1,0 +1,49 @@
+# MnemoSeed cloud/VPS deployment (issue #5, design/10). A SINGLE daemon
+# container backed by a persistent volume, ready to sit behind a TLS-terminating
+# reverse proxy (Caddy / nginx / Cloudflare Tunnel).
+#
+# Security posture (design/10 section 3, must-read):
+#   - The daemon is plain HTTP; NEVER publish 7788 raw to the public internet.
+#     This file binds the published port to loopback by default -- let the
+#     reverse proxy reach the daemon on the compose network at `core:7788`.
+#   - Remote console/memory traffic authenticates with a profile token, and the
+#     /console static mount additionally uses MNEMOSEED_CONSOLE_ADMIN_TOKEN
+#     (fail-closed: no token configured, remote requests rejected).
+#
+# Usage on the VPS:
+#   docker compose -f docker-compose.cloud.yml up -d
+#   (optionally with MNEMOSEED_CONSOLE_ADMIN_TOKEN in the environment)
+
+name: mnemoseed-cloud
+
+services:
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mnemoseed-core
+    command: ["mnemoseed", "up", "--host", "0.0.0.0", "--port", "7788"]
+    ports:
+      - "127.0.0.1:7788:7788"
+    environment:
+      MNEMOSEED_HOME: /data
+      # Passed through from the host; leave unset for the fail-closed default.
+      MNEMOSEED_CONSOLE_ADMIN_TOKEN: ${MNEMOSEED_CONSOLE_ADMIN_TOKEN:-}
+    volumes:
+      - mnemoseed-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:7788/healthz', timeout=2).status == 200 else sys.exit(1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  mnemoseed-data:

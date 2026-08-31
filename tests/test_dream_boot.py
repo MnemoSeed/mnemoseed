@@ -47,7 +47,13 @@ from mnemoseed.llm.drivers.openai_compatible import OpenAICompatibleLLM
 from mnemoseed.schema.stamp import ChunkStamp, CognitiveTier, Cues, Provenance
 from mnemoseed.storage.drivers import lancedb_embedded, sqlite_graph, sqlite_meta
 from mnemoseed.storage.drivers.synthetic_embedder import SyntheticEmbedder
-from mnemoseed.storage.ports import AuditFilter, NodeFilter, Page, TurnRange
+from mnemoseed.storage.ports import (
+    AuditFilter,
+    DreamRunFilter,
+    NodeFilter,
+    Page,
+    TurnRange,
+)
 from mnemoseed.storage.registry import (
     EMBED_DRIVERS,
     GRAPH_DRIVERS,
@@ -204,9 +210,10 @@ def test_boot_crash_after_snapshot_reflects_merges_purges_and_preserves_overflow
         assert _BootCountingStub.count == 1
         assert trigger.status(_PROFILE).state is DreamState.IDLE
         assert trigger.status(_PROFILE).current_range is None
-        # the covered scope was purged; the overflow chunk survived
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None
+        # the covered scope was marked consolidated; the overflow chunk survived
+        assert client.app.state.stores.vector.get_chunk("seed-1").consolidated is True
         assert client.app.state.stores.vector.get_chunk("seed-2") is not None
+        assert client.app.state.stores.vector.get_chunk("seed-2").consolidated is False
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
 
     rows = _graph_rows(tmp_path / "cortex.db")
@@ -262,7 +269,7 @@ def test_boot_crash_after_reflect_resumes_at_merge_never_reruns_reflect(
         trigger = client.app.state.dream
         assert _BootCountingStub.count == 0  # reflect NEVER re-ran across the restart
         assert trigger.status(_PROFILE).state is DreamState.IDLE
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None  # purged exactly once
+        assert client.app.state.stores.vector.get_chunk("seed-1").consolidated is True  # marked once
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
 
     rows = _graph_rows(tmp_path / "cortex.db")
@@ -330,7 +337,9 @@ def test_boot_crash_between_merge_commit_and_journal_termination_reinforces_once
         trigger = client.app.state.dream
         assert _BootCountingStub.count == 0  # merge-boundary, reflect not re-run
         assert trigger.status(_PROFILE).state is DreamState.IDLE
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None  # safe-clear fired once
+        assert (
+            client.app.state.stores.vector.get_chunk("seed-1").consolidated is True
+        )  # safe-clear fired once
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
 
     rows = _graph_rows(tmp_path / "cortex.db")
@@ -559,3 +568,80 @@ def test_boot_and_route_resolution_make_zero_network_calls(
         assert isinstance(llm, OpenAICompatibleLLM)
         assert llm.base_url == "http://127.0.0.1:9"
     assert calls == []  # zero HTTP calls across the whole boot + resolve path
+
+
+# ---------------------------------------------------------------- E1-2 (F2) hot-apply
+# A routing change through the single config writer must reach the NEXT dream
+# run without a daemon restart: the per-run resolver re-checks the configwrite
+# generation, rebuilds the changed role, and re-audits the route.
+
+
+def _reflect_outcome(client: TestClient, turn_range: tuple[int, int]) -> Any:
+    """Capture + reflect one snapshot through the running daemon's pipeline."""
+    pipeline = client.app.state.dream_pipeline
+    result = pipeline._snapshotter.request(_PROFILE, TurnRange(*turn_range))
+    assert result.ok
+    assert result.snapshot is not None
+    return pipeline._reflector.reflect(result.snapshot)
+
+
+def test_config_set_hot_applies_to_next_dream_run_without_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: after a configwrite model change the SAME running daemon materializes
+    the new deep_reflection route on the next dream run and re-audits it."""
+    store, _embed = _seed_into(tmp_path / "chunks.lance", ("seed-1", "I prefer dark mode", 0, 1))
+    asyncio.run(store.close())
+    _shim_config(tmp_path, monkeypatch)
+
+    with TestClient(create_app()) as client:
+        meta = client.app.state.stores.meta
+        # first dream run uses the boot-time route (stub)
+        assert _reflect_outcome(client, (0, 1)).ok
+
+        # hot-apply a model change through the single config writer
+        set_result = client.app.state.configwrite.set(
+            "dream.llm.deep_reflection.model", "stub2", actor="console"
+        )
+        assert set_result["ok"] is True
+
+        # the NEXT run on the same process resolves the new route
+        assert _reflect_outcome(client, (2, 3)).ok
+
+        configured = meta.audit_query(AuditFilter(action="llm_role_configured"), Page(limit=10)).items
+        models = [entry.detail["model"] for entry in configured]
+        assert "stub" in models
+        assert "stub2" in models  # the rebuild re-audited with the new model
+
+        # F2: the model pinned at each run start is recorded on dream_runs —
+        # the boot route (stub), then the hot-applied route (stub2).
+        runs = meta.list_dream_runs(DreamRunFilter(), Page(limit=10)).items
+        assert [run.model_id for run in runs] == ["stub2", "stub"]
+
+
+def test_config_rollback_hot_applies_to_next_dream_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: a rollback also bumps the generation, so the NEXT dream run restores
+    the previous route without a restart."""
+    store, _embed = _seed_into(tmp_path / "chunks.lance", ("seed-1", "I prefer dark mode", 0, 1))
+    asyncio.run(store.close())
+    _shim_config(tmp_path, monkeypatch)
+
+    with TestClient(create_app()) as client:
+        meta = client.app.state.stores.meta
+        client.app.state.configwrite.set("dream.llm.deep_reflection.model", "stub2", actor="console")
+        # rollback targets the boot-recorded version (value "stub"): restoring
+        # TO that version is what undoes the set, per the append-only semantics.
+        model_versions = [
+            entry
+            for entry in client.app.state.configwrite.versions()
+            if entry["key"] == "dream.llm.deep_reflection.model"
+        ]
+        assert model_versions[0]["value"] == "stub"
+        rolled = client.app.state.configwrite.rollback(model_versions[0]["version_id"], actor="console")
+        assert rolled["ok"] is True
+
+        assert _reflect_outcome(client, (0, 1)).ok
+        configured = meta.audit_query(AuditFilter(action="llm_role_configured"), Page(limit=10)).items
+        assert configured[-1].detail["model"] == "stub"  # rollback restored the route

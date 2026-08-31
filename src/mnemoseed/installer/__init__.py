@@ -6,6 +6,10 @@ written MCP entry structure is ready but the identity env keys are only emitted
 once a profile_id and token are supplied.
 """
 
+# Issue #6: cross-platform daemon autostart. Imported first so the ordering
+# never matters for cycles (startup pulls in proc/state, which must not depend
+# on __init__ having finished).
+from mnemoseed.installer import startup
 from mnemoseed.installer.codexfiles import plan_codex_files, trust_guidance_lines
 from mnemoseed.installer.cursorfiles import adapter_templates_dir, artifact_texts, plan_cursor_project
 from mnemoseed.installer.doctor import Check, DoctorReport, run_doctor
@@ -25,6 +29,7 @@ from mnemoseed.installer.registration import (
     install,
     plan_registrations,
 )
+from mnemoseed.installer.startup import StartupStatus
 from mnemoseed.installer.state import PIDFILE_NAME, State
 from mnemoseed.installer.uninstall import HostRollback, UninstallReport, purge_plan, uninstall
 
@@ -39,6 +44,7 @@ __all__ = [
     "InstallReport",
     "PIDFILE_NAME",
     "RegistrationPlan",
+    "StartupStatus",
     "State",
     "UninstallReport",
     "adapter_templates_dir",
@@ -53,6 +59,7 @@ __all__ = [
     "plan_registrations",
     "purge_plan",
     "run_doctor",
+    "startup",
     "trust_guidance_lines",
     "uninstall",
 ]

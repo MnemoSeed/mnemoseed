@@ -149,13 +149,22 @@ body {
 }
 
 .tile {
+  /* grid items clamp to the track instead of blowing the row out on long
+     unbroken values (model ids, env-var chains) */
+  min-width: 0;
   background: var(--bg-inset);
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   padding: 0.6rem 0.7rem;
 }
 
-.tile .tile-value { font-size: 1.3rem; font-weight: 600; }
+.tile .tile-value {
+  font-size: 1.3rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
 .tile .tile-value.ok { color: var(--ok); }
 .tile .tile-value.warn { color: var(--warn); }
 .tile .tile-value.err { color: var(--err); }
@@ -378,6 +387,21 @@ tr:last-child td { border-bottom: none; }
   overflow-wrap: anywhere;
 }
 
+.ok-inline {
+  background: rgba(63, 185, 80, 0.12);
+  border: 1px solid rgba(63, 185, 80, 0.35);
+  color: var(--ok);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+/* form-level feedback line (LLM route forms); keeps the probe/save result
+   visible under the control row without re-flowing the form */
+.feedback { display: block; min-height: 1.4rem; }
+
 .pagination { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.6rem; font-size: 0.83rem; color: var(--text-dim); }
 
 .updated-note { color: var(--text-faint); font-size: 0.78rem; }
@@ -413,3 +437,45 @@ tr:last-child td { border-bottom: none; }
 .auth-panel { max-width: 460px; margin: 2rem auto; }
 .auth-panel .toolbar { justify-content: flex-end; }
 .auth-panel .error-inline { margin-bottom: 0.6rem; }
+
+/* Models & Routing (models-routing-ux.md §11): provider picker cards + wizard steps */
+.wizard-provider-card {
+  display: block;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+  cursor: pointer;
+}
+.wizard-provider-card.selected { border-color: var(--accent); }
+.wizard-provider-card.muted { opacity: 0.6; cursor: default; }
+.wizard-provider-card.muted:hover { border-color: var(--border-soft); }
+.wizard-provider-card input { accent-color: var(--accent); margin-right: 0.4rem; }
+.wizard-provider-title { display: block; font-weight: 600; margin-bottom: 0.15rem; }
+.wizard-step-active { font-weight: 600; color: var(--accent); }
+.key-teaching { margin-top: 0.45rem; }
+.wizard-share { display: block; margin: 0.8rem 0; }
+.wizard-share input { accent-color: var(--accent); margin-right: 0.4rem; }
+details.key-teaching > summary { cursor: pointer; color: var(--text-dim); }
+
+
+/* ---------------------------------------------------------------- graph view (FR-7.8) */
+
+.graph-shell { display: flex; flex-direction: column; gap: 0.55rem; min-height: 0; }
+.graph-toolbar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.graph-title { font-weight: 600; }
+.graph-count { color: var(--text-faint); font-size: 0.82rem; flex: 1; }
+.graph-filters { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; font-size: 0.85rem; }
+.graph-filter-label { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-dim); }
+.graph-filter-label select { background: var(--bg-inset); border: 1px solid var(--border-soft); color: var(--text); border-radius: 8px; padding: 0.3rem 0.5rem; font-size: 0.82rem; }
+.graph-filters .check-row { display: inline-flex; align-items: center; gap: 0.25rem; color: var(--text-dim); }
+.graph-filters .check-row input { accent-color: var(--accent); }
+.graph-notice { border: 1px solid #a16207; background: rgba(161, 98, 7, 0.12); color: #fbbf24; border-radius: 8px; padding: 0.45rem 0.65rem; font-size: 0.82rem; }
+.graph-layout { display: flex; gap: 0.7rem; min-height: 0; flex: 1; }
+.graph-stage { flex: 1; min-width: 0; height: calc(100vh - 210px); min-height: 420px; border: 1px solid var(--border-soft); border-radius: 10px; background: #0a0e14; overflow: hidden; cursor: grab; }
+.graph-detail { width: 300px; flex: 0 0 300px; background: var(--bg-inset); border: 1px solid var(--border-soft); border-radius: 10px; padding: 0.7rem; overflow-y: auto; max-height: calc(100vh - 210px); }
+.graph-detail h3 { margin-top: 0; font-size: 0.9rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.graph-detail-statement { font-weight: 600; margin: 0.2rem 0 0.5rem; overflow-wrap: anywhere; }
+.graph-legend { display: flex; gap: 0.6rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--text-dim); }
+.legend-chip { display: inline-flex; align-items: center; gap: 0.3rem; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.graph-perf-hud { font-family: monospace; font-size: 0.85rem; color: var(--accent); }

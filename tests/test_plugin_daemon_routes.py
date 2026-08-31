@@ -226,10 +226,9 @@ def test_dream_once_consumes_one_pending_manual_and_runs_chain(tmp_path, monkeyp
         assert body["last_event"] is not None
         assert body["last_event"]["kind"] == "forced_consolidation"
         assert isinstance(body["last_event"]["fired_at"], float)
-        assert (
-            client.app.state.stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10)).total
-            == 0
-        )  # the consumed dream safe-cleared its source chunks
+        chunks = client.app.state.stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10))
+        assert chunks.total == len(_DURABLE)  # the consumed dream marked its source chunks
+        assert all(chunk.consolidated for chunk in chunks.items)  # retained as evidence scene
         status = client.post("/memory/dream_status", json={"profile_id": _PROFILE})
         assert status.status_code == 200
         assert isinstance(status.json()["last_event"]["fired_at"], float)

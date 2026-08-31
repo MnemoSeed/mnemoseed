@@ -401,7 +401,7 @@ async def test_forget_this_node_tombstone_keeps_history_on_both_surfaces(
 ) -> None:
     """forget_this on a node tombstones it: recall stops surfacing it, while
     audit/timeline keep the full version history reachable from either client
-    surface (design/03 2.4 GDPR)."""
+    surface (design/03 storage-layer erasure)."""
     statement = "prefers explicit interface types in python"
     profile = "p-node"
     node_id = "node-e2e-tombstone"

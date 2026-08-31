@@ -30,6 +30,10 @@ dependencies = [
     "mcp>=2.0,<3",
     # local owner passwords are argon2id-hashed at rest (issue #14, PRD-06 FR-6.1e)
     "argon2-cffi>=23.1",
+    # OS keychain custody (Task A): Windows Credential Manager / macOS Keychain
+    # / Linux libsecret. Cross-platform, probe-detected: the chain falls back
+    # to the restricted-file backend when no keyring answers.
+    "keyring>=25",
 ]
 
 [dependency-groups]

@@ -2,6 +2,8 @@
 
 > Design doc: [01-memory-pipeline Stages ④⑤ⓟ](../design/01-memory-pipeline.md)
 > Milestone: M2 · Estimate 14 days — **differentiation core, moat of memory quality**
+>
+> D1 shipped (2026-08-15): the decay engine is live (`mnemoseed/decay` — curve model, sweeper, reinforcer; FR-4.1/4.2/4.4 event+trend sides, design/01 stage ⑤). Per-type λ defaults: fact 0.01 (half-life ≈ 69d), preference 0.005 (≈ 139d), episode + chunk 0.03 (≈ 23d); registry keys `decay.enabled` / `decay.sweep_interval_s` / `decay.min_apply_delta` / `decay.lambda_per_type` hot-apply to the next sweep (the daemon re-reads the live config each tick). The sweep keeps a per-profile resume cursor (crash-safe catch-up) and writes exactly one `decay_sweep` audit entry per profile pass. Retrieval-hit reinforcement ships: a hit refreshes `last_reinforced` and rebounds by the pinned step 0.1 (`min(1.0, w + 0.1)`, capture-side consistent); hits below the candidate floor count usage but never rebound. Consolidated chunks (design/03 §4) decay at λ × 3. The FR-4.1 interference term `λ_eff` is **deferred**: it needs a similar-neighbor read port the storage layer does not expose yet, so `λ_eff` = `λ_base` today (the consolidated multiplier is the only modifier). The FR-4.2 spacing-effect cooldown is deliberately not implemented — the docs pin no mechanism, and both event sides apply the same flat-step semantics.
 
 ## 1. Goals
 
@@ -16,8 +18,8 @@ Keep the memory base "still trustworthy after a year of use": unreinforced memor
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-4.1 | Decay calculation: `w = base_confidence × exp(-λ_eff × days)`, `λ_eff = λ_base × (1 + κ × interference_load)` — the more similar neighbors, the faster the decay (interference theory, Wixted 2004; distinctive memories are naturally decay-resistant); λ_base is layered by memory type (fact 0.01 / preference 0.005 / episode 0.03) | P0 |
-| FR-4.2 | Reinforcement bounce-back: retrieval usage events trigger `last_reinforced=now` and `w` bounce-back; **spacing-effect cooldown** — repeated recalls within a short window yield diminishing returns (Cepeda 2006), preventing concentrated weight farming | P0 |
+| FR-4.1 | Decay calculation: `w = base_confidence × exp(-λ_eff × days)`, `λ_eff = λ_base × (1 + κ × interference_load)` — the more similar neighbors, the faster the decay (interference theory, Wixted 2004; distinctive memories are naturally decay-resistant); λ_base is layered by memory type (fact 0.01 / preference 0.005 / episode 0.03) — **D1 shipped**: the κ interference term is **deferred** (`λ_eff` = `λ_base` today; needs a similar-neighbor read port) | P0 |
+| FR-4.2 | Reinforcement bounce-back: retrieval usage events trigger `last_reinforced=now` and `w` bounce-back; **spacing-effect cooldown** — repeated recalls within a short window yield diminishing returns (Cepeda 2006), preventing concentrated weight farming — **D1 shipped**: the event side is live — a hit refreshes `last_reinforced` and rebounds by the pinned step 0.1 (capture-side consistent); hits below the candidate floor count usage but never rebound; the spacing-effect cooldown is not implemented (no pinned mechanism) | P0 |
 | FR-4.3 | Soft-decay ladder: w<0.4 sinks (excluded from top-k) → w<0.1 freezes (not retrievable) → w<0.05 with 90 days of no access is archived (moved out of the index); explicit queries can resurrect it (w→0.5) | P0 |
 | FR-4.4 | Never-decay whitelist: provenance, user pins, compliance/safety constraints | P0 |
 | FR-4.5 | Write-side conflict detection: compare same-subject/same-predicate → identical entries reinforce / **if cues can delineate, coexist under situational scopes** / if adjudicable, invalidate takes over / if not adjudicable, flag_conflict (four branches; situational coexistence takes priority over adjudication) | P0 |

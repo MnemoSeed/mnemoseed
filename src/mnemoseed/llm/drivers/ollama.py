@@ -1,10 +1,10 @@
-"""Ollama (offline track) chat driver (PRD-02 T6; FR-2.7).
+"""Ollama chat driver (PRD-02 T6; FR-2.7).
 
-local_track uses Ollama's native ``/api/chat`` endpoint: no API key, no auth
-header, ``stream=false`` for a single response. The default model is a <=14B
-quantized tag from config (design/02 §6 / FR-2.7); the PRD's 70B default line
-is intentionally not used here — that spec conflict is resolved toward the 14B
-default and flagged in the T6 report.
+A role routed to ``driver = "ollama"`` talks Ollama's native ``/api/chat``
+endpoint: no API key, no auth header, ``stream=false`` for a single response.
+The default model is a <=14B quantized tag from config (design/02 §6 / FR-2.7);
+the PRD's 70B default line is intentionally not used here — that spec conflict
+is resolved toward the 14B default and flagged in the T6 report.
 """
 
 from __future__ import annotations

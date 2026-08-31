@@ -244,8 +244,9 @@ def _unreachable_role_config_toml(tmp_path: Path) -> Path:
 def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -> None:
     """With [dream] auto_trigger = true, a fired pool event drives the FULL
     dream chain on the /session/end drain (off the /ingest heat path):
-    snapshot -> reflect -> merge -> safe-clear -> IDLE, with the journal
-    terminated in one merge-done file and the source chunks purged."""
+    snapshot -> reflect -> merge -> safe-clear-as-mark -> IDLE, with the
+    journal terminated in one merge-done file and the source chunks marked
+    consolidated (retained as the evidence scene)."""
     monkeypatch.delenv("STORAGE_MODE", raising=False)
     monkeypatch.setattr("mnemoseed.config.CONFIG_PATH", _auto_trigger_config_toml(tmp_path))
     monkeypatch.setattr("mnemoseed.dream.snapshot.CONFIG_DIR", tmp_path)
@@ -265,9 +266,11 @@ def test_serving_boot_honours_dream_auto_trigger_config(tmp_path, monkeypatch) -
         # chain completed inline off the /ingest path, so the dream ended
         assert status.state is DreamState.IDLE
         assert status.current_range is None
-        # one snapshot journal entry survived (merge-done); source chunks purged
+        # one snapshot journal entry survived (merge-done); source chunks marked
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
-        assert stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10)).total == 0
+        chunks = stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10))
+        assert chunks.total == len(_DURABLE_TEXTS)  # consumed chunks retained, never deleted
+        assert all(chunk.consolidated for chunk in chunks.items)
     # the reflected durable facts landed in the main graph (read back through a
     # test-thread connection once the app's portal-thread stores closed)
     assert _graph_nodes(tmp_path / "cortex.db") >= 1
@@ -363,8 +366,13 @@ def test_serving_boot_recovery_resumes_preseeded_snapshot(tmp_path, monkeypatch)
         # dream: safe-clear fired exactly once with the snapshot's scope
         assert trigger.status(_PROFILE).state is DreamState.IDLE
         assert trigger.status(_PROFILE).current_range is None
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None
+        # the daemon's own store never held the seed chunk (it was seeded into a
+        # separate lance file); the safe-clear signal is the terminated journal.
+        # The separately-seeded source chunk stays RETAINED (mark semantics).
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
+    seed_read = lancedb_embedded.LanceDbEmbeddedStore(uri=tmp_path / "seed.lance", dimensions=64)
+    assert seed_read.get_chunk("seed-1") is not None  # never deleted, retained as evidence scene
+    asyncio.run(seed_read.close())
     # the seed's dream_runs row was registered exactly once (recovery never
     # re-registers); read back through a fresh connection after the app closes
     read_meta = sqlite_meta.SqliteMetaDriver(path=tmp_path / "meta.db")
@@ -440,7 +448,7 @@ def test_serving_boot_recovers_reflect_done_snapshot_at_merge(tmp_path, monkeypa
         # the T4 Merger seam calls this on completion -> safe-clear fires once
         trigger.on_merge_committed(_PROFILE)
         assert trigger.status(_PROFILE).state is DreamState.IDLE
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None
+        assert client.app.state.stores.vector.get_chunk("seed-1").consolidated is True
     # terminated: a later boot finds the journal merge-complete, nothing recovers
     with TestClient(create_app()) as client:
         assert client.app.state.dream.status(_PROFILE).state is DreamState.IDLE
@@ -497,7 +505,7 @@ def test_serving_boot_merge_boundary_recovery_merges_once_no_double_write(tmp_pa
         trigger = client.app.state.dream
         assert trigger.status(_PROFILE).state is DreamState.IDLE
         assert trigger.status(_PROFILE).current_range is None
-        assert client.app.state.stores.vector.get_chunk("seed-1") is None
+        assert client.app.state.stores.vector.get_chunk("seed-1").consolidated is True
     assert _graph_nodes(tmp_path / "cortex.db") == 1
 
     with TestClient(create_app()) as client:
@@ -534,7 +542,9 @@ def test_serving_dream_once_drives_full_manual_chain(tmp_path, monkeypatch) -> N
         status = trigger.status(_PROFILE)
         assert status.state is DreamState.IDLE
         assert status.pending_manual == 0
-        assert stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10)).total == 0
+        chunks = stores.vector.list_chunks(ChunkFilter(profile_id=_PROFILE), Page(limit=10))
+        assert chunks.total == len(_DURABLE_TEXTS)  # consumed chunks were MARKED, never deleted
+        assert all(chunk.consolidated for chunk in chunks.items)
         assert len(list((tmp_path / "dreams").glob("*.json"))) == 1
     # the reflected durable facts landed in the main graph (fresh connection)
     assert _graph_nodes(tmp_path / "cortex.db") >= 1
