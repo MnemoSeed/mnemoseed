@@ -71,6 +71,8 @@ One-time tips also welcome via Polar (below) or Buy Me a Coffee.
 
 [![Thanks.dev](https://img.shields.io/badge/Support-Thanks.dev-%23FF6B35)](https://thanks.dev/github/MnemoSeed/mnemoseed)
 
+General contact: [hello@mnemoseed.my](mailto:hello@mnemoseed.my).
+
 ## License
 
-Dual-licensed: **AGPL-3.0** (free, including commercial use, as long as derivatives stay open) or a **commercial license** for proprietary/closed-source integration. Contact `license@mnemoseed.com`.
+Dual-licensed: **AGPL-3.0** (free, including commercial use, as long as derivatives stay open) or a **commercial license** for proprietary/closed-source integration. Contact `hello@mnemoseed.my`.
